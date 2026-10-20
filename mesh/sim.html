@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Rotor Ear Mesh · simulator</title>
+<link rel="stylesheet" href="mesh.css">
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Rotor<span>Ear</span> <em>Sim</em></h1><div class="tag" id="roomTag"></div></header>
+  <p class="lead">Spawns virtual listening nodes in this page. Each one hears a synthetic drone at its own distance (loudness ∝ 1/distance²) plus background noise, runs the real detector, and reports to the room's map like a phone would.</p>
+  <div class="card">
+    <div class="simrow"><span>nodes</span><select id="sN"><option>3</option><option selected>4</option></select>
+      <span>path</span><select id="sPath"><option value="circle">circle</option><option value="eight">figure-8</option><option value="line">fly-by line</option><option value="hover">hover</option></select></div>
+    <div class="simrow"><span>speed</span><input type="range" id="sSpeed" min="0.2" max="3" step="0.1" value="1"><span>height</span><input type="range" id="sAlt" min="0" max="10" step="0.5" value="1.5"><b id="sAltV">1.5 m</b></div>
+  </div>
+  <button class="big" id="sStart">▶ Start simulation</button>
+  <a class="btn block" id="sMap" target="_blank">🗺️ Open the map for this room</a>
+  <div class="status" id="sStatus"></div>
+  <div id="sNodes" class="nodes"></div>
+  <p class="note">Node positions: A (0,0) · B (6,0) · C (6,6) · D (0,6) metres — the map's default square.</p>
+</div>
+<style>select{background:#0a0f1b;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px}</style>
+<script src="peerjs.min.js"></script>
+<script src="detector.js"></script>
+<script src="mesh.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const h = new URLSearchParams(location.hash.slice(1));
+  const room = (h.get('room') || 'demo').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+  if (h.get('n')) $('sN').value = h.get('n');
+  if (h.get('path')) $('sPath').value = h.get('path');
+  $('roomTag').textContent = 'room ' + room;
+  $('sMap').href = './#room=' + room + '&role=map';
+  $('sAlt').oninput = () => $('sAltV').textContent = $('sAlt').value + ' m';
+  const POS = [[0, 0], [6, 0], [6, 6], [0, 6]];
+  let running = false, t0 = 0, simT = 0, lastT = 0;
+  const S = window.__sim = { drone: null, nodes: [] };
+  function pathAt(t, kind) {
+    const w = 2 * Math.PI / 40;
+    if (kind === 'circle') return [3 + 4 * Math.cos(w * t), 3 + 4 * Math.sin(w * t)];
+    if (kind === 'eight') return [3 + 5 * Math.sin(w * t), 3 + 3 * Math.sin(2 * w * t)];
+    if (kind === 'line') { const u = (t / 20) % 2, v = u < 1 ? u : 2 - u; return [-3 + 12 * v, 2]; }
+    return [4.5, 1.5];
+  }
+  $('sStart').onclick = () => {
+    if (running) return location.reload();
+    running = true; $('sStart').textContent = '⏹ Stop'; $('sStart').classList.add('on');
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const drone = RotorEar.syntheticDrone(ctx, 205 + Math.random() * 20);
+    const N = +$('sN').value;
+    const nodes = POS.slice(0, N).map((p, i) => {
+      const an = RotorEar.makeAnalyser(ctx), det = new RotorEar.RotorDetector(an);
+      const g = ctx.createGain(); g.gain.value = 0; drone.connect(g); g.connect(an);
+      RotorEar.ambientNoise(ctx, 0.01).connect(an);
+      const key = 'sim' + i + Math.random().toString(36).slice(2, 5);
+      const n = { i, p, an, det, g, key, status: '' };
+      n.link = new window.RotorMesh.NodeLink(room, key, (s) => { n.status = s; }, null);
+      return n;
+    });
+    S.nodes = nodes;
+    lastT = performance.now();
+    setInterval(() => {
+      const now = performance.now(); simT += (now - lastT) / 1000 * +$('sSpeed').value; lastT = now;
+      const d = pathAt(simT, $('sPath').value), alt = +$('sAlt').value; S.drone = d;
+      nodes.forEach(n => {
+        const r = Math.hypot(d[0] - n.p[0], d[1] - n.p[1], alt);
+        n.r = r; n.g.gain.setTargetAtTime(0.6 / Math.max(1, r), ctx.currentTime, 0.05);
+        n.det.step(now);
+      });
+    }, 50);
+    setInterval(() => {
+      nodes.forEach(n => { const o = n.det.out; n.link.send({ t: 's', k: n.key, n: 'sim ' + 'ABCD'[n.i], c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state, p: n.p }); });
+      if (S.drone) nodes[0].link.send({ t: 'truth', x: +S.drone[0].toFixed(2), y: +S.drone[1].toFixed(2) });
+      $('sStatus').textContent = 'virtual drone at (' + S.drone.map(v => v.toFixed(1)).join(', ') + ') m';
+      $('sNodes').innerHTML = nodes.map(n => `<div class="nrow"><div class="pin" style="background:#4cc9ff">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m<small>${n.status}</small><div class="meter"><i style="width:${n.det.out.conf}%"></i></div></div><div class="num">${n.det.out.f0 ? Math.round(n.det.out.f0) : '—'} Hz</div><div class="num">${n.det.out.e > -100 ? Math.round(n.det.out.e) : '—'} dB</div></div>`).join('');
+    }, 125);
+  };
+})();
+</script>
+</body>
+</html>
