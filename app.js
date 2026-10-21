@@ -1,39 +1,23 @@
-// Rotor Ear: passive acoustic drone detector. Listens only; never transmits.
+// Rotor Ear: passive acoustic drone detector + sound fingerprint. Listens only; never transmits.
+// Detection and classification live in detector.js (shared with mesh/).
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const FMAX_VIEW = 8000;          // spectrogram range
-  const F0_MIN = 90, F0_MAX = 600; // blade-pass search range
-  const NH = 10;                   // harmonics checked per candidate
-  const HIT_DB = 9;                // a harmonic "counts" if this far above the local floor
-  const HIST_SEC = 1.2;            // stability window
-
-  let ctx, analyser, inputBus, micStream, micSrc, testNodes = null, fileSrc = null;
-  let spk, ana; // routing gains for test/file
-  let bins, db, floorDb, binHz, running = false, logScale = true;
-  const hist = []; // {t, f0, score, hits}
-  let conf = 0, state = 'quiet', stateSince = 0, lastDetect = 0;
-  const S = window.__rotor = { conf: 0, state: 'off', f0: 0, hits: 0, raw: 0, stab: 0 };
+  const { RotorDetector, makeAnalyser, syntheticDrone, FEATS, CLASSES, GROUPS, NH } = window.RotorEar;
+  const FMAX_VIEW = 8000;
+  let ctx, analyser, det, micStream, micSrc, testNodes = null, fileSrc = null, spk, ana;
+  let running = false, logScale = true, lastDetect = 0;
+  const S = window.__rotor = { conf: 0, state: 'off', f0: 0, hits: 0, cls: null };
 
   // ---------- audio graph ----------
   function ensureCtx() {
     if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
-    const AC = window.AudioContext || window.webkitAudioContext;
-    ctx = new AC();
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 8192;
-    analyser.smoothingTimeConstant = 0.5;
-    analyser.minDecibels = -110; analyser.maxDecibels = -20;
-    inputBus = ctx.createGain();
-    inputBus.connect(analyser);
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = makeAnalyser(ctx);
+    det = new RotorDetector(analyser);
     spk = ctx.createGain(); spk.connect(ctx.destination);
-    ana = ctx.createGain(); ana.connect(inputBus);
-    applyRouting();
-    binHz = ctx.sampleRate / analyser.fftSize;
-    bins = Math.min(analyser.frequencyBinCount, Math.ceil(FMAX_VIEW / binHz) + 2);
-    db = new Float32Array(analyser.frequencyBinCount);
-    floorDb = new Float32Array(analyser.frequencyBinCount);
-    buildAxis();
+    ana = ctx.createGain(); ana.connect(analyser);
+    applyRouting(); buildAxis();
     if (!running) { running = true; requestAnimationFrame(loop); }
   }
   function applyRouting() {
@@ -55,7 +39,7 @@
       micStream = await navigator.mediaDevices.getUserMedia({ audio: {
         echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
       micSrc = ctx.createMediaStreamSource(micStream);
-      micSrc.connect(inputBus);
+      micSrc.connect(analyser);
       $('start').textContent = '⏹ Stop listening'; $('start').classList.add('on');
     } catch (e) {
       micStream = null;
@@ -63,45 +47,30 @@
     }
   }
 
-  // Synthetic quadcopter: 4 rotors at slightly different blade-pass rates, rich harmonics, wobble, wind noise.
+  // Synthetic quadcopter + wind noise as the Test sound.
   function startTest() {
     ensureCtx();
     const out = ctx.createGain(); out.gain.value = 0;
     out.gain.setTargetAtTime(0.5, ctx.currentTime, 0.3);
     out.connect(spk); out.connect(ana);
-    const nodes = [out];
-    const N = 24, re = new Float32Array(N + 1), im = new Float32Array(N + 1);
-    for (let h = 1; h <= N; h++) im[h] = Math.pow(h, -0.9) * (h % 2 ? 1 : 0.8);
-    const wave = ctx.createPeriodicWave(re, im);
-    const base = 190 + Math.random() * 50;
-    [0, 0.012, -0.009, 0.021].forEach((d, i) => {
-      const o = ctx.createOscillator(); o.setPeriodicWave(wave);
-      o.frequency.value = base * (1 + d);
-      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.3 + i * 0.17;
-      const lg = ctx.createGain(); lg.gain.value = base * 0.006;
-      lfo.connect(lg); lg.connect(o.frequency);
-      const g = ctx.createGain(); g.gain.value = 0.09;
-      o.connect(g); g.connect(out); o.start(); lfo.start();
-      nodes.push(o, lfo);
-    });
+    const drone = syntheticDrone(ctx, 190 + Math.random() * 50); drone.connect(out);
     const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), nd = nb.getChannelData(0);
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
     const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true;
-    const bp = ctx.createBiquadFilter(); bp.type = 'lowpass'; bp.frequency.value = 3000;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3000;
     const ng = ctx.createGain(); ng.gain.value = 0.05;
-    ns.connect(bp); bp.connect(ng); ng.connect(out); ns.start(); nodes.push(ns);
-    testNodes = nodes;
+    ns.connect(lp); lp.connect(ng); ng.connect(out); ns.start();
+    testNodes = { out, drone, ns };
     $('test').classList.add('on'); $('test').textContent = '⏹ Stop test';
   }
   function stopTest() {
     if (!testNodes) return;
-    const [out, ...src] = testNodes;
+    const { out, drone, ns } = testNodes;
     out.gain.setTargetAtTime(0, ctx.currentTime, 0.1);
-    setTimeout(() => { src.forEach(n => { try { n.stop(); } catch (e) {} }); out.disconnect(); }, 500);
+    setTimeout(() => { drone.stop(); try { ns.stop(); } catch (e) {} out.disconnect(); }, 500);
     testNodes = null;
     $('test').classList.remove('on'); $('test').textContent = '🚁 Test sound';
   }
-  window.__rotorTest = startTest;
 
   async function playFile(f) {
     ensureCtx();
@@ -124,108 +93,61 @@
   $('file').onchange = e => { const f = e.target.files[0]; if (f) playFile(f); e.target.value = ''; };
   $('scale').onclick = () => { logScale = !logScale; $('scale').textContent = 'Scale: ' + (logScale ? 'log' : 'linear'); buildAxis(); };
 
-  // ---------- detector ----------
-  // Local noise floor: mean dB of neighbouring bins (centre excluded), via prefix sums.
-  function computeFloor(n) {
-    const W = 24, pre = new Float64Array(n + 1);
-    for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + db[i];
-    for (let i = 0; i < n; i++) {
-      const a = Math.max(0, i - W), b = Math.min(n, i + W + 1);
-      const c0 = Math.max(0, i - 2), c1 = Math.min(n, i + 3);
-      const sum = pre[b] - pre[a] - (pre[c1] - pre[c0]);
-      floorDb[i] = sum / ((b - a) - (c1 - c0));
+  // ---------- readouts ----------
+  function render(o) {
+    const c = o.cls;
+    Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, cls: c && { label: c.label, conf: c.conf, drone: c.drone, nearest: c.nearest, raw: c.raw } });
+    // drone confidence = harmonic-comb confidence, scaled down by how sure the fingerprint is it's NOT a drone
+    const dc = c ? Math.round(o.conf * (1 - c.probs[3])) : o.conf;
+    $('conf').textContent = dc;
+    $('meter').style.width = dc + '%';
+    $('f0').textContent = o.f0 && o.conf > 15 ? Math.round(o.f0) : '—';
+    $('harm').textContent = 'harmonics: ' + (o.conf > 15 ? o.hits + '/' + NH : '—');
+    const hz = Math.round(o.f0);
+    const L = {
+      quiet: ['QUIET', 'no rotor signature', ''],
+      some: ['SOMETHING', 'harmonic hum, checking…', c ? c.label + ' · ' + c.conf + '%' : ''],
+      drone: ['DRONE NEARBY', 'steady rotor signature @ ' + hz + ' Hz', c ? c.label + ' · ' + c.conf + '%' : 'fingerprinting…'],
+      hum: ['NOT A DRONE', c ? c.why + ' @ ' + hz + ' Hz' : '', c ? c.conf + '% sure' : '']
+    }[o.state];
+    const b = $('banner'), key = o.state + L.join('|');
+    if (b.dataset.s !== key) {
+      b.dataset.s = key;
+      b.className = o.state === 'quiet' ? '' : o.state === 'hum' ? 'some' : o.state;
+      b.innerHTML = L[0] + (L[2] ? '<b class="cls">' + L[2] + '</b>' : '') + '<small>' + L[1] + '</small>';
     }
+    drawFingerprint(c);
   }
-  function excessAt(f) { // best peak height above floor within ±2.5% of f
-    const tol = Math.max(1, Math.round(f * 0.025 / binHz));
-    const c = Math.round(f / binHz);
-    let best = 0;
-    for (let i = c - tol; i <= c + tol; i++) {
-      if (i < 1 || i >= bins) continue;
-      const e = db[i] - floorDb[i];
-      if (e > best) best = e;
-    }
-    return Math.min(best, 30);
-  }
-  function scoreF0(f0) {
-    let s = 0, hits = 0, low = 0, e1 = 0;
-    for (let h = 1; h <= NH; h++) {
-      const f = f0 * h; if (f > FMAX_VIEW) break;
-      const e = excessAt(f); s += e;
-      if (e > HIT_DB) { hits++; if (h <= 4) low++; }
-      if (h === 1) e1 = e;
-    }
-    s /= NH;
-    // a real rotor comb has its fundamental and most low harmonics present;
-    // this rejects "every other harmonic" matches from a single tone + distortion
-    if (e1 < HIT_DB) { s *= 0.3; hits = Math.min(hits, 2); }
-    else if (low < 3) { s *= 0.5; hits = Math.min(hits, 3); }
-    return { s, hits };
-  }
-  let liveEnergy = -200, quietFloor = -60;
-  function detect(now) {
-    const n = bins;
-    let e = 0;
-    for (let i = 0; i < n; i++) { if (!isFinite(db[i])) db[i] = -160; e += Math.pow(10, db[i] / 10); }
-    liveEnergy = 10 * Math.log10(e + 1e-20);
-    // slow-rising, fast-falling estimate of the ambient level (adaptive noise floor over time)
-    quietFloor += (liveEnergy < quietFloor ? 0.2 : 0.002) * (liveEnergy - quietFloor);
-    computeFloor(n);
-    let best = { f0: 0, s: 0, hits: 0 }; const cand = [];
-    for (let f0 = F0_MIN; f0 <= F0_MAX; f0 += 1) {
-      const r = scoreF0(f0); cand.push([f0, r]);
-      if (r.s > best.s) best = { f0, s: r.s, hits: r.hits };
-    }
-    // octave guard: prefer the lowest candidate scoring close to the best
-    for (const [f0, r] of cand) { if (r.s >= best.s * 0.85 && r.hits >= best.hits - 1) { best = { f0, s: r.s, hits: r.hits }; break; } }
-    const audible = liveEnergy > -75; // digital silence / very faint input
-    hist.push({ t: now, f0: best.f0, s: audible ? best.s : 0, hits: audible ? best.hits : 0 });
-    while (hist.length && now - hist[0].t > HIST_SEC * 1000) hist.shift();
 
-    // stability: fraction of recent frames that agree on the same pitch and are harmonic-rich
-    const good = hist.filter(h => h.hits >= 3);
-    let stab = 0, f0Med = 0, sMean = 0, hMean = 0;
-    if (good.length >= 3) {
-      const fs = good.map(h => h.f0).sort((a, b) => a - b);
-      f0Med = fs[fs.length >> 1];
-      const agree = good.filter(h => Math.abs(h.f0 - f0Med) / f0Med < 0.04);
-      stab = agree.length / hist.length;
-      sMean = agree.reduce((a, h) => a + h.s, 0) / Math.max(1, agree.length);
-      hMean = agree.reduce((a, h) => a + h.hits, 0) / Math.max(1, agree.length);
-    }
-    const harmonicity = clamp((sMean - 5) / 8, 0, 1) * clamp((hMean - 2) / 4, 0, 1);
-    const stability = clamp((stab - 0.3) / 0.45, 0, 1);
-    const raw = 100 * harmonicity * stability;
-    // asymmetric smoothing: rise in ~1s, fall in ~1.5s
-    conf += (raw > conf ? 0.08 : 0.05) * (raw - conf);
-
-    // hysteresis + minimum dwell to stop flicker
-    const dwell = now - stateSince;
-    let next = state;
-    if (state === 'quiet') { if (conf > 60) next = 'drone'; else if (conf > 30) next = 'some'; }
-    else if (state === 'some') { if (conf > 60) next = 'drone'; else if (conf < 18 && dwell > 1000) next = 'quiet'; }
-    else if (state === 'drone') { if (conf < 42 && dwell > 1500) next = conf < 18 ? 'quiet' : 'some'; }
-    if (next !== state) { state = next; stateSince = now; }
-
-    Object.assign(S, { conf: Math.round(conf), state, f0: stab > 0.3 ? f0Med : 0, hits: Math.round(hMean), raw: Math.round(raw), stab: +stab.toFixed(2), energy: Math.round(liveEnergy) });
-    S.dbg = { best, ex: Array.from({length:NH},(_,h)=>Math.round(excessAt(best.f0*(h+1)))) };
-    render(best);
+  // Radar of the 6 fingerprint features (live polygon vs the matched class profile) + class bars.
+  const fpc = $('fpRadar'), fg = fpc.getContext('2d');
+  const AXES = ['pitch', 'split', 'beat', 'steady', 'sub', 'mains'];
+  const norm = (v, i) => i === 0 ? (v + 1.5) / 3.3 : i === 3 ? v / 2 : i === 5 ? v : v / 1.5;
+  function poly(vals, stroke, fill) {
+    const W = fpc.width, cx = W / 2, cy = W / 2, R = W * 0.3;
+    fg.beginPath();
+    vals.forEach((v, i) => { const a = -Math.PI / 2 + i * 2 * Math.PI / vals.length, r = R * Math.max(0.04, Math.min(1, norm(v, i)));
+      fg[i ? 'lineTo' : 'moveTo'](cx + r * Math.cos(a), cy + r * Math.sin(a)); });
+    fg.closePath(); if (fill) { fg.fillStyle = fill; fg.fill(); } fg.strokeStyle = stroke; fg.lineWidth = 3; fg.stroke();
   }
-  const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
-
-  function render() {
-    $('conf').textContent = S.conf;
-    $('meter').style.width = S.conf + '%';
-    $('f0').textContent = S.f0 && S.conf > 15 ? Math.round(S.f0) : '—';
-    $('harm').textContent = 'harmonics: ' + (S.conf > 15 ? S.hits + '/' + NH : '—');
-    const b = $('banner');
-    const label = { quiet: ['QUIET', 'no rotor signature'], some: ['SOMETHING', 'harmonic hum, checking…'], drone: ['DRONE NEARBY', 'steady rotor signature @ ' + Math.round(S.f0) + ' Hz'] }[state];
-    if (b.dataset.s !== state + label[1]) {
-      b.dataset.s = state + label[1];
-      b.className = state === 'quiet' ? '' : state;
-      b.innerHTML = label[0] + '<small>' + label[1] + '</small>';
+  let lastBars = '';
+  function drawFingerprint(c) {
+    const W = fpc.width, cx = W / 2, R = W * 0.3;
+    fg.clearRect(0, 0, W, W);
+    fg.strokeStyle = '#1c2438'; fg.lineWidth = 1.5;
+    [0.33, 0.66, 1].forEach(k => { fg.beginPath(); for (let i = 0; i <= 6; i++) { const a = -Math.PI / 2 + i * Math.PI / 3; fg[i ? 'lineTo' : 'moveTo'](cx + R * k * Math.cos(a), cx + R * k * Math.sin(a)); } fg.stroke(); });
+    fg.fillStyle = '#6f7a95'; fg.font = '22px system-ui'; fg.textAlign = 'center'; fg.textBaseline = 'middle';
+    AXES.forEach((t, i) => { const a = -Math.PI / 2 + i * Math.PI / 3; fg.fillText(t, cx + (R + 38) * Math.cos(a), cx + (R + 24) * Math.sin(a)); });
+    if (c) {
+      const proto = CLASSES.find(k => k.id === c.nearest);
+      if (proto) poly(proto.c, 'rgba(255,255,255,0.25)');
+      poly(c.x, c.drone ? '#ff3b5c' : '#ffb547', c.drone ? 'rgba(255,59,92,0.25)' : 'rgba(255,181,71,0.22)');
     }
+    const probs = c ? c.probs : [0, 0, 0, 0], top = c ? GROUPS.indexOf(c.label) : -1;
+    const html = GROUPS.map((gn, i) => `<div class="${i === top ? 'top' : ''} ${i === 3 ? 'neg' : ''}"><span>${gn}</span><i><b style="width:${Math.round(probs[i] * 100)}%"></b></i><span>${c ? Math.round(probs[i] * 100) + '%' : '—'}</span></div>`).join('');
+    if (html !== lastBars) { $('fpBars').innerHTML = html; lastBars = html; }
   }
+  drawFingerprint(null);
 
   // ---------- spectrogram ----------
   const cv = $('spec'), g2 = cv.getContext('2d');
@@ -248,9 +170,8 @@
     });
   }
   buildAxis();
-  // inferno-ish palette
   const PAL = [];
-  (() => {
+  (() => { // inferno-ish palette
     const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
     for (let i = 0; i < 256; i++) {
       const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++;
@@ -258,26 +179,25 @@
       PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (gg1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`);
     }
   })();
-  function drawColumn() {
-    const W = cv.width, H = cv.height, step = 2;
+  function drawColumn(o) {
+    const W = cv.width, H = cv.height, step = 2, db = det.db;
     g2.drawImage(cv, step, 0, W - step, H, 0, 0, W - step, H);
     const x = W - step;
     for (let y = 0; y < H; y += 2) {
-      const f = yToF(1 - y / H), i = Math.min(bins - 1, Math.round(f / binHz));
-      const v = clamp((db[i] + 105) / 75, 0, 1);
-      g2.fillStyle = PAL[(v * 255) | 0]; g2.fillRect(x, y, step, 2);
+      const i = Math.min(det.bins - 1, Math.round(yToF(1 - y / H) / det.binHz));
+      g2.fillStyle = PAL[(Math.max(0, Math.min(1, (db[i] + 105) / 75)) * 255) | 0]; g2.fillRect(x, y, step, 2);
     }
-    if (state !== 'quiet' && S.f0) { // mark the detected harmonic comb
-      g2.fillStyle = state === 'drone' ? '#ff3b5c' : '#ffb547';
-      for (let h = 1; h <= NH; h++) { const y = (1 - fToY(S.f0 * h)) * H; if (y > 0) g2.fillRect(x, y - 1, step, 2); }
+    if (o.state !== 'quiet' && o.f0) { // mark the detected harmonic comb
+      g2.fillStyle = o.state === 'drone' ? '#ff3b5c' : '#ffb547';
+      for (let h = 1; h <= NH; h++) { const y = (1 - fToY(o.f0 * h)) * H; if (y > 0) g2.fillRect(x, y - 1, step, 2); }
     }
   }
 
+  let out = null;
   function loop(t) {
-    if (analyser) {
-      analyser.getFloatFrequencyData(db);
-      if (t - lastDetect > 45) { lastDetect = t; detect(t); }
-      drawColumn();
+    if (det) {
+      if (t - lastDetect > 45 || !out) { lastDetect = t; out = det.step(t); render(out); }
+      drawColumn(out);
     }
     requestAnimationFrame(loop);
   }

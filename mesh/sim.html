@@ -23,7 +23,7 @@
 </div>
 <style>select{background:#0a0f1b;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px}</style>
 <script src="peerjs.min.js"></script>
-<script src="detector.js"></script>
+<script src="../detector.js"></script>
 <script src="mesh.js"></script>
 <script>
 (() => {
@@ -72,10 +72,10 @@
       });
     }, 50);
     setInterval(() => {
-      nodes.forEach(n => { const o = n.det.out; n.link.send({ t: 's', k: n.key, n: 'sim ' + 'ABCD'[n.i], c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state, p: n.p }); });
+      nodes.forEach(n => { const o = n.det.out; n.link.send(window.RotorMesh.telemetry(o, n.key, 'sim ' + 'ABCD'[n.i], n.p)); });
       if (S.drone) nodes[0].link.send({ t: 'truth', x: +S.drone[0].toFixed(2), y: +S.drone[1].toFixed(2) });
       $('sStatus').textContent = 'virtual drone at (' + S.drone.map(v => v.toFixed(1)).join(', ') + ') m';
-      $('sNodes').innerHTML = nodes.map(n => `<div class="nrow"><div class="pin" style="background:#4cc9ff">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m<small>${n.status}</small><div class="meter"><i style="width:${n.det.out.conf}%"></i></div></div><div class="num">${n.det.out.f0 ? Math.round(n.det.out.f0) : '—'} Hz</div><div class="num">${n.det.out.e > -100 ? Math.round(n.det.out.e) : '—'} dB</div></div>`).join('');
+      $('sNodes').innerHTML = nodes.map(n => `<div class="nrow"><div class="pin" style="background:#4cc9ff">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m<small>${n.status}${n.det.out.cls ? ' · ' + n.det.out.cls.label + ' ' + n.det.out.cls.conf + '%' : ''}</small><div class="meter"><i style="width:${n.det.out.conf}%"></i></div></div><div class="num">${n.det.out.f0 ? Math.round(n.det.out.f0) : '—'} Hz</div><div class="num">${n.det.out.e > -100 ? Math.round(n.det.out.e) : '—'} dB</div></div>`).join('');
     }, 125);
   };
 })();

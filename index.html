@@ -28,6 +28,15 @@
   .card .v u{text-decoration:none;font-size:14px;color:var(--dim);font-weight:500;margin-left:3px}
   .meter{height:10px;border-radius:6px;background:#141b2c;overflow:hidden;margin-top:6px}
   .meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--quiet),var(--some) 55%,var(--drone));transition:width .15s}
+  #banner .cls{display:block;font-size:17px;letter-spacing:1px;margin-top:6px;color:#ffd6dd}
+  #banner.some .cls{color:var(--some)}
+  .fp{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;margin:0 0 12px}
+  .fp canvas{width:150px;height:150px}
+  .fp #fpBars>div{display:grid;grid-template-columns:82px 1fr 34px;gap:6px;align-items:center;font-size:12px;color:var(--dim);margin:5px 0}
+  .fp #fpBars i{display:block;height:8px;border-radius:4px;background:#141b2c;overflow:hidden}
+  .fp #fpBars i b{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  .fp #fpBars>div.top{color:var(--txt);font-weight:600}.fp #fpBars>div.top i b{background:var(--drone)}
+  .fp #fpBars>div.neg i b{background:var(--some)}
   .specbox{position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--line);background:#000}
   canvas{display:block;width:100%;height:300px}
   .axis{position:absolute;left:4px;top:0;bottom:0;pointer-events:none;font-size:10px;color:#9fb0d0;text-shadow:0 0 3px #000}
@@ -56,6 +65,11 @@
     <div class="card"><div class="k">Fundamental</div><div class="v"><span id="f0">—</span><u>Hz</u></div><div class="k" id="harm" style="margin-top:6px">harmonics: —</div></div>
   </div>
 
+  <div class="card fp">
+    <canvas id="fpRadar" width="300" height="300"></canvas>
+    <div class="bars"><div class="k" style="display:block">Sound fingerprint</div><div id="fpBars"></div></div>
+  </div>
+
   <div class="specbox">
     <canvas id="spec"></canvas>
     <div class="axis" id="axis"></div>
@@ -73,8 +87,9 @@
   <label class="chk"><input type="checkbox" id="toSpk" checked> Play test sound / file through speakers</label>
   <label class="chk"><input type="checkbox" id="toAna" checked> Feed test sound / file straight into the detector</label>
 
-  <p class="note">How it works: drone propellers make a steady hum at a "blade-pass" pitch (roughly 100–600&nbsp;Hz) plus evenly spaced overtones. Rotor Ear scores every candidate pitch by how many of its overtones stand out above the local noise floor, then checks that the same pitch holds for about a second. Fans, AC units, engines and held musical notes can look similar. Passive only: it just listens.</p>
+  <p class="note">How it works: drone propellers make a steady hum at a "blade-pass" pitch (roughly 100–600&nbsp;Hz) plus evenly spaced overtones. Rotor Ear scores every candidate pitch by how many of its overtones stand out above the local noise floor, then checks that the same pitch holds for about a second. When it fires, a fingerprint (pitch, rotor peak splitting, beating between rotors, pitch steadiness, sub-harmonic hum, 50/60&nbsp;Hz lock) is matched against hand-set profiles: quadcopter, fixed-wing, micro drone, or not a drone. Fans, AC units, engines and held musical notes can still look similar. Passive only: it just listens.</p>
 </div>
+<script src="detector.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

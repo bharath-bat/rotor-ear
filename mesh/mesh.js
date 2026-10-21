@@ -1,6 +1,6 @@
 // Rotor Ear · Phone Mesh Radar
-// Nodes run the Rotor Ear detector on their own mic and send ONLY numbers
-// (confidence, fundamental Hz, harmonic band energy dB) to a map "hub" peer.
+// Nodes run the Rotor Ear detector on their own mic and send ONLY numbers + a class label
+// (confidence, fundamental Hz, harmonic band energy dB, fingerprint class + %) to a map "hub" peer.
 // Transport: PeerJS cloud (wss://0.peerjs.com:443) for signalling, then a direct WebRTC
 // data channel per node -> map. Passive: nothing here transmits RF or affects drones.
 (function () {
@@ -116,12 +116,20 @@
     };
   }
 
-  function setBanner(el, st, sub) {
-    const L = { quiet: 'QUIET', some: 'SOMETHING', drone: 'DRONE NEARBY', off: 'READY' };
-    const key = st + sub; if (el.dataset.k === key) return; el.dataset.k = key;
-    el.className = 'banner ' + (st === 'quiet' ? '' : st);
-    el.innerHTML = (L[st] || st) + '<small>' + sub + '</small>';
+  function setBanner(el, st, sub, cls) {
+    const L = { quiet: 'QUIET', some: 'SOMETHING', drone: 'DRONE NEARBY', hum: 'NOT A DRONE', off: 'READY' };
+    const key = st + sub + (cls || ''); if (el.dataset.k === key) return; el.dataset.k = key;
+    el.className = 'banner ' + (st === 'quiet' ? '' : st === 'hum' ? 'some' : st);
+    el.innerHTML = (L[st] || st) + (cls ? '<b class="cls">' + cls + '</b>' : '') + '<small>' + sub + '</small>';
   }
+  // The only thing a node ever sends: numbers + the fingerprint label. Never audio.
+  const telemetry = (o, key, name, p) => {
+    const m = { t: 's', k: key, n: name, c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state };
+    if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; }
+    if (p) m.p = p;
+    return m;
+  };
+  const clsText = o => o.cls ? o.cls.label + ' · ' + o.cls.conf + '%' : '';
 
   // ---------------- NODE ----------------
   function runNode(room) {
@@ -144,7 +152,7 @@
       setInterval(tick, 50);
       setInterval(() => {
         const o = det.out;
-        link.send({ t: 's', k: key, n: $('nName').value.trim(), c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state });
+        link.send(telemetry(o, key, $('nName').value.trim()));
       }, 1000 / SEND_HZ);
     }
     async function keepAwake() { try { if ('wakeLock' in navigator && !wake) { wake = await navigator.wakeLock.request('screen'); wake.onrelease = () => wake = null; } } catch (e) {} }
@@ -154,7 +162,8 @@
       $('nConf').textContent = o.conf; $('nMeter').style.width = o.conf + '%';
       $('nF0').textContent = o.f0 && o.conf > 15 ? Math.round(o.f0) : '—';
       $('nE').textContent = o.f0 ? Math.round(o.e) : '—';
-      setBanner($('nBanner'), o.state, o.state === 'drone' ? 'rotor signature @ ' + Math.round(o.f0) + ' Hz' : o.state === 'some' ? 'harmonic hum, checking…' : (sim ? 'simulating' : 'listening'));
+      const sub = o.state === 'drone' ? 'rotor signature @ ' + Math.round(o.f0) + ' Hz' : o.state === 'hum' ? (o.cls ? o.cls.why : '') : o.state === 'some' ? 'harmonic hum, checking…' : (sim ? 'simulating' : 'listening');
+      setBanner($('nBanner'), o.state, sub, o.state === 'drone' || o.state === 'some' ? clsText(o) : o.state === 'hum' && o.cls ? o.cls.conf + '% sure' : '');
       spec(det.db, det.binHz, o.f0, o.state);
     }
     $('nStart').onclick = async () => {
@@ -193,7 +202,7 @@
     const posKey = 'rotorear-pos-' + room;
     const saved = JSON.parse(localStorage.getItem(posKey) || '{}');
     const nodes = new Map(); // key -> node
-    let est = null, estS = null, trail = [], truth = null, truthAt = 0, errs = [], viewer = false, droneHold = 0, agreeKeys = [];
+    let est = null, estS = null, estLabel = '', trail = [], truth = null, truthAt = 0, errs = [], viewer = false, droneHold = 0, agreeKeys = [];
     const M = window.__map = { est: null, truth: null, err: null, meanErr: null, agree: 0, banner: 'quiet', nodes: 0 };
 
     const status = (s, cls) => { $('mStatus').textContent = s; $('mStatus').className = 'status ' + (cls || ''); };
@@ -212,7 +221,7 @@
         }
         if (!saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
         c.label = n.label;
-        Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, last: performance.now() });
+        Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, last: performance.now() });
         if (d.f > 0 && d.e > -100) n.es = n.es == null ? d.e : n.es + 0.5 * (d.e - n.es); else n.es = null;
       },
       view: d => { if (d.t === 'view') { viewState = d; } }
@@ -254,7 +263,7 @@
       if (viewer) {
         if (viewState) {
           const vb = viewState.banner;
-          setBanner($('mBanner'), vb, viewState.sub || '');
+          setBanner($('mBanner'), vb, viewState.sub || '', vb === 'drone' ? viewState.label : '');
           if (vb === 'drone') $('mBanner').firstChild.textContent = 'DRONE'; else if (vb === 'off') $('mBanner').firstChild.textContent = 'WAITING FOR NODES';
           Object.assign(M, { est: viewState.est, banner: vb, nodes: viewState.nodes.filter(n => n.age < STALE_MS).length });
           renderList(performance.now());
@@ -263,7 +272,12 @@
       }
       const now = performance.now(), { live, A } = agreeing(now);
       agreeKeys = A.map(n => n.key);
-      const droneVotes = A.filter(n => n.st === 'drone' || n.c >= 60).length;
+      const voters = A.filter(n => n.st === 'drone'), droneVotes = voters.length;
+      // fingerprint label for the dot: confidence-weighted vote of the agreeing drone nodes
+      const tally = {}; voters.forEach(n => { if (n.cl) tally[n.cl] = (tally[n.cl] || 0) + n.c * n.cp; });
+      const top = Object.keys(tally).sort((a, b) => tally[b] - tally[a])[0];
+      const topNodes = voters.filter(n => n.cl === top);
+      estLabel = top ? top + ' · ' + Math.round(topNodes.reduce((a, n) => a + n.cp, 0) / topNodes.length) + '%' : '';
       if (A.length >= 2 && droneVotes >= 2) droneHold = now + 1500;
       const banner = now < droneHold ? 'drone' : live.some(n => n.c >= 30) ? 'some' : live.length ? 'quiet' : 'off';
       if (A.length >= 2 && (banner === 'drone' || A.length >= 2 && droneVotes >= 1)) {
@@ -275,14 +289,14 @@
       let err = null;
       if (est && truth) { err = Math.hypot(est[0] - truth[0], est[1] - truth[1]); errs.push([now, err]); }
       while (errs.length && now - errs[0][0] > 10000) errs.shift();
-      Object.assign(M, { est: est && est.map(v => +v.toFixed(2)), truth, err: err && +err.toFixed(2), meanErr: errs.length ? +(errs.reduce((a, e) => a + e[1], 0) / errs.length).toFixed(2) : null, agree: A.length, banner, nodes: live.length });
+      Object.assign(M, { est: est && est.map(v => +v.toFixed(2)), label: est ? estLabel : '', truth, err: err && +err.toFixed(2), meanErr: errs.length ? +(errs.reduce((a, e) => a + e[1], 0) / errs.length).toFixed(2) : null, agree: A.length, banner, nodes: live.length });
       const sub = banner === 'drone' ? `${A.length} nodes agree @ ${Math.round(A[0].f)} Hz` + (est ? ` · est (${est[0].toFixed(1)}, ${est[1].toFixed(1)}) m` : '')
         : banner === 'some' ? 'a node hears a harmonic hum…' : banner === 'quiet' ? live.length + ' node' + (live.length === 1 ? '' : 's') + ' listening' : 'open the node link on the listening phones';
-      setBanner($('mBanner'), banner === 'off' ? 'off' : banner, sub);
+      setBanner($('mBanner'), banner === 'off' ? 'off' : banner, sub, banner === 'drone' ? estLabel : '');
       if (banner === 'off') $('mBanner').firstChild.textContent = 'WAITING FOR NODES';
       else if (banner === 'drone') $('mBanner').firstChild.textContent = 'DRONE';
       $('mErr').textContent = M.meanErr != null ? `sim check: estimate is ${M.err != null ? M.err.toFixed(1) : '—'} m from the true drone (10 s avg ${M.meanErr.toFixed(1)} m)` : '';
-      hub.broadcastViewers({ t: 'view', nodes: [...nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, age: now - n.last })), est, trail, truth, banner, sub, agreeKeys });
+      hub.broadcastViewers({ t: 'view', nodes: [...nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, age: now - n.last })), est, label: estLabel, trail, truth, banner, sub, agreeKeys });
       if (hub.mode === 'hub' && /^map is live/.test($('mStatus').textContent)) status('map is live · ' + live.length + ' node' + (live.length === 1 ? '' : 's') + ' connected', 'ok');
       renderList(now);
     }
@@ -306,7 +320,7 @@
       const W = cv.width, H = cv.height, now = performance.now();
       const st = viewer ? viewState : null;
       const list = st ? st.nodes : [...nodes.values()].map(n => Object.assign({}, n, { age: now - n.last }));
-      const E = st ? st.est : est, T = st ? st.trail : trail, TR = st ? st.truth : truth, AK = st ? st.agreeKeys : agreeKeys;
+      const LB = st ? st.label : estLabel, E = st ? st.est : est, T = st ? st.trail : trail, TR = st ? st.truth : truth, AK = st ? st.agreeKeys : agreeKeys;
       fitView(list);
       g.fillStyle = '#03050a'; g.fillRect(0, 0, W, H);
       const px = W / view.s;
@@ -325,7 +339,7 @@
         const gr = g.createRadialGradient(x, y, 0, x, y, 34 * dpr * pulse); gr.addColorStop(0, 'rgba(255,90,110,0.95)'); gr.addColorStop(0.25, 'rgba(255,59,92,0.55)'); gr.addColorStop(1, 'rgba(255,59,92,0)');
         g.fillStyle = gr; g.beginPath(); g.arc(x, y, 34 * dpr * pulse, 0, 7); g.fill();
         g.fillStyle = '#fff'; g.beginPath(); g.arc(x, y, 5 * dpr, 0, 7); g.fill();
-        g.fillStyle = '#ffd6dd'; g.font = `bold ${12 * dpr}px system-ui`; g.fillText('DRONE?', x + 10 * dpr, y + 18 * dpr);
+        g.fillStyle = '#ffd6dd'; g.font = `bold ${12 * dpr}px system-ui`; g.fillText(LB || 'DRONE?', x + 10 * dpr, y + 18 * dpr);
       }
       list.forEach(n => {
         const [x, y] = W2P(n.pos[0], n.pos[1]), stale = n.age > STALE_MS, r = 13 * dpr;
@@ -352,7 +366,7 @@
       const list = st ? st.nodes : [...nodes.values()].map(n => Object.assign({}, n, { age: now - n.last }));
       const AK = (st ? st.agreeKeys : agreeKeys) || [];
       $('mNodes').innerHTML = list.map(n => `<div class="nrow ${n.age > STALE_MS ? 'stale' : ''}"><div class="pin" style="background:${n.color}">${n.label}</div>
-        <div class="nm">${(n.name || 'Node ' + n.label).replace(/[<>&]/g, '')}<small>${n.age > STALE_MS ? 'offline' : n.st === 'drone' ? 'DRONE' + (AK.includes(n.key) ? ' · agrees' : '') : n.st}</small><div class="meter"><i style="width:${n.c}%"></i></div></div>
+        <div class="nm">${(n.name || 'Node ' + n.label).replace(/[<>&]/g, '')}<small>${n.age > STALE_MS ? 'offline' : n.st === 'drone' ? 'DRONE' + (n.cl ? ' · ' + n.cl + ' ' + n.cp + '%' : '') + (AK.includes(n.key) ? ' · agrees' : '') : n.st === 'hum' ? 'not a drone' : n.st}</small><div class="meter"><i style="width:${n.c}%"></i></div></div>
         <div class="num">${n.f > 0 ? Math.round(n.f) + ' Hz' : '— Hz'}</div><div class="num">${n.e > -100 ? Math.round(n.e) + ' dB' : '— dB'}</div></div>`).join('');
     }
   }
@@ -376,7 +390,7 @@
     $('beMap').onclick = () => { location.hash = 'room=' + room + '&role=map'; };
     $('simLink').href = 'sim.html#room=' + room;
   }
-  window.RotorMesh = { NodeLink, hubId };
+  window.RotorMesh = { NodeLink, hubId, telemetry };
   if (!document.getElementById('landing')) return; // loaded as a library (sim.html)
   window.addEventListener('hashchange', () => location.reload());
   route();

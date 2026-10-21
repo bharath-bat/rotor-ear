@@ -20,6 +20,7 @@ input{background:#0a0f1b;border:1px solid var(--line);color:var(--txt);border-ra
 .code{font-size:34px;font-weight:800;letter-spacing:4px;color:var(--accent)}
 .share{display:flex;gap:6px;margin-top:6px}.share input{font-size:12px;padding:8px}
 .banner{border-radius:16px;padding:14px 10px;text-align:center;font-weight:800;font-size:26px;letter-spacing:2px;background:#0b1a16;color:var(--quiet);border:2px solid #134a3a;transition:background .4s,color .4s}
+.banner .cls{display:block;font-size:16px;letter-spacing:1px;margin-top:4px;color:#ffd6dd}.banner.some .cls{color:var(--some)}
 .banner small{display:block;font-size:12px;font-weight:500;letter-spacing:.5px;color:var(--dim);margin-top:3px}
 .banner.some{background:#221a0b;color:var(--some);border-color:#5c4214}
 .banner.drone{color:#fff;border-color:var(--drone);animation:pulse 1s ease-in-out infinite}
