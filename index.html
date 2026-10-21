@@ -4,92 +4,86 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#05070c">
-<title>Rotor Ear · passive drone listener</title>
-<style>
-  :root{--bg:#05070c;--panel:#0d1220;--line:#1c2438;--txt:#d8e1f5;--dim:#6f7a95;--quiet:#2ee6a6;--some:#ffb547;--drone:#ff3b5c;--accent:#4cc9ff}
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  .wrap{max-width:560px;margin:0 auto;padding:max(14px,env(safe-area-inset-top)) 14px 28px}
-  header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
-  h1{font-size:20px;margin:0;letter-spacing:.5px}
-  h1 span{color:var(--accent)}
-  .tag{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
-  #banner{border-radius:16px;padding:18px 12px;text-align:center;font-weight:800;font-size:30px;letter-spacing:2px;
-    background:#0b1a16;color:var(--quiet);border:2px solid #134a3a;transition:background .4s,color .4s,border-color .4s}
-  #banner small{display:block;font-size:12px;font-weight:500;letter-spacing:1px;color:var(--dim);margin-top:4px}
-  #banner.some{background:#221a0b;color:var(--some);border-color:#5c4214}
-  #banner.drone{background:#2a0a12;color:#fff;border-color:var(--drone);animation:pulse 1s ease-in-out infinite}
-  #banner.off{background:var(--panel);color:var(--dim);border-color:var(--line)}
-  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,.7);background:#3a0c18}50%{box-shadow:0 0 0 14px rgba(255,59,92,0);background:#7a1228}}
-  .stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
-  .card .k{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
-  .card .v{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
-  .card .v u{text-decoration:none;font-size:14px;color:var(--dim);font-weight:500;margin-left:3px}
-  .meter{height:10px;border-radius:6px;background:#141b2c;overflow:hidden;margin-top:6px}
-  .meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--quiet),var(--some) 55%,var(--drone));transition:width .15s}
-  #banner .cls{display:block;font-size:17px;letter-spacing:1px;margin-top:6px;color:#ffd6dd}
-  #banner.some .cls{color:var(--some)}
-  .fp{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;margin:0 0 12px}
-  .fp canvas{width:150px;height:150px}
-  .fp #fpBars>div{display:grid;grid-template-columns:82px 1fr 34px;gap:6px;align-items:center;font-size:12px;color:var(--dim);margin:5px 0}
-  .fp #fpBars i{display:block;height:8px;border-radius:4px;background:#141b2c;overflow:hidden}
-  .fp #fpBars i b{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
-  .fp #fpBars>div.top{color:var(--txt);font-weight:600}.fp #fpBars>div.top i b{background:var(--drone)}
-  .fp #fpBars>div.neg i b{background:var(--some)}
-  .specbox{position:relative;border-radius:14px;overflow:hidden;border:1px solid var(--line);background:#000}
-  canvas{display:block;width:100%;height:300px}
-  .axis{position:absolute;left:4px;top:0;bottom:0;pointer-events:none;font-size:10px;color:#9fb0d0;text-shadow:0 0 3px #000}
-  .axis b{position:absolute;font-weight:500;transform:translateY(-50%)}
-  #start{display:block;width:100%;margin:14px 0 10px;padding:20px;border:0;border-radius:16px;font-size:22px;font-weight:800;
-    color:#04121a;background:linear-gradient(135deg,#4cc9ff,#2ee6a6);box-shadow:0 6px 24px rgba(76,201,255,.25)}
-  #start.on{background:#1a2133;color:var(--txt);box-shadow:none}
-  .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
-  .btn{flex:1 1 auto;padding:13px 12px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--txt);font-size:15px;font-weight:600;text-align:center}
-  .btn.on{border-color:var(--some);color:var(--some)}
-  label.chk{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--dim);padding:4px 2px}
-  label.chk input{width:20px;height:20px;accent-color:var(--accent)}
-  .note{font-size:12px;color:var(--dim);margin-top:14px;line-height:1.5}
-  #err{color:var(--drone);font-size:13px;min-height:1em}
-  input[type=file]{display:none}
-</style>
+<title>Rotor Ear · watch post</title>
+<link rel="stylesheet" href="watch.css">
 </head>
 <body>
-<div class="wrap">
-  <header><h1>Rotor<span>Ear</span></h1><div class="tag">passive · listen only</div></header>
+<main id="app">
+  <div id="banner" class="off">READY<small>tap Listen · or try Sim</small></div>
 
-  <div id="banner" class="off">READY<small>tap Start listening</small></div>
+  <section id="mapbox">
+    <canvas id="map"></canvas>
+    <div id="mapTag">solo · this phone</div>
+    <div id="mapInfo"></div>
+  </section>
 
-  <div class="stats">
-    <div class="card"><div class="k">Drone confidence</div><div class="v"><span id="conf">0</span><u>/100</u></div><div class="meter"><i id="meter"></i></div></div>
-    <div class="card"><div class="k">Fundamental</div><div class="v"><span id="f0">—</span><u>Hz</u></div><div class="k" id="harm" style="margin-top:6px">harmonics: —</div></div>
-  </div>
+  <section id="mid">
+    <div class="hex"><canvas id="fpRadar" width="240" height="240"></canvas><div id="fpLbl">fingerprint</div></div>
+    <div class="specbox"><canvas id="spec"></canvas><div class="axis" id="axis"></div></div>
+  </section>
 
-  <div class="card fp">
-    <canvas id="fpRadar" width="300" height="300"></canvas>
-    <div class="bars"><div class="k" style="display:block">Sound fingerprint</div><div id="fpBars"></div></div>
-  </div>
+  <section id="timeline"><span class="dim">detections will appear here</span></section>
 
-  <div class="specbox">
-    <canvas id="spec"></canvas>
-    <div class="axis" id="axis"></div>
-  </div>
+  <nav id="tabs">
+    <button id="start"><i>🎙️</i><span>Listen</span></button>
+    <button id="tabTeach"><i>🎓</i><span>Teach</span></button>
+    <button id="tabPhones"><i>📱</i><span id="phonesN">Phones: 1</span></button>
+    <button id="tabSim"><i>🧪</i><span>Sim mode</span></button>
+  </nav>
 
-  <button id="start">🎙️ Start listening</button>
-  <div id="err"></div>
+  <!-- Teach sheet -->
+  <section class="sheet" id="teach" hidden>
+    <div class="grab"></div>
+    <div class="shead"><b>🎓 Teach</b><small>record real sounds to tune the fingerprint</small><button class="x" data-close>✕</button></div>
+    <div class="trow">
+      <select id="tTag"></select>
+      <button class="rec" id="tRec">⏺ Record 5 s</button>
+    </div>
+    <div class="prog"><i id="tProg"></i></div>
+    <div class="msg" id="tMsg">Play the sound near the mic (a real drone, or a drone video played aloud), pick what it is, then record.</div>
+    <label class="chk"><input type="checkbox" id="tKeep"> keep the clip on this phone for playback</label>
+    <label class="chk"><input type="checkbox" id="tUse" checked> <b>Use my samples</b>&nbsp;in the fingerprint</label>
+    <div class="counts" id="tCounts"></div>
+    <div class="tbtns">
+      <button class="btn" id="tExport">⬇ Export</button>
+      <button class="btn" id="tImport">⬆ Import</button>
+      <button class="btn" id="tReset">🗑 Reset</button>
+      <input type="file" id="tImportFile" accept="application/json,.json">
+    </div>
+    <div class="list" id="tList"></div>
+    <div class="k">Try it without a drone</div>
+    <div class="tbtns">
+      <button class="btn" id="test">🚁 Test sound</button>
+      <button class="btn" id="fileBtn">📂 Analyse file</button>
+      <input type="file" id="file" accept="audio/*">
+    </div>
+    <label class="chk"><input type="checkbox" id="toSpk" checked> play test sound / file through the speaker</label>
+    <label class="chk"><input type="checkbox" id="toAna" checked> feed test sound / file straight into the detector</label>
+    <p class="note">Only the six fingerprint numbers are saved, on this device. Clips (if kept) stay in this browser and are never uploaded or exported.</p>
+  </section>
 
-  <div class="row">
-    <button class="btn" id="test">🚁 Test sound</button>
-    <button class="btn" id="fileBtn">📂 Analyse file</button>
-    <button class="btn" id="scale">Scale: log</button>
-    <input type="file" id="file" accept="audio/*">
-  </div>
-  <label class="chk"><input type="checkbox" id="toSpk" checked> Play test sound / file through speakers</label>
-  <label class="chk"><input type="checkbox" id="toAna" checked> Feed test sound / file straight into the detector</label>
-
-  <p class="note">How it works: drone propellers make a steady hum at a "blade-pass" pitch (roughly 100–600&nbsp;Hz) plus evenly spaced overtones. Rotor Ear scores every candidate pitch by how many of its overtones stand out above the local noise floor, then checks that the same pitch holds for about a second. When it fires, a fingerprint (pitch, rotor peak splitting, beating between rotors, pitch steadiness, sub-harmonic hum, 50/60&nbsp;Hz lock) is matched against hand-set profiles: quadcopter, fixed-wing, micro drone, or not a drone. Fans, AC units, engines and held musical notes can still look similar. Passive only: it just listens.</p>
-</div>
+  <!-- Phones sheet -->
+  <section class="sheet" id="phones" hidden>
+    <div class="grab"></div>
+    <div class="shead"><b>📱 Phones</b><small>more phones = a position, not just "closer / further"</small><button class="x" data-close>✕</button></div>
+    <div id="pNone">
+      <p class="note">This phone becomes the map. Other phones open a link and listen; they send only numbers (confidence, pitch, loudness, envelope-peak times). Never audio.</p>
+      <button class="btn big" id="pCreate">➕ Create a room</button>
+      <div class="trow"><input id="pCode" placeholder="or join room code" maxlength="12" autocapitalize="off"><button class="btn" id="pJoin">Join</button></div>
+    </div>
+    <div id="pRoom" hidden>
+      <div class="k">Room <b id="pRoomCode"></b> · <span id="pStatus">starting…</span></div>
+      <div class="k" style="margin-top:8px">Open this on each listening phone:</div>
+      <div class="trow"><input id="pLink" readonly><button class="btn" id="pCopy">Copy</button><button class="btn" id="pShare">Share</button></div>
+      <div id="pNodes" class="list"></div>
+      <p class="note">Drag the pins on the map to where the phones really are (metres). Clocks are synced automatically through the relay.</p>
+      <button class="btn" id="pLeave">Leave room</button>
+    </div>
+  </section>
+</main>
 <script src="detector.js"></script>
-<script src="app.js"></script>
+<script src="mesh/peerjs.min.js"></script>
+<script src="mesh/core.js"></script>
+<script src="watch.js"></script>
 </body>
 </html>

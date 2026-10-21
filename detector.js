@@ -22,6 +22,14 @@
     { id: 'engine', label: 'Not a drone', why: 'engine (low, irregular)', drone: false, c: [-0.8, 0.3, 0.6, 0, 1.2, 0] }
   ];
   const GROUPS = ['Quadcopter', 'Fixed-wing', 'Micro drone', 'Not a drone'];
+  const T = 0.35, LEARN_T = 0.15, LEARN_W = 2; // taught samples: tighter kernel, higher weight
+  // Teach-mode tags (each belongs to one of the four groups above)
+  const TAGS = [
+    { id: 'quad', label: 'Quadcopter', group: 'Quadcopter' }, { id: 'fixed', label: 'Fixed-wing', group: 'Fixed-wing' },
+    { id: 'micro', label: 'Micro drone', group: 'Micro drone' }, { id: 'fan', label: 'Fan / AC', group: 'Not a drone' },
+    { id: 'engine', label: 'Engine / bike', group: 'Not a drone' }, { id: 'bird', label: 'Bird', group: 'Not a drone' },
+    { id: 'voice', label: 'Voice', group: 'Not a drone' }, { id: 'other', label: 'Other', group: 'Not a drone' }
+  ];
 
   function makeAnalyser(ctx) {
     const a = ctx.createAnalyser();
@@ -38,7 +46,8 @@
       this.db = new Float32Array(analyser.frequencyBinCount);
       this.fl = new Float32Array(analyser.frequencyBinCount);
       this.pre = new Float64Array(this.bins + 1);
-      this.hist = []; this.eh = []; this.fp = []; this.onset = 0; this.probs = null; this.conf = 0; this.state = 'quiet'; this.since = 0;
+      this.hist = []; this.eh = []; this.fp = []; this.onset = 0; this.probs = null; this.lprobs = null; this.cap = null; this.conf = 0; this.state = 'quiet'; this.since = 0;
+      this.learned = []; this.useLearned = true; // taught samples: [{tag, x}]
       this.out = { conf: 0, state: 'quiet', f0: 0, hits: 0, e: -120, level: -120, cls: null, feat: null };
     }
     // Local noise floor: mean dB of neighbouring bins (centre excluded), via prefix sums.
@@ -116,9 +125,8 @@
       }
       return { f: fw ? fs / fw : f0, split: ns ? split / ns : 1, sub: nsub ? sub / nsub : 0, low, cent: hc ? hp / hc : 1 };
     }
-    classify(now, f0Med) {
-      // skip the first 0.4 s after the sound appears: the onset ramp would read as amplitude modulation
-      const fp = this.fp.filter(x => x.t > this.onset + 400 && Math.abs(x.f - f0Med) / f0Med < 0.05);
+    // Six-number fingerprint from a run of comb frames (all at roughly the same pitch).
+    aggregate(fp) {
       if (fp.length < 20) return null;
       const fs = fp.map(x => x.f), f0 = median(fs);
       const jit = median(fp.slice(1).map((x, i) => Math.abs(x.f - fp[i].f) / f0));
@@ -132,7 +140,6 @@
       const sub = fp.reduce((a, x) => a + x.sub, 0) / fp.length;
       const cent = fp.reduce((a, x) => a + x.cent, 0) / fp.length;
       const mainsErr = Math.min(...[50, 60].map(m => Math.abs(f0 - m * Math.round(f0 / m))));
-      const raw = { f0, jit, drift, am, split, sub, cent, mainsErr };
       const steadyRaw = Math.max(jit, drift * 0.3); // a slow glide counts as unsteady too
       const x = [
         clamp(Math.log2(f0 / 200), -1.5, 1.8),
@@ -141,16 +148,48 @@
         clamp(-Math.log10(steadyRaw + 1e-5) - 2.3, 0, 2),
         clamp(sub / 10, 0, 1.5),
         mainsErr < 0.6 && steadyRaw < 0.002 ? 1 : 0
-      ];
-      // nearest centroid → soft scores → group probabilities
-      const d2 = CLASSES.map(k => k.c.reduce((a, c, i) => a + W[i] * (x[i] - c) ** 2, 0));
-      const sc = d2.map(d => Math.exp(-d / 0.35)), tot = sc.reduce((a, b) => a + b, 0) || 1;
-      const p = GROUPS.map(gn => CLASSES.reduce((a, k, i) => a + (k.label === gn ? sc[i] / tot : 0), 0));
-      this.probs = this.probs ? this.probs.map((v, i) => v + 0.15 * (p[i] - v)) : p;
-      const bi = this.probs.indexOf(Math.max(...this.probs));
-      const nearest = CLASSES[d2.indexOf(Math.min(...d2))];
-      return { label: GROUPS[bi], drone: bi < 3, conf: Math.round(100 * this.probs[bi]), why: bi === 3 ? (nearest.why || 'not a rotor signature') : '',
-        x, raw, probs: this.probs.slice(), nearest: nearest.id };
+      ].map(v => +v.toFixed(3));
+      return { x, raw: { f0, jit, drift, am, split, sub, cent, mainsErr } };
+    }
+    // Soft nearest-centroid over the hand-set profiles plus (optionally) the user's taught samples.
+    // Each taught tag contributes a narrow kernel around its nearest sample, weighted LEARN_W, so a close
+    // real recording outranks a generic profile but has little pull on sounds that differ from it.
+    match(x) {
+      const dist = c => c.reduce((a, v, i) => a + W[i] * (x[i] - v) ** 2, 0);
+      const hand = CLASSES.map(k => ({ group: k.label, s: Math.exp(-dist(k.c) / T), why: k.why, id: k.id, d: dist(k.c), learned: false }));
+      const near = {};
+      if (this.useLearned) this.learned.forEach(smp => {
+        const d = dist(smp.x); if (!near[smp.tag] || d < near[smp.tag].d) near[smp.tag] = { d, smp };
+      });
+      const learned = Object.keys(near).map(tag => { const tg = TAGS.find(t => t.id === tag);
+        return { group: tg.group, s: LEARN_W * Math.exp(-near[tag].d / LEARN_T), why: tg.label + ' (your samples)', id: tag, d: near[tag].d, learned: true }; });
+      const all = hand.concat(learned), tot = all.reduce((a, k) => a + k.s, 0) || 1;
+      const p = GROUPS.map(gn => all.reduce((a, k) => a + (k.group === gn ? k.s / tot : 0), 0));
+      const lp = GROUPS.map(gn => learned.reduce((a, k) => a + (k.group === gn ? k.s / tot : 0), 0));
+      return { p, lp, all, hand };
+    }
+    classify(now, f0Med) {
+      // skip the first 0.4 s after the sound appears: the onset ramp would read as amplitude modulation
+      const ag = this.aggregate(this.fp.filter(x => x.t > this.onset + 400 && Math.abs(x.f - f0Med) / f0Med < 0.05));
+      if (!ag) return null;
+      const m = this.match(ag.x);
+      this.probs = this.probs ? this.probs.map((v, i) => v + 0.15 * (m.p[i] - v)) : m.p;
+      this.lprobs = this.lprobs ? this.lprobs.map((v, i) => v + 0.15 * (m.lp[i] - v)) : m.lp;
+      const bi = this.probs.indexOf(Math.max(...this.probs)), gn = GROUPS[bi];
+      const inGroup = m.all.filter(k => k.group === gn).sort((a, b) => b.s - a.s)[0];
+      const nearest = m.hand.slice().sort((a, b) => a.d - b.d)[0];
+      return { label: gn, drone: bi < 3, conf: Math.round(100 * this.probs[bi]),
+        learned: this.lprobs[bi] > this.probs[bi] / 2, // most of the winning class came from taught samples
+        why: bi === 3 ? (inGroup.why || 'not a rotor signature') : '',
+        x: ag.x, raw: ag.raw, probs: this.probs.slice(), nearest: nearest.id };
+    }
+    // Teach mode: collect comb frames for a clip, then return its fingerprint (or null if no steady hum).
+    startCapture() { this.cap = []; }
+    stopCapture() {
+      const cap = this.cap || []; this.cap = null;
+      if (cap.length < 20) return null;
+      const fm = median(cap.map(x => x.f));
+      return this.aggregate(cap.filter(x => Math.abs(x.f - fm) / fm < 0.05));
     }
 
     step(now) {
@@ -197,12 +236,13 @@
       // fingerprint: collect features while a comb is present, classify over ~2 s
       if (audible && best.hits >= 3) {
         if (!this.fp.length) this.onset = now;
-        this.fp.push(Object.assign({ t: now }, this.frameFeatures(best.f0)));
+        const fr = Object.assign({ t: now }, this.frameFeatures(best.f0));
+        this.fp.push(fr); if (this.cap) this.cap.push(fr);
       }
       while (this.fp.length && now - this.fp[0].t > FP_MS) this.fp.shift();
       let cls = null;
       if (f0 && st !== 'quiet') cls = this.classify(now, f0Med);
-      else if (st === 'quiet') this.probs = null;
+      else if (st === 'quiet') this.probs = this.lprobs = null;
       // DRONE NEARBY needs a drone fingerprint; a "not a drone" fingerprint turns it into NOT A DRONE (hum)
       const shown = st === 'quiet' ? 'quiet' : !cls ? (st === 'drone' ? 'some' : st) : cls.drone ? st : 'hum';
       Object.assign(this.out, { conf: Math.round(c), state: shown, f0, hits: Math.round(hMean), level: Math.round(level),
@@ -238,5 +278,5 @@
     return gn;
   }
 
-  g.RotorEar = { RotorDetector, makeAnalyser, syntheticDrone, ambientNoise, NH, FEATS, CLASSES, GROUPS };
+  g.RotorEar = { RotorDetector, makeAnalyser, syntheticDrone, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
 })(window);
