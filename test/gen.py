@@ -37,6 +37,20 @@ save('engine', x / np.max(np.abs(x)) + 0.2 * noise())
 fj = 62 * (1 + 0.025 * np.interp(t, np.linspace(0, T, T * 40), rng.standard_normal(T * 40)))
 x = comb(fj, 60, 0.5) * (1 + 0.3 * np.interp(t, np.linspace(0, T, T * 15), rng.standard_normal(T * 15)))
 save('moto', x / np.max(np.abs(x)) + 0.2 * noise())
+# --- Teach-mode cases: sounds the hand-set profiles get wrong. *_teach and *_test are different
+# recordings (different seed, pitch, detune) of the same kind of thing.
+def hexa(f0, seed):
+    r = np.random.default_rng(seed)  # heavy-lift hexacopter: 6 tightly matched big rotors, low pitch, little beating
+    det = r.uniform(-0.0025, 0.0025, 6)
+    x = sum(comb(f0 * (1 + d) * (1 + 0.0004 * np.sin(2 * np.pi * r.uniform(0.1, 0.3) * t)), 25, 0.9) for d in det)
+    return x / np.max(np.abs(x)) + 0.15 * noise()
+save('hexa_teach', hexa(104, 11)); save('hexa_test', hexa(98, 12))
+def boxfans(f0, seed):
+    r = np.random.default_rng(seed)  # two 5-blade box fans on one table (~120 Hz blade-pass): detuned combs beat like rotors, plus turbulence
+    x = sum(comb(np.full_like(t, f0 * (1 + d)), 12, 1.1) for d in (0, r.uniform(0.012, 0.02)))
+    x *= 1 + 0.25 * np.interp(t, np.linspace(0, T, T * 8), r.standard_normal(T * 8))
+    return x / np.max(np.abs(x)) + 0.3 * noise()
+save('boxfans_teach', boxfans(118, 21)); save('boxfans_test', boxfans(125, 22))
 # negatives carried over from the first Rotor Ear tests
 save('tone', np.sin(2 * np.pi * 1000 * t))
 save('white', noise())
