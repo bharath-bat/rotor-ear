@@ -1,59 +1,12 @@
 <!doctype html>
-<html lang="en">
-<head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#05070c">
-<title>Rotor Ear · Phone Mesh Radar</title>
-<link rel="stylesheet" href="mesh.css">
-</head>
-<body>
-<div class="wrap">
-  <header><h1>Rotor Ear <em>listening phone</em></h1><div class="tag" id="roomTag">passive · numbers only</div></header>
-
-  <!-- landing -->
-  <section id="landing" hidden>
-    <p class="lead">Spread 3–4 phones a few metres apart. Each one listens for drone rotors and sends just three numbers (confidence, pitch, loudness) to a shared map that estimates where the drone is. No audio ever leaves a phone.</p>
-    <button class="big" id="newRoom">➕ Create a room</button>
-    <div class="row"><input id="joinCode" placeholder="room code, e.g. ab12" maxlength="12" autocapitalize="off"><button class="btn" id="joinBtn">Join</button></div>
-    <p class="note"><a href="../">← back to the Rotor Ear watch post</a></p>
-  </section>
-
-  <!-- choose role -->
-  <section id="roles" hidden>
-    <div class="card roomcard"><div class="k">Room</div><div class="code" id="roomCode"></div>
-      <div class="k" style="margin-top:8px">Share this link with the other phones:</div>
-      <div class="share"><input id="shareUrl" readonly><button class="btn sm" id="copyBtn">Copy</button></div></div>
-    <button class="big" id="beNode">🎙️ This phone is a listening node</button>
-    <button class="big alt" id="beMap">🗺️ Open the map (watch post)</button>
-    <a class="btn block" id="simLink">🧪 Demo: simulate 4 nodes + a moving drone</a>
-  </section>
-
-  <!-- node view -->
-  <section id="node" hidden>
-    <div id="nBanner" class="banner ready"><b class="w">⊖ READY</b><small>tap Start listening</small></div>
-    <div class="status" id="nStatus">not connected</div>
-    <div class="stats3">
-      <div class="card"><div class="k">Rotor score</div><div class="v" id="nConf">0</div><div class="meter"><i id="nMeter"></i></div></div>
-      <div class="card"><div class="k">Pitch</div><div class="v"><span id="nF0">—</span><u>Hz</u></div></div>
-      <div class="card"><div class="k">Band energy</div><div class="v"><span id="nE">—</span><u>dB</u></div></div>
-    </div>
-    <div class="specbox"><canvas id="nSpec"></canvas></div>
-    <button class="big" id="nStart">🎙️ Start listening</button>
-    <div id="nErr" class="err"></div>
-    <div class="card sim">
-      <label class="chk"><input type="checkbox" id="nSim"> <b>Simulate</b>&nbsp;a drone (no real drone needed)</label>
-      <div class="simrow"><span>virtual distance</span><input type="range" id="nDist" min="1" max="60" step="0.5" value="5"><b id="nDistV">5 m</b></div>
-      <label class="chk"><input type="checkbox" id="nSimSpk"> play the simulated drone through the speaker</label>
-    </div>
-    <div class="row"><span class="k">Node name</span><input id="nName" maxlength="10"></div>
-    <p class="note">Sends ~8×/sec: confidence, pitch (Hz) and harmonic band energy (dB). Never audio. Listen-only.</p>
-  </section>
-
-</div>
-<script src="peerjs.min.js"></script>
-<script src="../detector.js"></script>
-<script src="core.js"></script>
-<script src="mesh.js"></script>
-</body>
-</html>
+<title>Rotor Ear</title>
+<!-- Old link / QR code: everything lives in the one app at ../ now. #room=R&role=node → ear, role=map → screen. -->
+<script>
+(function () {
+  var h = new URLSearchParams(location.hash.slice(1)), q = new URLSearchParams(location.search);
+  var room = h.get('room') || q.get('room'), role = h.get('role') || q.get('role');
+  location.replace('../#' + (role === 'map' ? 'screen' : 'ear') + (room ? '&room=' + encodeURIComponent(room) : ''));
+})();
+</script>
+<p><a href="../">Rotor Ear has moved: open the app</a></p>

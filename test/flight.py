@@ -19,7 +19,7 @@ def case(name):
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
             f'--use-file-for-fake-audio-capture={WAV}/{name}.wav', '--autoplay-policy=no-user-gesture-required'])
-        pg = b.new_page(viewport={'width': 390, 'height': 844}); pg.goto(f'http://127.0.0.1:{PORT}/')
+        pg = b.new_page(viewport={'width': 390, 'height': 844}); pg.goto(f'http://127.0.0.1:{PORT}/#screen')
         # alerts muted: an alert tone pauses detection for ~2 s at the drone's arrival, which would delay the hover baseline
         pg.evaluate("localStorage.setItem('rotorear-mute-until', Date.now() + 600000)"); pg.reload(); pg.click('#start')
         t0 = time.time(); seq = []

@@ -113,7 +113,7 @@
     } catch (e) { errMsg = 'Could not decode that file.'; }
   }
   function stopFile() { if (fileSrc) { try { fileSrc.stop(); } catch (e) {} fileSrc = null; } $('fileBtn').classList.remove('on'); $('fileBtn').textContent = 'Analyse file'; }
-  $('start').onclick = () => { if (sim) return stopDemo(); if (listening() && !micStream) { stopTest(); stopFile(); return; } toggleMic(); };
+  $('start').onclick = () => { if (sim) return window.RotorApp.go('home'); if (listening() && !micStream) { stopTest(); stopFile(); return; } toggleMic(); };
   $('test').onclick = () => { testNodes ? stopTest() : startTest(); };
   $('fileBtn').onclick = () => fileSrc ? stopFile() : $('file').click();
   $('file').onchange = e => { const f = e.target.files[0]; if (f) playFile(f); e.target.value = ''; };
@@ -208,8 +208,7 @@
   window.__teach = Teach;
 
   // ---------- the map: this phone (+ phones in a room) or the demo ----------
-  const hp = new URLSearchParams(location.hash.slice(1));
-  let room = (hp.get('room') || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12), hub = null, sim = null, workings = false;
+  let room = '', hub = null, sim = null, workings = false;
   const posKey = () => 'rotorear-pos-' + (room || 'solo'), calKey = () => 'rotorear-cal-' + (room || 'solo');
   const loadCal = () => { try { return JSON.parse(localStorage.getItem(calKey()) || '{}'); } catch (e) { return {}; } };
   let saved = JSON.parse(localStorage.getItem(posKey()) || '{}'), model = new R.MeshModel(saved, loadCal());
@@ -226,12 +225,12 @@
     model.ingest(R.telemetry(det.out, ME, 'this phone', null, quiet ? null : ev, quiet ? null : on), now);
   }
 
-  // Phones: this page hosts the room's map; other phones open mesh/#room=…&role=node
-  const nodeUrl = r => new URL('mesh/#room=' + r + '&role=node', location.href.split('#')[0]).href;
+  // Phones: this screen hosts the room's map; other phones open the join link ?room=… (ear mode)
+  const nodeUrl = r => location.href.split(/[?#]/)[0] + '?room=' + r;
   let hubStatus = '';
   function joinRoom(r) {
     if (!r || hub) return;
-    room = r; history.replaceState(null, '', '#room=' + r);
+    room = r; history.replaceState(null, '', location.pathname + '#screen&room=' + r); window.RotorApp.key = 'screen|' + r;
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
     hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
@@ -240,12 +239,11 @@
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
   $('pCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('pLink').value); $('pCopy').textContent = 'Copied'; };
   $('pShare').onclick = () => { if (!hub) joinRoom(R.randKey(4)); const url = $('pLink').value; navigator.share ? navigator.share({ title: 'Rotor Ear listening phone', url }).catch(() => {}) : $('pCopy').onclick(); };
-  $('pLeave').onclick = () => { location.hash = ''; location.reload(); };
-  if (room) joinRoom(room);
+  $('pLeave').onclick = () => { location.hash = 'screen'; location.reload(); };
 
   // Demo: 4 simulated phones + a scripted drone on this screen (real sound delays, clock offsets, jitter, network
   // delay). Marked DEMO the whole time: stripe, "DEMO · DRONE", hatched marker, demo tone, DEMO timeline rows.
-  function startDemo() {
+  function startDemo(hp) {
     if (sim) return;
     ensureCtx(); openSheet(null);
     const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1) });
@@ -259,9 +257,22 @@
   }
   function stopDemo() { if (!sim) return; clearInterval(sim.iv1); clearInterval(sim.iv2); clearInterval(sim.iv3); sim.eng.stop(); sim = null; ws.reset(); calib = null; }
   const replayDemo = () => { if (sim) { sim.eng.replay(); ws.reset(); } };
-  $('tryDemo').onclick = $('mDemo').onclick = () => sim ? stopDemo() : startDemo();
+  const App = window.RotorApp;
+  $('tryDemo').onclick = $('mDemo').onclick = () => App.go(sim ? 'screen' : 'demo');
   $('endReplay').onclick = replayDemo;
-  $('endPhones').onclick = () => { stopDemo(); openSheet('phones'); };
+  let pendingSheet = null;
+  $('endPhones').onclick = () => { pendingSheet = 'phones'; App.go('screen'); };
+  // a deep link (#demo, #screen&room=…) opens without a tap, so audio may be suspended until the first touch
+  const tapStart = () => { $('tapStart').hidden = !(sim && ctx && ctx.state === 'suspended'); };
+  $('tapStart').onclick = () => { ctx.resume().then(tapStart); };
+  App.modes.screen = {
+    enter(p) {
+      if (p.room && !hub) joinRoom(p.room);
+      if (p.demo) { startDemo(p.h); setTimeout(tapStart, 300); }
+      if (pendingSheet) { openSheet(pendingSheet); pendingSheet = null; }
+    },
+    leave() { stopDemo(); $('tapStart').hidden = true; if (micStream) toggleMic(); stopTest(); stopFile(); if (sheet) openSheet(null); },
+  };
   const isDemo = () => !!sim || !!(model.state && model.state.demo);
 
   // ---------- clap calibration (Phones sheet): per-phone input latency + gain ----------
@@ -493,14 +504,17 @@
     if (lbl !== lastLbl) { $('fpLbl').innerHTML = lbl; lastLbl = lbl; }
   }
   const specs = [$('spec'), $('spec2')].map(cv => ({ cv, g: cv.getContext('2d') })), FMAX = 8000, LOGMIN = 50;
-  function sizeCanvas(sp) { const dpr = Math.min(2, devicePixelRatio || 1), w = Math.round(sp.cv.clientWidth * dpr), h = Math.round(sp.cv.clientHeight * dpr); if (w && h && (sp.cv.width !== w || sp.cv.height !== h)) { sp.cv.width = w; sp.cv.height = h; sp.g.fillStyle = '#000'; sp.g.fillRect(0, 0, w, h); } }
+  function sizeCanvas(sp) { // a resize keeps the history (scaled) instead of starting black
+    const dpr = Math.min(2, devicePixelRatio || 1), w = Math.round(sp.cv.clientWidth * dpr), h = Math.round(sp.cv.clientHeight * dpr);
+    if (!w || !h || (sp.cv.width === w && sp.cv.height === h)) return;
+    const old = document.createElement('canvas'); old.width = sp.cv.width; old.height = sp.cv.height; old.getContext('2d').drawImage(sp.cv, 0, 0);
+    sp.cv.width = w; sp.cv.height = h; sp.g.fillStyle = '#000'; sp.g.fillRect(0, 0, w, h); sp.g.drawImage(old, 0, 0, w, h);
+  }
   window.addEventListener('resize', () => { specs.forEach(sizeCanvas); buildAxis(); });
   const yToF = y01 => LOGMIN * Math.pow(FMAX / LOGMIN, y01), fToY = f => Math.log(Math.max(f, LOGMIN) / LOGMIN) / Math.log(FMAX / LOGMIN);
   function buildAxis() { const ax = $('axis'); ax.innerHTML = ''; [100, 300, 1000, 3000].forEach(f => { const el = document.createElement('b'); el.style.top = ((1 - fToY(f)) * 100) + '%'; el.textContent = f >= 1000 ? f / 1000 + 'k' : f; ax.appendChild(el); }); }
   buildAxis();
-  const PAL = [];
-  (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
-    for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, gg1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (gg1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
+  const PAL = R.PAL;
   function drawColumn(sp, d, o) {
     sizeCanvas(sp); const { cv, g } = sp, W = cv.width, H = cv.height, step = 2, db = d.db; if (!W || !H) return;
     g.drawImage(cv, step, 0, W - step, H, 0, 0, W - step, H);
@@ -534,7 +548,7 @@
       Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw } });
       if (sheet === 'details') { const p = primary(); drawFingerprint(p.out.cls, p.out.state); drawFlight(p.out.flight); }
     }
-    const p = primary(); if (p.db) { drawColumn(specs[0], p, p.out); if (sheet === 'details') drawColumn(specs[1], p, p.out); }
+    const p = primary(); if (p.db) { drawColumn(specs[0], p, p.out); drawColumn(specs[1], p, p.out); } // Details keeps drawing while closed, so it opens with history
     requestAnimationFrame(loop);
   }
   drawFingerprint(null);

@@ -19,7 +19,7 @@ def case(name):
         b = p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
             f'--use-file-for-fake-audio-capture={WAV}/{"silence" if name == "synth" else name}.wav', '--autoplay-policy=no-user-gesture-required'])
         pg = b.new_page(viewport={'width': 390, 'height': 844})
-        pg.goto(f'http://127.0.0.1:{PORT}/')
+        pg.goto(f'http://127.0.0.1:{PORT}/#screen')
         if os.environ.get('SAMPLES'): pg.set_input_files('#tImportFile', os.environ['SAMPLES'])  # taught samples (Teach → Import)
         pg.click('#start')
         if name == 'synth': pg.click('#tabTeach'); pg.click('#test'); pg.click('[data-close]')  # built-in Test sound (in the Teach sheet)

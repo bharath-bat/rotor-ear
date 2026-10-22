@@ -4,11 +4,73 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0B0D12">
-<title>Rotor Ear · watch post</title>
+<title>Rotor Ear</title>
 <link rel="stylesheet" href="watch.css">
 </head>
 <body>
-<main id="app">
+<!-- One app, one link. Modes: #screen (watch post), #ear (listening phone), #demo (simulated). ?room=… joins as an ear. -->
+<section id="home" class="mode" hidden>
+  <h1 class="brand">Rotor Ear</h1>
+  <p class="lead">Listens for drone rotors. Passive: it never transmits. Phones share only numbers, never audio.</p>
+  <button class="choice" data-go="screen"><i aria-hidden="true">▣</i><span><b>Be the screen</b><small>Status, map and alerts. Other phones join this one.</small></span></button>
+  <button class="choice" data-go="ear"><i aria-hidden="true">◉</i><span><b>Be an ear</b><small>This phone listens and sends numbers to a screen.</small></span></button>
+  <button class="choice demo" data-go="demo"><i aria-hidden="true">▷</i><span><b>Watch a demo</b><small>60 s on 4 simulated phones, marked DEMO throughout.</small></span></button>
+  <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
+  <p class="note">Best with 3–4 phones a few metres apart. Works alone too, without direction.</p>
+</section>
+
+<!-- ear: a listening phone in a room -->
+<section id="ear" class="mode" hidden>
+  <div class="mhead"><button class="modes" data-go="home">‹ Modes</button><span id="roomTag">Be an ear</span></div>
+  <div id="earJoin">
+    <p class="lead">Enter the room code from the screen phone (Phones → Create a room), or open its join link.</p>
+    <div class="trow"><input id="joinCode" placeholder="room code, e.g. ab12" maxlength="12" autocapitalize="off" autocomplete="off"><button class="btn" id="joinBtn">Join</button></div>
+    <p class="note">No screen yet? Pick <a href="#screen">Be the screen</a> on another phone first.</p>
+  </div>
+  <div id="node" hidden>
+    <div id="nBanner" class="banner ready"><b class="w">⊖ READY</b><small>tap Start listening</small></div>
+    <div class="nstatus" id="nStatus">not connected</div>
+    <div class="stats3">
+      <div class="card"><div class="k">Rotor score</div><div class="v" id="nConf">0</div><div class="meter"><i id="nMeter"></i></div></div>
+      <div class="card"><div class="k">Pitch</div><div class="v"><span id="nF0">—</span><u>Hz</u></div></div>
+      <div class="card"><div class="k">Band energy</div><div class="v"><span id="nE">—</span><u>dB</u></div></div>
+    </div>
+    <div class="specbox"><canvas id="nSpec"></canvas></div>
+    <button class="btn big" id="nStart">Start listening</button>
+    <div id="nErr" class="err"></div>
+    <div class="card">
+      <label class="chk"><input type="checkbox" id="nSim"><span><b>Simulate</b> a drone (no real drone needed)</span></label>
+      <div class="simrow"><span>virtual distance</span><input type="range" id="nDist" min="1" max="60" step="0.5" value="5"><b id="nDistV">5 m</b></div>
+      <label class="chk"><input type="checkbox" id="nSimSpk"><span>play the simulated drone through the speaker</span></label>
+    </div>
+    <div class="trow"><span class="k">Name</span><input id="nName" maxlength="10" placeholder="e.g. Gate"></div>
+    <p class="note">Sends ~8×/sec: rotor score, pitch (Hz), band energy (dB) and envelope-peak times. Never audio. Listen-only.</p>
+  </div>
+</section>
+
+<!-- demo with a room (#demo&room=…, old mesh/sim.html links): simulated phones that report to that room's screen over the relay -->
+<section id="simv" class="mode" hidden>
+  <div class="mhead"><button class="modes" data-go="home">‹ Modes</button><span id="sRoomTag"></span></div>
+  <div id="sStripe" class="stripe"><span>DEMO · simulated phones · not real detections</span></div>
+  <p class="note">Virtual phones in this page hear a synthetic drone through a real sound delay (distance ÷ 343 m/s), at loudness ∝ 1/distance², plus noise. Each runs the real detector and reports to the room's screen over the relay, like a phone.</p>
+  <div class="card">
+    <div class="simrow"><span>phones</span><select id="sN"><option>3</option><option selected>4</option></select>
+      <span>path</span><select id="sPath"><option value="circle">circle</option><option value="eight">figure-8</option><option value="line">fly-by line</option><option value="hover">hover</option></select></div>
+    <div class="simrow"><span>speed</span><input type="range" id="sSpeed" min="0.2" max="3" step="0.1" value="1"><span>height</span><input type="range" id="sAlt" min="0" max="10" step="0.5" value="1.5"><b id="sAltV">1.5 m</b></div>
+    <div class="simrow"><span>clocks off by</span><select id="sOff"><option value="0">0 ms</option><option value="400" selected>±400 ms</option><option value="3000">±3 s</option></select></div>
+    <div class="simrow"><span>timing jitter</span><input type="range" id="sJit" min="0" max="20" step="0.5" value="1"><b id="sJitV">1 ms</b></div>
+    <div class="simrow"><span>mic latency spread</span><select id="sBias"><option value="0" selected>0 ms</option><option value="2">σ 2 ms</option><option value="10">σ 10 ms</option><option value="30">σ 30 ms</option></select></div>
+    <div class="simrow"><span>mic gain spread</span><select id="sGain"><option value="0" selected>0 dB</option><option value="4">σ 4 dB</option><option value="8">σ 8 dB</option></select></div>
+  </div>
+  <button class="btn big" id="sStart">Start simulation</button>
+  <a class="btn wide" id="sMap" target="_blank">Open this room's screen</a>
+  <div class="simrow" id="claps" hidden><span>clap next to</span><button class="btn" id="clapA">A</button><button class="btn" id="clapB">B</button><button class="btn" id="clapC">C</button><button class="btn" id="clapD">D</button></div>
+  <div class="nstatus" id="sStatus"></div>
+  <div id="sNodes" class="nodes"></div>
+  <p class="note">Phones at A (0,0) · B (6,0) · C (6,6) · D (0,6) m. The screen's clock sync removes clock offsets; its clap calibration (Phones → Calibrate, then the clap buttons here) removes latency and gain spread. Jitter stays.</p>
+</section>
+
+<main id="app" hidden>
   <!-- status block: shape + state word, class line, where, agreement, sound pill -->
   <header id="status" class="ready" aria-live="polite">
     <div id="demoStripe"><span>DEMO · simulated drone · not a real detection</span></div>
@@ -86,7 +148,7 @@
     <div class="flight"><b id="flState">—</b><canvas id="spark"></canvas><label>blades <select id="flBlades"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></label></div>
     <div class="k">Fingerprint · spectrogram</div>
     <div class="fprow"><div class="hex"><canvas id="fpRadar" width="240" height="240"></canvas><div id="fpLbl">fingerprint</div></div>
-      <div class="specbig"><canvas id="spec2"></canvas><div class="axis" id="axis"></div></div></div>
+      <div class="specbig"><canvas id="spec2" width="540" height="300"></canvas><div class="axis" id="axis"></div></div></div>
     <div class="k">Timeline</div>
     <div id="tlList"></div>
     <label class="chk toggle"><span>Show workings (bearing lines, error vs true)</span><input type="checkbox" id="workings"></label>
@@ -129,14 +191,19 @@
     <div class="tbtns"><button class="btn" id="mMute">Mute 5 min</button><button class="btn" id="mTest">Test alert</button></div>
     <div class="k">Demo</div>
     <button class="btn wide" id="mDemo">Try a 60-second demo</button>
+    <div class="k">Mode</div>
+    <button class="btn wide" data-go="home">Switch mode · screen / ear / demo</button>
     <div class="k">This device</div>
     <div id="devNotes" class="note">Notes appear once you start listening.</div>
     <button class="done" data-close>Done</button>
   </section>
 </main>
+<button id="tapStart" hidden>▷ Tap to start</button>
+<script src="app.js"></script>
 <script src="detector.js"></script>
 <script src="mesh/peerjs.min.js"></script>
 <script src="mesh/core.js"></script>
 <script src="watch.js"></script>
+<script src="ear.js"></script>
 </body>
 </html>

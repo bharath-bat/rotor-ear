@@ -1,4 +1,4 @@
-// Rotor Ear · mesh core (shared by mesh/index.html, mesh/sim.html and the root watch post).
+// Rotor Ear · mesh core (shared by the screen, the ear and the demo phones of the one app).
 // Nodes send ONLY numbers: detector confidence, pitch, band energy, fingerprint label, and the times
 // of rotor-envelope peaks (for arrival-time direction finding). Never audio. Passive only.
 // Transport: PeerJS cloud (wss://0.peerjs.com:443) signalling + one WebRTC data channel per node → map.
@@ -358,7 +358,9 @@
         if (U.chip) chip(U.chip, x, y + rr + 18 * dpr, C, dpr);
       }
       if (ws === 'lost' && U.lost && U.lost.pos && !S.solo) {
-        const [x, y] = W2P(U.lost.pos[0], U.lost.pos[1]); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.setLineDash([5 * dpr, 4 * dpr]); g.beginPath(); g.arc(x, y, 26 * dpr, 0, 7); g.stroke(); g.setLineDash([]);
+        let [x, y] = W2P(U.lost.pos[0], U.lost.pos[1]); const near = 48 * dpr; // keep the marker off the phone pins
+        list.forEach(n => { if (!n.pos) return; const [px, py] = W2P(n.pos[0], n.pos[1]), dx = x - px, dy = y - py, d = Math.hypot(dx, dy); if (d < near) { if (d < 1) y = py + near; else { x = px + dx / d * near; y = py + dy / d * near; } } });
+        g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.setLineDash([5 * dpr, 4 * dpr]); g.beginPath(); g.arc(x, y, 26 * dpr, 0, 7); g.stroke(); g.setLineDash([]);
         tri(x, y + 2 * dpr, 12 * dpr); g.stroke(); text('last seen ' + U.lost.ago + ' ago', x, y + 42 * dpr, C.ink, 12 * dpr);
       }
       if (S.solo) drawSolo(list.find(n => n.key === S.solo), C, dpr, now, hot);
@@ -534,5 +536,9 @@
     ping(ts) { setTimeout(() => this.send({ t: 'pong', k: this.node.key, ts, tn: this.node.clock() }), this.net()); }
   }
 
-  window.RotorMesh = { NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
+  // spectrogram palette (inferno-like), shared by the screen and the ear
+  const PAL = [];
+  (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
+    for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, g1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (g1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
+  window.RotorMesh = { PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
 })();

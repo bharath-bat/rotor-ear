@@ -1,7 +1,7 @@
-# Mesh accuracy test over the real PeerJS relay: the watch post (/) hosts the room's map, mesh/sim.html runs 3-4
+# Mesh accuracy test over the real PeerJS relay: the screen (/#screen) hosts the room's map, demo phones (/#demo&room=…) run 3-4
 # virtual phones that hear a virtual drone with real sound delays. Prints loudness-only vs arrival-time-only vs
 # fused position error and heading error against the sim truth. With CAL=full|quick it then runs the watch post's
-# clap calibration (pressing sim.html's clap buttons when asked) and measures again.
+# clap calibration (pressing the demo phones' clap buttons when asked) and measures again.
 # usage: [CAL=full] [SHOT=png] python test/mesh.py <circle|eight|line|hover> <3|4> <seconds per phase> ["&bias=30&gain=4&off=400&jit=1&speed=1"]
 #        (static server on :5311)
 import os, time, sys, random, statistics as stx
@@ -24,9 +24,9 @@ with sync_playwright() as p:
     b = p.chromium.launch(args=['--autoplay-policy=no-user-gesture-required'])
     m = b.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2).new_page(); logs = []
     m.on('pageerror', lambda e: logs.append('MAP ' + str(e)))
-    m.goto(BASE + f'#room={room}'); m.evaluate('localStorage.clear()'); time.sleep(4)
+    m.goto(BASE + f'#screen&room={room}'); m.evaluate('localStorage.clear()'); time.sleep(4)
     s = b.new_context().new_page(); s.on('pageerror', lambda e: logs.append('SIM ' + str(e)))
-    s.goto(BASE + f'mesh/sim.html#room={room}&n={N}&path={path}' + EXTRA); s.click('#sStart')
+    s.goto(BASE + f'#demo&room={room}&n={N}&path={path}' + EXTRA); s.click('#sStart')
     before = measure(m, dur, 15, 'before', None if CAL else os.environ.get('SHOT'))
     res = f"RESULT {path} n={N} {EXTRA or '(defaults)'}: loudness {col(before, 0)} m | arrival-times {col(before, 1)} m | fused {col(before, 2)} m | heading {col(before, 3)}°"
     if CAL:

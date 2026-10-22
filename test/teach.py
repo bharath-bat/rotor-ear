@@ -17,7 +17,7 @@ def browser(p, wav):
 
 def classify(p, wav, samples=None, secs=8):
     b = browser(p, wav); pg = b.new_page(viewport={'width': 390, 'height': 844})
-    pg.goto(f'http://127.0.0.1:{PORT}/')
+    pg.goto(f'http://127.0.0.1:{PORT}/#screen')
     if samples: pg.set_input_files('#tImportFile', samples)
     pg.click('#start'); votes = {}; learned = 0; drone = False; n = 0
     for i in range(4 + secs * 2):
@@ -33,7 +33,7 @@ def classify(p, wav, samples=None, secs=8):
 
 def teach(p, wav, tag, clips=3):
     b = browser(p, wav); pg = b.new_context(accept_downloads=True).new_page()
-    pg.goto(f'http://127.0.0.1:{PORT}/'); pg.click('#start'); time.sleep(3)
+    pg.goto(f'http://127.0.0.1:{PORT}/#screen'); pg.click('#start'); time.sleep(3)
     pg.click('#tabTeach'); pg.select_option('#tTag', tag)  # Teach bottom sheet
     for k in range(clips):
         pg.click('#tRec'); pg.wait_for_function("!document.getElementById('tRec').disabled", timeout=15000)
