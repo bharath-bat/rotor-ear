@@ -17,12 +17,14 @@
     <div class="simrow"><span>phone clocks off by up to</span><select id="sOff"><option value="0">0 ms</option><option value="400" selected>±400 ms</option><option value="3000">±3 s</option></select></div>
     <div class="simrow"><span>timing jitter</span><input type="range" id="sJit" min="0" max="20" step="0.5" value="1"><b id="sJitV">1 ms</b></div>
     <div class="simrow"><span>mic latency spread</span><select id="sBias"><option value="0" selected>0 ms (calibrated)</option><option value="2">σ 2 ms</option><option value="10">σ 10 ms</option><option value="30">σ 30 ms (uncalibrated phones)</option></select></div>
+    <div class="simrow"><span>mic gain spread</span><select id="sGain"><option value="0" selected>0 dB</option><option value="4">σ 4 dB</option><option value="8">σ 8 dB</option></select></div>
   </div>
   <button class="big" id="sStart">▶ Start simulation</button>
   <a class="btn block" id="sMap" target="_blank">🗺️ Open the map for this room</a>
+  <div class="simrow" id="claps" hidden><span>👏 clap next to</span><button class="btn sm" id="clapA">A</button><button class="btn sm" id="clapB">B</button><button class="btn sm" id="clapC">C</button><button class="btn sm" id="clapD">D</button></div>
   <div class="status" id="sStatus"></div>
   <div id="sNodes" class="nodes"></div>
-  <p class="note">Node positions: A (0,0) · B (6,0) · C (6,6) · D (0,6) metres — the map's default square. Clock offset is removed by the map's ping/pong clock sync; jitter and mic-latency spread are not, and they're what limits arrival-time accuracy on real phones.</p>
+  <p class="note">Node positions: A (0,0) · B (6,0) · C (6,6) · D (0,6) metres — the map's default square. Clock offset is removed by the map's ping/pong clock sync. Mic-latency and gain spread are removed by the map's clap calibration (Phones → Calibrate, then press the clap buttons here when asked). Jitter is not removed.</p>
 </div>
 <style>select{background:#0a0f1b;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px}</style>
 <script src="peerjs.min.js"></script>
@@ -33,13 +35,13 @@
   const $ = id => document.getElementById(id), R = window.RotorMesh;
   const h = new URLSearchParams(location.hash.slice(1));
   const room = (h.get('room') || 'demo').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
-  ['n:sN', 'path:sPath', 'off:sOff', 'jit:sJit', 'bias:sBias', 'alt:sAlt', 'speed:sSpeed'].forEach(kv => { const [k, id] = kv.split(':'); if (h.get(k)) $(id).value = h.get(k); });
+  ['n:sN', 'path:sPath', 'off:sOff', 'jit:sJit', 'bias:sBias', 'gain:sGain', 'alt:sAlt', 'speed:sSpeed'].forEach(kv => { const [k, id] = kv.split(':'); if (h.get(k)) $(id).value = h.get(k); });
   $('roomTag').textContent = 'room ' + room;
-  $('sMap').href = './#room=' + room + '&role=map';
+  $('sMap').href = '../#room=' + room;
   const lbl = () => { $('sAltV').textContent = $('sAlt').value + ' m'; $('sJitV').textContent = $('sJit').value + ' ms'; }; lbl();
   let eng = null;
   const S = window.__sim = { drone: null, nodes: [] };
-  const opts = () => ({ n: +$('sN').value, path: $('sPath').value, speed: +$('sSpeed').value, alt: +$('sAlt').value, clockOffMs: +$('sOff').value, jitterMs: +$('sJit').value, biasMs: +$('sBias').value });
+  const opts = () => ({ n: +$('sN').value, path: $('sPath').value, speed: +$('sSpeed').value, alt: +$('sAlt').value, clockOffMs: +$('sOff').value, jitterMs: +$('sJit').value, biasMs: +$('sBias').value, gainDb: +$('sGain').value });
   document.querySelectorAll('input,select').forEach(el => el.oninput = () => { lbl(); if (eng) Object.assign(eng.o, { path: $('sPath').value, speed: +$('sSpeed').value, alt: +$('sAlt').value, jitterMs: +$('sJit').value }); });
   $('sStart').onclick = () => {
     if (eng) return location.reload();
@@ -47,13 +49,15 @@
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     eng = new R.SimEngine(ctx, opts());
     eng.nodes.forEach(n => { n.status = ''; n.link = new R.NodeLink(room, n.key, s => n.status = s, null, n.clock); });
-    S.nodes = eng.nodes;
+    S.nodes = eng.nodes; $('claps').hidden = false;
+    // for the map's Calibrate: a clap 30 cm from that phone
+    'ABCD'.split('').forEach((l, i) => { $('clap' + l).hidden = i >= eng.nodes.length; $('clap' + l).onclick = () => { const p = eng.nodes[i].p; eng.clap(p[0] + R.NEAR, p[1]); }; });
     setInterval(() => eng.step(performance.now()), 50);
     setInterval(() => {
       const msgs = eng.messages(); eng.nodes.forEach((n, i) => n.link.send(msgs[i]));
       const d = S.drone = eng.drone; if (d) eng.nodes[0].link.send({ t: 'truth', x: +d.x.toFixed(2), y: +d.y.toFixed(2), vx: +d.vx.toFixed(2), vy: +d.vy.toFixed(2) });
       $('sStatus').textContent = 'virtual drone at (' + d.x.toFixed(1) + ', ' + d.y.toFixed(1) + ') m';
-      $('sNodes').innerHTML = eng.nodes.map(n => { const o = n.det.out; return `<div class="nrow"><div class="pin" style="background:#4cc9ff">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m · clock ${n.off >= 0 ? '+' : ''}${Math.round(n.off)} ms<small>${n.status}${o.cls ? ' · ' + o.cls.label + ' ' + o.cls.conf + '%' : ''}</small><div class="meter"><i style="width:${o.conf}%"></i></div></div><div class="num">${o.f0 ? Math.round(o.f0) : '—'} Hz</div><div class="num">${o.e > -100 ? Math.round(o.e) : '—'} dB</div></div>`; }).join('');
+      $('sNodes').innerHTML = eng.nodes.map(n => { const o = n.det.out; return `<div class="nrow"><div class="pin" style="background:#4cc9ff">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m · clock ${n.off >= 0 ? '+' : ''}${Math.round(n.off)} ms · mic ${n.bias >= 0 ? '+' : ''}${n.bias.toFixed(1)} ms ${n.gainDb >= 0 ? '+' : ''}${n.gainDb.toFixed(1)} dB<small>${n.status}${o.cls ? ' · ' + o.cls.label + ' ' + o.cls.conf + '%' : ''}</small><div class="meter"><i style="width:${o.conf}%"></i></div></div><div class="num">${o.f0 ? Math.round(o.f0) : '—'} Hz</div><div class="num">${o.e > -100 ? Math.round(o.e) : '—'} dB</div></div>`; }).join('');
     }, 1000 / R.SEND_HZ);
   };
 })();

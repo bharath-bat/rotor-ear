@@ -8,17 +8,36 @@ Open the GitHub Pages site on a phone: [https://bharath-bat.github.io/rotor-ear/
 
 One mobile screen, top to bottom:
 
-- **Status banner**: state (QUIET / SOMETHING / DRONE / NOT A DRONE), class label and confidence, plus a **🎓 mine** badge when your taught samples decided the label.
+- **Status banner**: state (QUIET / SOMETHING / DRONE / NOT A DRONE), class label and confidence, plus a **🎓 mine** badge when your taught samples decided the label. The second line shows flight state, estimated RPM and pitch, e.g. `Climbing · 6210 rpm · 201 Hz`. The 🔔 button mutes alerts.
 - **Map**:
   - **Solo**: just this phone. One phone can't tell direction, so it shows rings for how strongly it hears rotors, and in/out arrows for *approaching* (getting louder) or *moving away*.
   - **With phones**: pins for each phone, arrival-time lines that cross at the drone, and a red dot with the class label, trail and heading arrow.
-- **Fingerprint hexagon** (six features) and a live **spectrogram** strip.
-- **Detection timeline**: a row of entries such as `21:12 quad`.
+- **Fingerprint hexagon** (six features), a **flight card** (state, 20 s pitch sparkline against the hover baseline, RPM; tap the RPM to set the blade count) and a live **spectrogram** strip.
+- **Detection timeline**: a row of entries such as `21:12 quad · climbing`, `21:12 🔔 quad`.
 - **Tap bar**:
   - **Listen**: start the mic.
   - **Teach**: a bottom sheet, also holding the Test sound and Analyse file.
   - **Phones: N**: create or join a room. This phone becomes the map, and other phones open the node link `mesh/#room=…&role=node`.
   - **Sim mode**: 4 fake phones and a fake drone on the same screen, with live accuracy numbers.
+
+## Alerts and stay-awake
+
+- **Screen Wake Lock** while listening, re-acquired when the page becomes visible again. Browsers without it (iOS before 16.4) get a timeline note that the screen may sleep. There is no silent-video trick.
+- **On DRONE onset:** the banner flashes, a short 2.4 kHz beep plays (unless muted with 🔔), the phone vibrates where `navigator.vibrate` exists, and a 🔔 entry goes into the timeline. Repeats are limited by a 30 s cooldown. iOS has no vibration API, and the timeline says so.
+- **The beep can't trigger the detector:** it is a pure tone (rejected as a whistle), and detection pauses for 0.8 s while it plays. `test/alert.py` checks this.
+
+## Flight state and RPM
+
+While a drone is heard, a tracker follows the smoothed fundamental f0, its rate of change (%/s) and the loudness trend:
+
+- **Hovering**: steady pitch. The first steady 2.5 s becomes this drone's hover baseline.
+- **Climbing / Descending**: pitch rising / falling faster than 0.8 %/s.
+- **Heavy / loaded**: steady pitch more than 5 % above the hover baseline at similar loudness (within 4 dB).
+- **Maneuvering**: pitch swinging up and down.
+- **Passing by (Doppler)**: pitch falling while loudness peaks, or pitch falling while it has just got much louder.
+- **RPM** = f0 × 60 / blades (2 blades by default).
+
+Honest limits: one phone can't fully separate Doppler from throttle. A drone that descends while coming closer can look like a fly-by, and a constant-speed approach shifts pitch without any visible change. Thresholds were tuned on synthetic sounds.
 
 ## Sound fingerprint
 
@@ -64,7 +83,7 @@ That is numbers only, never audio. The map then works as follows:
 
 Pages:
 
-- `mesh/` has the standalone node, map and room pages.
+- The watch post is the map (`/#room=…`). `mesh/` has the node and room pages; `mesh/#role=map` redirects to the watch post.
 - `mesh/sim.html` simulates phones over the real relay. You can set the clock offset (±400 ms / ±3 s), timing jitter and mic-latency spread.
 
 **Honest accuracy.** Sound travels 34 cm per millisecond, and with phones 6 m apart the largest time difference is about 17 ms. Arrival times only help if each phone's timing is known to about 1 ms:
@@ -73,7 +92,17 @@ Pages:
 - The killer is the **unknown and varying microphone input latency** of each phone (OS and Bluetooth buffers, often tens of ms, and different for each model).
 - The sim shows the effect. Once the latency spread exceeds a few ms, arrival times stop beating loudness.
 
-So on real, uncalibrated phones expect loudness-level accuracy, a few metres inside the group of phones and much worse outside it. Arrival times need a per-phone latency calibration step first (for example, one shared clap or chirp). Everything here was tuned on synthetic sounds.
+So on real, uncalibrated phones expect loudness-level accuracy, a few metres inside the group of phones and much worse outside it. Arrival-time fixes are only shown when they agree with loudness (within 2.5 m), unless every phone is calibrated.
+
+### Clap calibration
+
+Phones sheet → **Calibrate**. Every phone listens for a sharp onset (an AudioWorklet on the raw mic) and sends only its time (on the synced clock) and peak level.
+
+- **Full:** clap next to each phone in turn. Per-phone latency and gain are solved by least squares with residuals shown in ms / dB.
+- **Quick:** one clap next to a phone you pick. It is solved exactly, so there is no residual check.
+- 🔊 **Click here** plays a loud click from this phone instead of a clap.
+
+Corrections are stored per room in `localStorage` and applied to event times and levels in the arrival-time and loudness fits. When all agreeing phones are calibrated with residuals under 3 ms, the loudness sanity gate is dropped. Limits: it assumes the clap is at the phone (30 cm ≈ 0.9 ms), a phone's latency must stay stable (Bluetooth or a route change breaks it, so recalibrate), and mics clip on a clap right next to them, so the level is taken from the other phones.
 
 ## Code
 
@@ -82,7 +111,8 @@ The code is plain JS:
 - `detector.js`: detector and classifier, shared by all pages.
 - `watch.js` / `watch.css`: the watch post.
 - `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, MapView, SimEngine.
-- `mesh/envelope-worklet.js`: the envelope-peak timer.
+- `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
+- `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
 - `mesh/mesh.js`: the standalone mesh pages.
 
 Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && playwright install chromium`, then:
@@ -90,6 +120,8 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/gen.py`: synthetic WAVs.
 - `python3 test/run.py`: confusion table. `SAMPLES=test/wav/taught-samples.json` imports taught samples first.
 - `python3 test/teach.py`: wrong before teaching, right after.
-- `python3 test/mesh.py circle 4 45`: mesh accuracy over the PeerJS relay. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
+- `python3 test/flight.py`: flight-state table for hover / climb / descend / load / fly-by / maneuver WAVs.
+- `python3 test/alert.py`: the beep never triggers the detector; onset alert, cooldown, mute.
+- `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.

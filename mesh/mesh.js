@@ -1,4 +1,4 @@
-// Rotor Ear · Phone Mesh Radar pages (mesh/index.html): landing, listening node, map.
+// Rotor Ear · Phone Mesh Radar pages (mesh/index.html): landing + listening node. The map is the watch post (../).
 // All transport/estimation lives in core.js. Nodes send ONLY numbers + a class label + envelope-peak
 // times. Never audio. Passive: nothing here transmits RF or affects drones.
 (function () {
@@ -57,7 +57,7 @@
       R.TimingTap(ctx, bus).then(t => tap = t).catch(() => {}); // arrival times are optional
       simSpk = ctx.createGain(); simSpk.gain.value = 0; simSpk.connect(ctx.destination);
       setInterval(tick, 50);
-      setInterval(() => link.send(R.telemetry(det.out, key, $('nName').value.trim(), null, tap ? tap.take() : null)), 1000 / R.SEND_HZ);
+      setInterval(() => link.send(R.telemetry(det.out, key, $('nName').value.trim(), null, tap ? tap.take() : null, tap ? tap.takeOnsets() : null)), 1000 / R.SEND_HZ);
     }
     async function keepAwake() { try { if ('wakeLock' in navigator && !wake) { wake = await navigator.wakeLock.request('screen'); wake.onrelease = () => wake = null; } } catch (e) {} }
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (mic || sim)) keepAwake(); });
@@ -97,51 +97,9 @@
     window.__node = { get out() { return det && det.out; }, key };
   }
 
-  // ---------------- MAP ----------------
-  function runMap(room) {
-    $('map').hidden = false;
-    $('roomTag').textContent = 'room ' + room + ' · map';
-    $('mShare').value = nodeLink(room);
-    $('mCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('mShare').value); $('mCopy').textContent = 'Copied'; };
-    const posKey = 'rotorear-pos-' + room, saved = JSON.parse(localStorage.getItem(posKey) || '{}');
-    const model = new R.MeshModel(saved);
-    let viewer = false, viewState = null;
-    const M = window.__map = { est: null, truth: null, err: null, meanErr: null, agree: 0, banner: 'quiet', nodes: 0 };
-    const view = R.MapView($('mCanvas'), { onDrag: (k, p, done) => { const n = model.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true; if (done) { saved[k] = p; localStorage.setItem(posKey, JSON.stringify(saved)); } } });
-    const status = (s, cls) => { $('mStatus').textContent = s; $('mStatus').className = 'status ' + (cls || ''); };
-    const hub = R.startHub(room, {
-      status, viewer: () => { viewer = true; }, view: d => { if (d.t === 'view') viewState = d.s; },
-      data: (c, d) => { const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; }
-    });
-    const f1 = v => v == null ? '—' : v.toFixed(1);
-    function update() {
-      const S = viewer ? viewState : model.update();
-      if (!S) return;
-      view.set(S);
-      const live = S.nodes.filter(n => n.age < R.STALE_MS), b = S.banner;
-      const tdoa = S.tdoaOk ? ' · arrival-time fix' : S.estT ? ' · loudness fix (arrival times disagree: calibrate phones)' : '';
-      const sub = b === 'drone' ? `${S.agree.length} nodes agree @ ${Math.round(S.f0)} Hz` + (S.est ? ` · (${f1(S.est[0])}, ${f1(S.est[1])}) m` + tdoa : '')
-        : b === 'some' ? 'a node hears a harmonic hum…' : b === 'hum' ? 'harmonic hum, fingerprint says not a drone' : b === 'quiet' ? live.length + ' node' + (live.length === 1 ? '' : 's') + ' listening' : 'open the node link on the listening phones';
-      setBanner($('mBanner'), b, sub, b === 'drone' ? S.label : '');
-      if (b === 'off') $('mBanner').firstChild.textContent = 'WAITING FOR NODES'; else if (b === 'drone') $('mBanner').firstChild.textContent = 'DRONE';
-      const err = S.err || {}, tr = S.truth;
-      Object.assign(M, { est: S.est && S.est.map(v => +v.toFixed(2)), estL: S.estL, estT: S.estT, estF: S.estF, label: S.est ? S.label : '', truth: tr ? [tr.x, tr.y] : null,
-        err: S.est && tr ? +Math.hypot(S.est[0] - tr.x, S.est[1] - tr.y).toFixed(2) : null, meanErr: err.F != null ? err.F : err.L, errL: err.L, errT: err.T, errF: err.F,
-        headErr: S.headErr, heading: S.heading, pairs: S.pairs, agree: S.agree.length, banner: b, nodes: live.length, sync: S.nodes.map(n => n.rtt) });
-      $('mErr').innerHTML = tr && err.L != null ? `sim check (10 s avg error): loudness only <b>${f1(err.L)} m</b> · arrival times only <b>${f1(err.T)} m</b> · both <b>${f1(err.F)} m</b>` +
-        (S.headErr && S.headErr.both != null ? ` · heading off by ${S.headErr.both}°` : '') : S.pairs.length ? `${S.pairs.length} arrival-time pairs · lines = where the time differences put the drone` : '';
-      if (!viewer) hub.broadcastViewers({ t: 'view', s: S });
-      if (hub.mode === 'hub' && /^map is live/.test($('mStatus').textContent)) status('map is live · ' + live.length + ' node' + (live.length === 1 ? '' : 's') + ' connected', 'ok');
-      $('mNodes').innerHTML = S.nodes.map(n => `<div class="nrow ${n.age > R.STALE_MS ? 'stale' : ''}"><div class="pin" style="background:${n.color}">${n.label}</div>
-        <div class="nm">${(n.name || 'Node ' + n.label).replace(/[<>&]/g, '')}<small>${n.age > R.STALE_MS ? 'offline' : n.st === 'drone' ? 'DRONE' + (n.cl ? ' · ' + n.cl + ' ' + n.cp + '%' : '') + (S.agree.includes(n.key) ? ' · agrees' : '') : n.st === 'hum' ? 'not a drone' : n.st}${n.rtt != null ? ' · sync ±' + Math.round(n.rtt / 2) + ' ms' : ''}${n.f > 0 && Math.abs(n.trendDB) > 0.8 ? (n.trendDB > 0 ? ' · ▲ louder' : ' · ▼ quieter') : ''}</small><div class="meter"><i style="width:${n.c}%"></i></div></div>
-        <div class="num">${n.f > 0 ? Math.round(n.f) + ' Hz' : '— Hz'}</div><div class="num">${n.e > -100 ? Math.round(n.e) + ' dB' : '— dB'}</div></div>`).join('');
-    }
-    setInterval(update, 100);
-  }
-
   // ---------------- landing / roles ----------------
   function route() {
-    ['landing', 'roles', 'node', 'map'].forEach(id => $(id).hidden = true);
+    ['landing', 'roles', 'node'].forEach(id => $(id).hidden = true);
     const { room, role } = parseHash();
     if (!room) {
       $('landing').hidden = false;
@@ -150,12 +108,12 @@
       return;
     }
     if (role === 'node') return runNode(room);
-    if (role === 'map') return runMap(room);
+    if (role === 'map') return location.replace('../#room=' + room); // the map lives in the watch post now
     $('roles').hidden = false; $('roomCode').textContent = room; $('roomTag').textContent = 'room ' + room;
     $('shareUrl').value = baseUrl() + '#room=' + room;
     $('copyBtn').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('shareUrl').value); $('copyBtn').textContent = 'Copied'; };
     $('beNode').onclick = () => { location.hash = 'room=' + room + '&role=node'; };
-    $('beMap').onclick = () => { location.hash = 'room=' + room + '&role=map'; };
+    $('beMap').onclick = () => { location.href = '../#room=' + room; };
     $('simLink').href = 'sim.html#room=' + room;
   }
   window.addEventListener('hashchange', () => location.reload());

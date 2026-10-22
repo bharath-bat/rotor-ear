@@ -51,6 +51,24 @@ def boxfans(f0, seed):
     x *= 1 + 0.25 * np.interp(t, np.linspace(0, T, T * 8), r.standard_normal(T * 8))
     return x / np.max(np.abs(x)) + 0.3 * noise()
 save('boxfans_teach', boxfans(118, 21)); save('boxfans_test', boxfans(125, 22))
+
+# --- flight-state cases (16 s): one quadcopter whose rotor speed / position changes over time ---
+TF = 16; tf = np.arange(SR * TF) / SR
+def quadf(fpath, amp, seed, nz=0.12):
+    r = np.random.default_rng(seed)
+    x = sum(comb(fpath * (1 + d) * (1 + 0.003 * np.sin(2 * np.pi * (0.2 + 0.15 * i) * tf + r.uniform(0, 6))), 25, 0.8) for i, d in enumerate((0, 0.014, -0.011, 0.023)))
+    x = x / np.max(np.abs(x)) * amp
+    return x / np.max(np.abs(x)) + nz * r.standard_normal(len(tf))
+ramp = lambda t0, t1: np.clip((tf - t0) / (t1 - t0), 0, 1)
+save('fl_hover', quadf(np.full_like(tf, 180.0), np.ones_like(tf), 31))
+save('fl_climb', quadf(180 * np.exp(0.02 * np.clip(tf - 5, 0, None)), 10 ** (0.15 * np.clip(tf - 5, 0, None) / 20), 32))    # +2 %/s, a bit louder
+save('fl_descend', quadf(200 * np.exp(-0.016 * np.clip(tf - 5, 0, None)), 10 ** (-0.25 * np.clip(tf - 5, 0, None) / 20), 33))  # −1.6 %/s, quieter
+save('fl_load', quadf(175 * (1 + 0.10 * ramp(6, 7)), np.ones_like(tf), 34))   # payload picked up: +10 % pitch, same loudness
+# fly-by at 12 m/s, closest approach 6 m at t = 9 s: received pitch f·c/(c − v·u), level ∝ 1/r
+c, v, d0 = 343.0, 12.0, 6.0
+xs = v * (tf - 9); r = np.hypot(xs, d0); vr = -v * xs / r      # vr > 0 = approaching
+save('fl_flyby', quadf(185 * c / (c - vr), 6 / r, 35, nz=0.03))
+save('fl_maneuver', quadf(185 * (1 + 0.05 * np.sin(2 * np.pi * 0.45 * tf) + 0.03 * np.sin(2 * np.pi * 1.1 * tf)), 1 + 0.3 * np.sin(2 * np.pi * 0.45 * tf), 36))
 # negatives carried over from the first Rotor Ear tests
 save('tone', np.sin(2 * np.pi * 1000 * t))
 save('white', noise())

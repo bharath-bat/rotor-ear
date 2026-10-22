@@ -9,7 +9,7 @@
 </head>
 <body>
 <main id="app">
-  <div id="banner" class="off">READY<small>tap Listen · or try Sim</small></div>
+  <div id="bannerbox"><div id="banner" class="off">READY<small>tap Listen · or try Sim</small></div><button id="bell" aria-label="mute alerts">🔔</button></div>
 
   <section id="mapbox">
     <canvas id="map"></canvas>
@@ -19,6 +19,7 @@
 
   <section id="mid">
     <div class="hex"><canvas id="fpRadar" width="240" height="240"></canvas><div id="fpLbl">fingerprint</div></div>
+    <div class="flight" id="flight"><div id="flState">flight</div><canvas id="spark"></canvas><button id="flRpm" title="tap to set blades per prop">— rpm</button></div>
     <div class="specbox"><canvas id="spec"></canvas><div class="axis" id="axis"></div></div>
   </section>
 
@@ -78,6 +79,15 @@
       <div id="pNodes" class="list"></div>
       <p class="note">Drag the pins on the map to where the phones really are (metres). Clocks are synced automatically through the relay.</p>
       <button class="btn" id="pLeave">Leave room</button>
+    </div>
+    <div id="cal">
+      <div class="k">👏 Calibrate timing &amp; loudness <span id="cState"></span></div>
+      <p class="note">Every phone's mic adds its own delay (often 10–50 ms) and gain. Clap sharply next to the phones so the map can measure and remove both. Everyone stays quiet; phones only send the clap's time and level.</p>
+      <div class="trow"><select id="cMode"><option value="full">Clap next to each phone in turn (best)</option><option value="quick">Quick: one clap next to one phone</option></select><select id="cSpot" hidden></select></div>
+      <div class="tbtns"><button class="btn" id="cStart">👏 Calibrate</button><button class="btn" id="cClick" title="play a loud click from this phone's speaker">🔊 Click here</button><button class="btn" id="cSim" hidden>👏 Simulate clap</button></div>
+      <div class="msg" id="cMsg"></div>
+      <div class="list cal" id="cTable"></div>
+      <button class="btn" id="cClear">Clear calibration</button>
     </div>
   </section>
 </main>
