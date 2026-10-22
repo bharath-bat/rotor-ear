@@ -3,42 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#05070c">
+<meta name="theme-color" content="#0B0D12">
 <title>Rotor Ear · watch post</title>
 <link rel="stylesheet" href="watch.css">
 </head>
 <body>
 <main id="app">
-  <div id="bannerbox"><div id="banner" class="off">READY<small>tap Listen · or try Sim</small></div><button id="bell" aria-label="mute alerts">🔔</button></div>
+  <!-- status block: shape + state word, class line, where, agreement, sound pill -->
+  <header id="status" class="ready" aria-live="polite">
+    <div id="demoStripe"><span>DEMO · simulated drone · not a real detection</span></div>
+    <div class="srow"><i id="stIcon" aria-hidden="true">⊖</i><h1 id="stWord">READY</h1><button id="more" aria-label="More: theme, sound, demo">•••</button></div>
+    <div id="stCls">Not listening · tap Listen to start</div>
+    <div id="stWhere"></div>
+    <div id="stSub"></div>
+    <div class="srow2"><button id="pill" hidden>Sound: ON</button><div id="stProg" hidden><i></i></div><span id="stNote"></span></div>
+  </header>
 
   <section id="mapbox">
     <canvas id="map"></canvas>
-    <div id="mapTag">solo · this phone</div>
+    <div id="mapTag">MAP · this phone only until others join</div>
     <div id="mapInfo"></div>
+    <button id="addPhones" hidden><b>+ Add phones for a position</b><small>opens the Phones sheet</small></button>
+    <div id="endCard" hidden><b>That was the demo.</b><span>4 phones · no audio leaves the phones</span>
+      <button id="endPhones">Try it with your friends' phones →</button><button id="endReplay">Replay demo</button></div>
   </section>
 
-  <section id="mid">
-    <div class="hex"><canvas id="fpRadar" width="240" height="240"></canvas><div id="fpLbl">fingerprint</div></div>
-    <div class="flight" id="flight"><div id="flState">flight</div><canvas id="spark"></canvas><button id="flRpm" title="tap to set blades per prop">— rpm</button></div>
-    <div class="specbox"><canvas id="spec"></canvas><div class="axis" id="axis"></div></div>
-  </section>
+  <div id="peek" role="button" tabindex="0" aria-label="Open Details">
+    <span class="pt"><b id="peekT">Details ˄</b><small id="peekS">timeline · why · fingerprint · flight</small></span>
+    <canvas id="spec" aria-hidden="true"></canvas>
+    <button id="itWas" hidden>It was a drone</button>
+  </div>
 
-  <section id="timeline"><span class="dim">detections will appear here</span></section>
+  <button id="tryDemo"><span><b>▷ Try a 60-second demo</b><small>4 simulated phones · marked DEMO the whole time</small></span><i>›</i></button>
+  <div id="actions" hidden><button id="act1"></button><button id="act2" class="primary"></button></div>
 
-  <nav id="tabs">
-    <button id="start"><i>🎙️</i><span>Listen</span></button>
-    <button id="tabTeach"><i>🎓</i><span>Teach</span></button>
-    <button id="tabPhones"><i>📱</i><span id="phonesN">Phones: 1</span></button>
-    <button id="tabSim"><i>🧪</i><span>Sim mode</span></button>
+  <nav id="bar">
+    <button id="tabPhones"><b>Phones</b><small id="phonesN">add phones</small></button>
+    <button id="start" class="primary"><b id="startT">▶ Listen</b><small id="startS">tap once · sound on too</small></button>
+    <button id="tabTeach"><b>Teach</b><small id="teachN">0 samples</small></button>
   </nav>
 
   <!-- Teach sheet -->
   <section class="sheet" id="teach" hidden>
     <div class="grab"></div>
-    <div class="shead"><b>🎓 Teach</b><small>record real sounds to tune the fingerprint</small><button class="x" data-close>✕</button></div>
+    <div class="shead"><h2>Teach</h2><small>record real sounds to tune the fingerprint</small></div>
     <div class="trow">
       <select id="tTag"></select>
-      <button class="rec" id="tRec">⏺ Record 5 s</button>
+      <button class="rec" id="tRec">● Record 5 s</button>
     </div>
     <div class="prog"><i id="tProg"></i></div>
     <div class="msg" id="tMsg">Play the sound near the mic (a real drone, or a drone video played aloud), pick what it is, then record.</div>
@@ -46,49 +57,81 @@
     <label class="chk"><input type="checkbox" id="tUse" checked> <b>Use my samples</b>&nbsp;in the fingerprint</label>
     <div class="counts" id="tCounts"></div>
     <div class="tbtns">
-      <button class="btn" id="tExport">⬇ Export</button>
-      <button class="btn" id="tImport">⬆ Import</button>
-      <button class="btn" id="tReset">🗑 Reset</button>
+      <button class="btn" id="tExport">Export</button>
+      <button class="btn" id="tImport">Import</button>
+      <button class="btn" id="tReset">Reset</button>
       <input type="file" id="tImportFile" accept="application/json,.json">
     </div>
     <div class="list" id="tList"></div>
     <div class="k">Try it without a drone</div>
     <div class="tbtns">
-      <button class="btn" id="test">🚁 Test sound</button>
-      <button class="btn" id="fileBtn">📂 Analyse file</button>
+      <button class="btn" id="test">Test sound</button>
+      <button class="btn" id="fileBtn">Analyse file</button>
       <input type="file" id="file" accept="audio/*">
     </div>
     <label class="chk"><input type="checkbox" id="toSpk" checked> play test sound / file through the speaker</label>
     <label class="chk"><input type="checkbox" id="toAna" checked> feed test sound / file straight into the detector</label>
     <p class="note">Only the six fingerprint numbers are saved, on this device. Clips (if kept) stay in this browser and are never uploaded or exported.</p>
+    <button class="done" data-close>Done</button>
   </section>
 
-  <!-- Phones sheet -->
+  <!-- Details sheet: the only place with a number for "how sure" -->
+  <section class="sheet" id="details" hidden>
+    <div class="grab"></div>
+    <div class="shead"><h2>Details</h2></div>
+    <div class="k">Why we think so</div>
+    <ul id="dWhy"></ul>
+    <div class="score"><span><b>Match score</b><small id="dScoreS">how close to a class template · not accuracy</small></span><em id="dScore">—</em></div>
+    <div class="k">Flight</div>
+    <div class="flight"><b id="flState">—</b><canvas id="spark"></canvas><label>blades <select id="flBlades"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></label></div>
+    <div class="k">Fingerprint · spectrogram</div>
+    <div class="fprow"><div class="hex"><canvas id="fpRadar" width="240" height="240"></canvas><div id="fpLbl">fingerprint</div></div>
+      <div class="specbig"><canvas id="spec2"></canvas><div class="axis" id="axis"></div></div></div>
+    <div class="k">Timeline</div>
+    <div id="tlList"></div>
+    <label class="chk toggle"><span>Show workings (bearing lines, error vs true)</span><input type="checkbox" id="workings"></label>
+    <button class="done" data-close>Done</button>
+  </section>
+
+  <!-- Phones sheet: room + clap calibration -->
   <section class="sheet" id="phones" hidden>
     <div class="grab"></div>
-    <div class="shead"><b>📱 Phones</b><small>more phones = a position, not just "closer / further"</small><button class="x" data-close>✕</button></div>
+    <div class="shead"><h2>Phones</h2><small id="pStatus">this phone only</small></div>
     <div id="pNone">
       <p class="note">This phone becomes the map. Other phones open a link and listen; they send only numbers (confidence, pitch, loudness, envelope-peak times). Never audio.</p>
-      <button class="btn big" id="pCreate">➕ Create a room</button>
+      <button class="btn big" id="pCreate">Create a room</button>
       <div class="trow"><input id="pCode" placeholder="or join room code" maxlength="12" autocapitalize="off"><button class="btn" id="pJoin">Join</button></div>
     </div>
     <div id="pRoom" hidden>
-      <div class="k">Room <b id="pRoomCode"></b> · <span id="pStatus">starting…</span></div>
-      <div class="k" style="margin-top:8px">Open this on each listening phone:</div>
-      <div class="trow"><input id="pLink" readonly><button class="btn" id="pCopy">Copy</button><button class="btn" id="pShare">Share</button></div>
-      <div id="pNodes" class="list"></div>
-      <p class="note">Drag the pins on the map to where the phones really are (metres). Clocks are synced automatically through the relay.</p>
-      <button class="btn" id="pLeave">Leave room</button>
+      <div class="k">Open this on each listening phone · room <b id="pRoomCode"></b></div>
+      <div class="trow"><input id="pLink" readonly><button class="btn" id="pCopy">Copy</button></div>
     </div>
     <div id="cal">
-      <div class="k">👏 Calibrate timing &amp; loudness <span id="cState"></span></div>
-      <p class="note">Every phone's mic adds its own delay (often 10–50 ms) and gain. Clap sharply next to the phones so the map can measure and remove both. Everyone stays quiet; phones only send the clap's time and level.</p>
-      <div class="trow"><select id="cMode"><option value="full">Clap next to each phone in turn (best)</option><option value="quick">Quick: one clap next to one phone</option></select><select id="cSpot" hidden></select></div>
-      <div class="tbtns"><button class="btn" id="cStart">👏 Calibrate</button><button class="btn" id="cClick" title="play a loud click from this phone's speaker">🔊 Click here</button><button class="btn" id="cSim" hidden>👏 Simulate clap</button></div>
+      <div class="k">Timing calibration · vs the average phone <span id="cState"></span></div>
+      <div id="cTable"></div>
+      <p class="note" id="cLegend">bar = timing residual · good under 3 ms · fair under 6 ms · redo above. Drag pins on the map to where the phones really are.</p>
+      <div class="next"><b id="cNext">Calibrate: clap next to each phone in turn</b><select id="cMode" aria-label="calibration mode"><option value="full">mode: each phone</option><option value="quick">mode: one clap</option></select><select id="cSpot" hidden aria-label="phone to clap at"></select></div>
       <div class="msg" id="cMsg"></div>
-      <div class="list cal" id="cTable"></div>
-      <button class="btn" id="cClear">Clear calibration</button>
+      <button class="primary bigbtn" id="cStart"><b>Clap now</b><small>3 · 2 · 1 countdown, then clap once</small></button>
+      <div class="tbtns"><button class="btn" id="cClick">Click from this phone</button><button class="btn" id="cSim" hidden>Simulate clap</button><button class="btn" id="cClear">Clear</button></div>
     </div>
+    <div class="tbtns"><button class="btn" id="pShare">Share join link</button><button class="btn done2" data-close>Done</button></div>
+    <button class="btn" id="pLeave" hidden>Leave room</button>
+  </section>
+
+  <!-- More sheet (•••): theme, sound, demo, device notes -->
+  <section class="sheet" id="moreS" hidden>
+    <div class="grab"></div>
+    <div class="shead"><h2>More</h2></div>
+    <div class="k">Theme</div>
+    <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
+    <div class="k">Sound</div>
+    <div class="tbtns"><button class="btn" id="mMute">Mute 5 min</button><button class="btn" id="mTest">Test alert</button></div>
+    <div class="k">Demo</div>
+    <button class="btn wide" id="mDemo">Try a 60-second demo</button>
+    <div class="k">This device</div>
+    <div id="devNotes" class="note">Notes appear once you start listening.</div>
+    <button class="done" data-close>Done</button>
   </section>
 </main>
 <script src="detector.js"></script>

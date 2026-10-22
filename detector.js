@@ -1,5 +1,6 @@
 // RotorDetector: the shared Rotor Ear detector + sound fingerprint classifier.
-// Used by the watch post (index.html + watch.js) and by Phone Mesh Radar (mesh/).
+// Used by the watch post (index.html + watch.js) and by Phone Mesh Radar (mesh/), together with the shared
+// watch-post state machine (WatchState) and its wording (likelihood, STATES).
 // Passive: it only reads an AnalyserNode. No audio ever leaves the device.
 (function (g) {
   'use strict';
@@ -62,7 +63,7 @@
       const H = this.h, last = k => H.filter(x => now - x[0] <= k);
       if (!H.length) return null;
       const r = last(500), fs = Math.exp((r.length ? median(r.map(x => x[1])) : H[H.length - 1][1]) / 100);
-      if (!this.spark.length || now - this.spark[this.spark.length - 1][0] >= 250) { this.spark.push([now, fs]); if (this.spark.length > 80) this.spark.shift(); }
+      if (!this.spark.length || now - this.spark[this.spark.length - 1][0] >= 250) { this.spark.push([now, fs]); if (this.spark.length > 120) this.spark.shift(); }
       const w = last(2500), out = { f: fs, rpm: fs * 60 / this.blades, rate: 0, dbRate: 0, state: this.state, base: this.base && this.base.f, spark: this.spark };
       if (w.length < 15 || now - w[0][0] < 2000) return out;
       const p = lsq(w.map(x => [(x[0] - now) / 1000, x[1]])), l = lsq(w.map(x => [(x[0] - now) / 1000, x[2]]));
@@ -314,6 +315,58 @@
   }
 
   // Synthetic quadcopter (Rotor Ear's Test sound): 4 slightly detuned rotors, wobble. Returns its output GainNode.
+  // ---- watch-post state machine (shared by the watch post and the mesh node page) ----
+  // Ready → Watching → Checking a sound… → DRONE (held 1.5 s) or Not a drone (shown 5 s) → Watching.
+  // DRONE → Got it → Tracking (silent). DRONE/Tracking → signal gone for 1 s → Drone lost → heard again within
+  // 60 s: back to DRONE/Tracking with no new alert; after 60 s → Watching.  raw = 'off'|'quiet'|'some'|'drone'|'hum'
+  // (the detector's or the mesh's verdict, which already has its own hysteresis). ev = 'alert' | 'lost' | 'back' | 'gone'.
+  const WATCH = { hold: 1500, grace: 1000, notMs: 5000, lostMs: 60000 };
+  class WatchState {
+    constructor() { this.reset(); }
+    reset() { this.s = 'ready'; this.since = 0; this.holdT = 0; this.holdK = 0; this.dropT = 0; this.ack = false; this.ackAt = 0; this.first = 0; this.lastSeen = 0; this.humSeen = false; this.humT = -1e9; this.ev = null; }
+    update(now, raw, listening) {
+      this.ev = null;
+      const go = (s, ev) => { if (s !== this.s) { this.s = s; this.since = now; } if (ev) this.ev = ev; };
+      if (!listening) { if (this.s !== 'ready') this.reset(); return this; }
+      if (raw === 'drone') { if (!this.holdT) this.holdT = now; } else this.holdT = 0;
+      this.holdK = this.holdT ? Math.min(1, (now - this.holdT) / WATCH.hold) : 0;
+      const held = this.holdK >= 1;
+      if (this.s === 'ready') go('watching');
+      if (raw === 'hum') this.humT = now; else if (raw !== 'some') this.humSeen = false;
+      const humNear = now - this.humT < 3000; // a weak 'some' right after a hum is the same ignored hum, not a new sound
+      switch (this.s) {
+        case 'watching':
+          if (raw === 'drone' || (raw === 'some' && !humNear)) go('checking');
+          else if (raw === 'hum' && !this.humSeen) { this.humSeen = true; go('notdrone'); } // a steady fan is shown once, then ignored
+          break;
+        case 'checking':
+          if (held) { this.first = this.lastSeen = now; this.ack = false; go('drone', 'alert'); }
+          else if (raw === 'hum') { this.humSeen = true; go('notdrone'); }
+          else if (raw === 'quiet' || raw === 'off') go('watching');
+          break;
+        case 'notdrone':
+          if (raw === 'drone' || (raw === 'some' && !humNear)) go('checking'); else if (now - this.since > WATCH.notMs) go('watching');
+          break;
+        case 'drone': case 'tracking':
+          if (raw === 'drone') { this.lastSeen = now; this.dropT = 0; }
+          else { if (!this.dropT) this.dropT = now; if (now - this.dropT > WATCH.grace) go('lost', 'lost'); }
+          break;
+        case 'lost':
+          if (held) { this.lastSeen = now; go(this.ack ? 'tracking' : 'drone', 'back'); }
+          else if (now - this.lastSeen > WATCH.lostMs) go('watching', 'gone');
+          break;
+      }
+      return this;
+    }
+    acknowledge(now) { if (this.s === 'drone') { this.ack = true; this.ackAt = now; this.s = 'tracking'; } }
+    dismiss(now) { if (this.s === 'lost' || this.s === 'notdrone') { this.s = 'watching'; this.since = now; this.ack = false; this.ev = 'gone'; } }
+  }
+  // Wording. The match score is a softmax share against the class templates, not an accuracy, so the UI shows a
+  // word; the number appears once, in Details, as "match score".
+  const likelihood = score => score >= 85 ? 'very likely' : score >= 65 ? 'likely' : 'possible';
+  const STATES = { ready: ['⊖', 'READY'], watching: ['○', 'WATCHING'], checking: ['◐', 'Checking a sound…'], notdrone: ['✓', 'Not a drone'],
+    drone: ['▲', 'DRONE'], tracking: ['▲', 'DRONE'], lost: ['◇', 'Drone lost'] };
+
   function syntheticDrone(ctx, base) {
     const out = ctx.createGain(), nodes = [];
     const N = 24, re = new Float32Array(N + 1), im = new Float32Array(N + 1);
@@ -324,12 +377,23 @@
       const lfo = ctx.createOscillator(); lfo.frequency.value = 0.3 + i * 0.17;
       const lg = ctx.createGain(); lg.gain.value = base * 0.006; lfo.connect(lg); lg.connect(o.frequency);
       const gg = ctx.createGain(); gg.gain.value = 0.09; o.connect(gg); gg.connect(out);
-      o.start(); lfo.start(); nodes.push(o, lfo);
+      o.start(); lfo.start(); nodes.push(o, lfo); o.f1 = base * (1 + d);
     });
     out.stop = () => { nodes.forEach(n => { try { n.stop(); } catch (e) {} }); out.disconnect(); };
+    out.setPitch = (k, tc) => nodes.forEach(n => { if (n.f1) n.frequency.setTargetAtTime(n.f1 * k, ctx.currentTime, tc || 0.5); }); // throttle
     return out;
   }
   // Ambient noise bed (independent per call), so a far-away virtual drone fades into the background.
+  // a fan / AC: a rock-steady 140 Hz blade-pass comb plus airflow noise (what the 'Not a drone' class expects)
+  function syntheticFan(ctx) {
+    const N = 10, re = new Float32Array(N + 1), im = new Float32Array(N + 1);
+    for (let h = 1; h <= N; h++) im[h] = Math.pow(h, -1.3);
+    const o = ctx.createOscillator(); o.setPeriodicWave(ctx.createPeriodicWave(re, im)); o.frequency.value = 140;
+    const out = ctx.createGain(), og = ctx.createGain(); og.gain.value = 0.25; o.connect(og); og.connect(out); o.start();
+    const nz = ambientNoise(ctx, 0.04); nz.connect(out);
+    out.stop = () => { try { o.stop(); } catch (e) {} nz.stop(); out.disconnect(); };
+    return out;
+  }
   function ambientNoise(ctx, level) {
     const b = ctx.createBuffer(1, ctx.sampleRate * 3, ctx.sampleRate), d = b.getChannelData(0);
     let y = 0; for (let i = 0; i < d.length; i++) { y = 0.9 * y + 0.1 * (Math.random() * 2 - 1); d[i] = y * 3 + (Math.random() * 2 - 1) * 0.3; }
@@ -339,5 +403,5 @@
     return gn;
   }
 
-  g.RotorEar = { RotorDetector, FlightTracker, FLIGHT, makeAnalyser, syntheticDrone, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
+  g.RotorEar = { RotorDetector, FlightTracker, FLIGHT, WatchState, WATCH, likelihood, STATES, makeAnalyser, syntheticDrone, syntheticFan, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
 })(window);

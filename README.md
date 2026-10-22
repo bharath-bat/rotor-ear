@@ -8,23 +8,30 @@ Open the GitHub Pages site on a phone: [https://bharath-bat.github.io/rotor-ear/
 
 One mobile screen, top to bottom:
 
-- **Status banner**: state (QUIET / SOMETHING / DRONE / NOT A DRONE), class label and confidence, plus a **🎓 mine** badge when your taught samples decided the label. The second line shows flight state, estimated RPM and pitch, e.g. `Climbing · 6210 rpm · 201 Hz`. The 🔔 button mutes alerts.
-- **Map**:
-  - **Solo**: just this phone. One phone can't tell direction, so it shows rings for how strongly it hears rotors, and in/out arrows for *approaching* (getting louder) or *moving away*.
-  - **With phones**: pins for each phone, arrival-time lines that cross at the drone, and a red dot with the class label, trail and heading arrow.
-- **Fingerprint hexagon** (six features), a **flight card** (state, 20 s pitch sparkline against the hover baseline, RPM; tap the RPM to set the blade count) and a live **spectrogram** strip.
-- **Detection timeline**: a row of entries such as `21:12 quad · climbing`, `21:12 🔔 quad`.
-- **Tap bar**:
-  - **Listen**: start the mic.
-  - **Teach**: a bottom sheet, also holding the Test sound and Analyse file.
-  - **Phones: N**: create or join a room. This phone becomes the map, and other phones open the node link `mesh/#room=…&role=node`.
-  - **Sim mode**: 4 fake phones and a fake drone on the same screen, with live accuracy numbers.
+- **Status block**: a big icon + word, then one line each for what, where and how sure. The orange-red accent is used only for a confirmed drone.
+  - **Ready** (not listening) → **Watching** (quiet; a slow breathing ring on this phone shows it is alive) → **Checking** (a harmonic hum, held 1.5 s before it can become a drone; dashed outline) → **DRONE** (solid fill) or **Not a drone** (e.g. "Fan / AC hum · ignored", back to Watching after 5 s).
+  - **Got it** acknowledges a drone: the block stays filled, but the flash and beeps stop (tracking).
+  - **Drone lost**: no rotor sound for 1 s. It shows "last seen X ago", where it was, a 60 s countdown and **Back to watching**. If it is heard again inside those 60 s it is the same drone, with no new alert.
+  - Confidence is a word: *possible*, *likely* or *very likely*, plus "N of N phones agree". With fewer than 2 phones voting it never says more than *likely*. The one number (the match score against the class template) appears only in **Details**.
+- **Map**: grey lettered phone pins, N ↑ and a 5 m scale bar.
+  - **Solo**: one phone can't tell direction, so it shows rings for how strongly it hears rotors, and in/out arrows for approaching or moving away.
+  - **With phones**: a triangle marker with heading arrow, an uncertainty ring and a flight chip (e.g. `Hovering · 5.4k rpm`, or `Loaded`; a load never raises an alert by itself). Arrival-time lines are faint and drawn only while a drone is confirmed, unless **Show workings** is on.
+- **Peek card**: "Why we think so" and a mini spectrogram. Tap it to open **Details**: why, match score, flight card (30 s pitch sparkline, RPM, blade count), fingerprint hexagon, spectrogram, the timeline (episodes such as `21:37 Quadcopter 1:04 NE`, demo rows tagged DEMO) and Show workings.
+- **Two big actions** for the current state (Got it / Mute 5 min, Back to watching / Details, Replay demo).
+- **Bottom bar**: **Phones** (room, join link, clap calibration), a wide **Listen / Stop**, and **Teach** (also holds Test sound and Analyse file). Every tap target is at least 44 pt.
+- **••• menu** (hidden during an alert): Night / Sun theme, Mute 5 min, Test sound, the 60 s demo and device notes (wake lock, vibration).
+- **Sun theme**: white surface and darker accents for bright daylight. It is stored in `localStorage`.
+
+## Demo
+
+**Try the demo** (or ••• → Demo) plays a scripted 60 s scene on 4 simulated phones: 5 s of quiet, a fan near phone B that is ignored, a drone that approaches, climbs, hovers and leaves, then "Drone lost" and an end card. A permanent hatched **DEMO** stripe stays on the status block, the word reads **DEMO · DRONE**, the map is tagged and the marker hatched, the beep is a different, lower tone, and timeline rows are tagged DEMO. Phones from `mesh/sim.html` (named `sim …`) also count as demo.
 
 ## Alerts and stay-awake
 
-- **Screen Wake Lock** while listening, re-acquired when the page becomes visible again. Browsers without it (iOS before 16.4) get a timeline note that the screen may sleep. There is no silent-video trick.
-- **On DRONE onset:** the banner flashes, a short 2.4 kHz beep plays (unless muted with 🔔), the phone vibrates where `navigator.vibrate` exists, and a 🔔 entry goes into the timeline. Repeats are limited by a 30 s cooldown. iOS has no vibration API, and the timeline says so.
-- **The beep can't trigger the detector:** it is a pure tone (rejected as a whistle), and detection pauses for 0.8 s while it plays. `test/alert.py` checks this.
+- **Screen Wake Lock** while listening, re-acquired when the page becomes visible again. Browsers without it (iOS before 16.4) get a note in ••• that the screen may sleep. There is no silent-video trick.
+- **On DRONE:** the block flashes 3 times and then stays filled (no endless pulse; reduced-motion skips the flash). A 2.4 / 1.8 kHz beep plays 3 times, then once every 10 s until **Got it**. The phone vibrates where `navigator.vibrate` exists (not iOS). Open sheets close, except Teach (you may be recording the drone on purpose). **Drone lost** plays one falling tone.
+- **Mute 5 min** silences beeps only; the flash still works. The pill shows "MUTED · flash only · 4:59" and mute expires on its own.
+- **The beep can't trigger the detector:** it is pure tones (rejected as a whistle), and detection pauses while it plays (about 1.1 s for the 3 beeps). `test/alert.py` checks this.
 
 ## Flight state and RPM
 
@@ -100,7 +107,7 @@ Phones sheet → **Calibrate**. Every phone listens for a sharp onset (an AudioW
 
 - **Full:** clap next to each phone in turn. Per-phone latency and gain are solved by least squares with residuals shown in ms / dB.
 - **Quick:** one clap next to a phone you pick. It is solved exactly, so there is no residual check.
-- 🔊 **Click here** plays a loud click from this phone instead of a clap.
+- **Clap now** starts a 3 · 2 · 1 countdown. **Click from this phone** plays a loud click instead of a clap. Each phone row shows its residual as a bar plus a word (good under 3 ms, fair under 6 ms, redo above, with a Redo button).
 
 Corrections are stored per room in `localStorage` and applied to event times and levels in the arrival-time and loudness fits. When all agreeing phones are calibrated with residuals under 3 ms, the loudness sanity gate is dropped. Limits: it assumes the clap is at the phone (30 cm ≈ 0.9 ms), a phone's latency must stay stable (Bluetooth or a route change breaks it, so recalibrate), and mics clip on a clap right next to them, so the level is taken from the other phones.
 
@@ -121,7 +128,7 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/run.py`: confusion table. `SAMPLES=test/wav/taught-samples.json` imports taught samples first.
 - `python3 test/teach.py`: wrong before teaching, right after.
 - `python3 test/flight.py`: flight-state table for hover / climb / descend / load / fly-by / maneuver WAVs.
-- `python3 test/alert.py`: the beep never triggers the detector; onset alert, cooldown, mute.
+- `python3 test/alert.py`: the alert flow: beep never triggers the detector, Checking → DRONE, flash ×3 then steady, repeat beep, Got it, mute with expiry, Drone lost and back, Lost → Watching, fan ignored, Loaded is not an alert.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.

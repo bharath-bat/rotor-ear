@@ -1,19 +1,38 @@
-// Rotor Ear · watch post. One screen: status banner, map, fingerprint + spectrogram, detection timeline,
-// and a tap bar (Listen · Teach · Phones · Sim). Passive acoustic detection only: it listens, never transmits.
-// Detection/classification: detector.js. Mesh (relay, clock sync, arrival times, map, simulator): mesh/core.js.
+// Rotor Ear · watch post. One screen: status block, map hero, Details peek, thumb-zone actions and a bar
+// (Phones · Listen/Stop · Teach). Passive acoustic detection only: it listens, never transmits.
+// Detection, classification and the watch-post state machine: detector.js. Mesh (relay, clock sync, arrival
+// times, map, simulator, calibration): mesh/core.js.
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const { RotorDetector, makeAnalyser, syntheticDrone, FEATS, CLASSES, GROUPS, TAGS, NH } = window.RotorEar;
+  const { RotorDetector, makeAnalyser, syntheticDrone, FEATS, CLASSES, TAGS, NH, WatchState, WATCH, likelihood, STATES } = window.RotorEar;
   const R = window.RotorMesh, ME = 'me';
-  let ctx, analyser, bus, det, tap, micStream, micSrc, testNodes = null, fileSrc = null, spk, ana, errMsg = '';
+  let ctx, analyser, bus, det, tap, micStream, micSrc, testNodes = null, fileSrc = null, spk, ana, errMsg = '', listenStart = 0;
   const S = window.__rotor = { conf: 0, state: 'off', f0: 0, hits: 0, cls: null };
+  const ws = new WatchState();
+  const mmss = ms => { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  const hms = ms => { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 3600) + ':' + String(Math.floor(s / 60) % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  const clock = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const esc = t => String(t).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
+  const setText = (id, t) => { const e = $(id); if (e.textContent !== t) e.textContent = t; };
+
+  // ---------- theme: Night (default) or Sun (outdoors) ----------
+  let theme = localStorage.getItem('rotorear-theme') || 'dark', cols = null;
+  function applyTheme() {
+    document.documentElement.classList.toggle('sun', theme === 'sun');
+    document.querySelectorAll('[data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === theme));
+    const cs = getComputedStyle(document.documentElement), v = k => cs.getPropertyValue(k).trim();
+    cols = { map: v('--map'), ink: v('--ink'), ink2: v('--ink-2'), line: v('--line'), pin: v('--pin'), pinInk: v('--pin-ink'), alert: v('--alert'), check: v('--check'), demo: v('--demo'), panel: v('--panel') };
+    document.querySelector('meta[name=theme-color]').content = v('--surface');
+  }
+  document.querySelectorAll('[data-theme]').forEach(b => b.onclick = () => { theme = b.dataset.theme; localStorage.setItem('rotorear-theme', theme); applyTheme(); });
+  applyTheme();
 
   // ---------- audio graph: mic / test sound / file → bus → detector (+ arrival-time tap) ----------
   function ensureCtx() {
     if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = makeAnalyser(ctx); det = new RotorDetector(analyser); det.flight.blades = +localStorage.getItem('rotorear-blades') || 2; Teach.apply();
+    analyser = makeAnalyser(ctx); det = new RotorDetector(analyser); det.flight.blades = blades; Teach.apply();
     bus = ctx.createGain(); bus.connect(analyser); // everything the detector hears; also what Teach records
     spk = ctx.createGain(); spk.connect(ctx.destination);
     ana = ctx.createGain(); ana.connect(bus);
@@ -27,46 +46,46 @@
   const listening = () => !!(micStream || testNodes || fileSrc);
   async function toggleMic() {
     ensureCtx();
-    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micSrc.disconnect(); micStream = null; tabs(); return; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micSrc.disconnect(); micStream = null; return; }
     try {
       errMsg = '';
       micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-      micSrc = ctx.createMediaStreamSource(micStream); micSrc.connect(bus); keepAwake();
+      micSrc = ctx.createMediaStreamSource(micStream); micSrc.connect(bus); keepAwake(); listenStart = performance.now();
     } catch (e) { micStream = null; errMsg = 'Microphone unavailable: ' + (e.message || e.name) + ' (needs HTTPS + permission)'; }
-    tabs();
   }
   // Stay awake: Screen Wake Lock while listening; the OS drops it when the page is hidden, so re-acquire on return.
-  let wake = null, wakeNoted = false;
+  let wake = null, notes = [];
+  const devNote = t => { if (!notes.includes(t)) { notes.push(t); $('devNotes').innerHTML = notes.map(esc).join('<br>'); } };
   async function keepAwake() {
-    let msg = '';
-    if (!('wakeLock' in navigator)) msg = '⚠ this browser can\'t keep the screen on: set Auto-Lock to Never while on watch';
-    else if (!wake) { try { wake = await navigator.wakeLock.request('screen'); wake.onrelease = () => { wake = null; $('banner').dataset.s = ''; }; } catch (e) { msg = '⚠ screen may sleep (wake lock refused: ' + (e.name || e) + ')'; } }
-    if (!wakeNoted) { wakeNoted = true; note(msg || '☀ screen stays on while listening'); if (!navigator.vibrate) note('📳 no vibration in this browser (iOS): beep + flash only'); }
+    if (!('wakeLock' in navigator)) devNote('⚠ This browser can\'t keep the screen on: set Auto-Lock to Never while on watch.');
+    else if (!wake) { try { wake = await navigator.wakeLock.request('screen'); wake.onrelease = () => { wake = null; }; devNote('Screen stays on while listening.'); } catch (e) { devNote('⚠ Screen may sleep (wake lock refused: ' + (e.name || e) + ').'); } }
+    if (!navigator.vibrate) devNote('No vibration in this browser (iOS): alerts are flash + beep + the status block.');
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (listening() || sim)) keepAwake(); });
 
-  // ---------- alerts on DRONE onset: banner flash, beep, vibration; mute toggle + cooldown ----------
-  const COOLDOWN_MS = 30000;
-  let muted = localStorage.getItem('rotorear-mute') === '1', lastAlert = -1e9, gateUntil = 0;
-  const bell = () => { $('bell').textContent = muted ? '🔕' : '🔔'; $('bell').title = muted ? 'alerts muted (tap to unmute)' : 'alerts on (tap to mute)'; };
-  $('bell').onclick = e => { e.stopPropagation(); muted = !muted; localStorage.setItem('rotorear-mute', muted ? '1' : '0'); bell(); };
-  // Beep = two short pure 2.4 kHz tones. A pure tone has no harmonic comb so the detector rejects it, and the
-  // detector is also paused while it plays so the phone never hears its own alert.
-  function beep(into) {
-    ensureCtx(); const t0 = ctx.currentTime + 0.02, g = ctx.createGain(), o = ctx.createOscillator();
-    o.frequency.value = 2400; o.connect(g); g.connect(into || ctx.destination); g.gain.value = 0;
-    [0, 0.25].forEach(d => { g.gain.setTargetAtTime(0.35, t0 + d, 0.004); g.gain.setTargetAtTime(0, t0 + d + 0.14, 0.006); });
-    o.start(t0); o.stop(t0 + 0.5); o.onended = () => g.disconnect();
-    if (!into) gateUntil = performance.now() + 800;
+  // ---------- sound: alert tones, mute that expires ----------
+  // Tones are pure sine segments: no harmonic comb, so the detector rejects them, and detection is also paused
+  // while they play, so the phone never hears its own alert. The demo uses a different, lower tone.
+  const TONES = { alert: [[2400, 0.14], [1800, 0.14]], demo: [[1200, 0.14], [1500, 0.14]], lost: [[900, 0.22], [600, 0.32]] };
+  const MUTE_MS = 5 * 60000, REPEAT_MS = 10000;
+  localStorage.removeItem('rotorear-mute'); // old never-expiring mute
+  let muteUntil = +localStorage.getItem('rotorear-mute-until') || 0, gateUntil = 0, nextBeep = 0, flashT = 0;
+  const muted = () => Date.now() < muteUntil, muteLeft = () => mmss(muteUntil - Date.now());
+  const setMute = on => { muteUntil = on ? Date.now() + MUTE_MS : 0; localStorage.setItem('rotorear-mute-until', muteUntil); };
+  function tone(kind, reps, into) {
+    ensureCtx(); const t0 = ctx.currentTime + 0.02, g = ctx.createGain(), o = ctx.createOscillator(); let t = 0;
+    o.connect(g); g.connect(into || ctx.destination); g.gain.value = 0;
+    for (let r = 0; r < (reps || 1); r++) { TONES[kind].forEach(([f, len]) => { o.frequency.setValueAtTime(f, t0 + t); g.gain.setTargetAtTime(0.35, t0 + t, 0.004); g.gain.setTargetAtTime(0, t0 + t + len, 0.006); t += len + 0.06; }); t += 0.18; }
+    o.start(t0); o.stop(t0 + t + 0.1); o.onended = () => g.disconnect();
+    if (!into) gateUntil = Math.max(gateUntil, performance.now() + t * 1000 + 300);
+    A.beeps++; A.tones.push(kind);
   }
-  function alertOnset(label) {
-    const b = $('banner'); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); setTimeout(() => b.classList.remove('flash'), 1800);
-    const now = performance.now(), fire = !muted && now - lastAlert > COOLDOWN_MS;
-    if (fire) { lastAlert = now; beep(); if (navigator.vibrate) navigator.vibrate([250, 120, 250]); }
-    addTl({ t: Date.now(), k: 'alert', d: true, l: (fire ? '🔔 ' : muted ? '🔕 ' : '🔔 (cooldown) ') + label, sim: !!sim });
-    A.count++; if (fire) A.beeps++;
-  }
-  const A = window.__alert = { count: 0, beeps: 0, beepIntoDetector: () => beep(bus), fire: l => alertOnset(l || 'test'), get gated() { return performance.now() < gateUntil; } };
+  function flash() { const b = $('status'); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); flashT = performance.now(); setTimeout(() => b.classList.remove('flash'), 1550); }
+  const A = window.__alert = { count: 0, beeps: 0, tones: [], beepIntoDetector: k => tone(k || 'alert', 1, bus), get gated() { return performance.now() < gateUntil; },
+    get muted() { return muted(); }, expireMute() { muteUntil = Date.now() - 1; }, get flashing() { return $('status').classList.contains('flash'); } };
+  $('mTest').onclick = () => { flash(); if (!muted()) tone(isDemo() ? 'demo' : 'alert', 1); };
+  $('mMute').onclick = () => setMute(!muted());
+  $('pill').onclick = () => { if (ws.s !== 'tracking') setMute(!muted()); };
 
   function startTest() { // synthetic quadcopter + wind noise
     ensureCtx();
@@ -77,12 +96,12 @@
     const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true;
     const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3000;
     const ng = ctx.createGain(); ng.gain.value = 0.05; ns.connect(lp); lp.connect(ng); ng.connect(out); ns.start();
-    testNodes = { out, drone, ns }; $('test').classList.add('on'); $('test').textContent = '⏹ Stop test';
+    testNodes = { out, drone, ns }; $('test').classList.add('on'); $('test').textContent = 'Stop test sound'; if (!listenStart) listenStart = performance.now();
   }
   function stopTest() {
     if (!testNodes) return; const { out, drone, ns } = testNodes;
     out.gain.setTargetAtTime(0, ctx.currentTime, 0.1); setTimeout(() => { drone.stop(); try { ns.stop(); } catch (e) {} out.disconnect(); }, 500);
-    testNodes = null; $('test').classList.remove('on'); $('test').textContent = '🚁 Test sound';
+    testNodes = null; $('test').classList.remove('on'); $('test').textContent = 'Test sound';
   }
   async function playFile(f) {
     ensureCtx();
@@ -90,27 +109,36 @@
       const buf = await ctx.decodeAudioData(await f.arrayBuffer());
       if (fileSrc) { try { fileSrc.stop(); } catch (e) {} }
       fileSrc = ctx.createBufferSource(); fileSrc.buffer = buf; fileSrc.loop = true; fileSrc.connect(spk); fileSrc.connect(ana); fileSrc.start();
-      $('fileBtn').classList.add('on'); $('fileBtn').textContent = '⏹ ' + f.name.slice(0, 14);
+      $('fileBtn').classList.add('on'); $('fileBtn').textContent = 'Stop ' + f.name.slice(0, 14); if (!listenStart) listenStart = performance.now();
     } catch (e) { errMsg = 'Could not decode that file.'; }
   }
-  function stopFile() { if (fileSrc) { try { fileSrc.stop(); } catch (e) {} fileSrc = null; } $('fileBtn').classList.remove('on'); $('fileBtn').textContent = '📂 Analyse file'; }
-  $('start').onclick = toggleMic;
-  $('test').onclick = () => { testNodes ? stopTest() : startTest(); tabs(); };
-  $('fileBtn').onclick = () => fileSrc ? (stopFile(), tabs()) : $('file').click();
-  $('file').onchange = e => { const f = e.target.files[0]; if (f) playFile(f).then(tabs); e.target.value = ''; };
+  function stopFile() { if (fileSrc) { try { fileSrc.stop(); } catch (e) {} fileSrc = null; } $('fileBtn').classList.remove('on'); $('fileBtn').textContent = 'Analyse file'; }
+  $('start').onclick = () => { if (sim) return stopDemo(); if (listening() && !micStream) { stopTest(); stopFile(); return; } toggleMic(); };
+  $('test').onclick = () => { testNodes ? stopTest() : startTest(); };
+  $('fileBtn').onclick = () => fileSrc ? stopFile() : $('file').click();
+  $('file').onchange = e => { const f = e.target.files[0]; if (f) playFile(f); e.target.value = ''; };
 
-  // ---------- sheets + tab bar ----------
+  // ---------- sheets: open from the bottom, close with Done or a swipe down; a DRONE alert closes them (not Teach: you may be recording it) ----------
   let sheet = null;
-  function openSheet(id) { sheet = sheet === id ? null : id; ['teach', 'phones'].forEach(s => $(s).hidden = s !== sheet); tabs(); }
+  const SHEETS = ['teach', 'details', 'phones', 'moreS'];
+  function openSheet(id) {
+    sheet = sheet === id ? null : id;
+    $('app').classList.toggle('sheet-open', !!sheet);
+    SHEETS.forEach(s => $(s).hidden = s !== sheet);
+    if (sheet) requestAnimationFrame(() => document.documentElement.style.setProperty('--sheet-top', ($('status').getBoundingClientRect().bottom + 8) + 'px'));
+  }
   document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => openSheet(null));
+  SHEETS.forEach(id => { // swipe down on the grab handle / header closes
+    const el = $(id); let y0 = null;
+    el.addEventListener('pointerdown', e => { if (e.target.closest('.grab,.shead')) y0 = e.clientY; });
+    el.addEventListener('pointerup', e => { if (y0 != null && e.clientY - y0 > 60) openSheet(null); y0 = null; });
+  });
   $('tabTeach').onclick = () => openSheet('teach');
   $('tabPhones').onclick = () => openSheet('phones');
-  function tabs() {
-    $('start').classList.toggle('on', !!micStream); $('start').querySelector('span').textContent = micStream ? 'Listening' : 'Listen';
-    $('tabTeach').classList.toggle('on', sheet === 'teach'); $('tabPhones').classList.toggle('on', sheet === 'phones' || !!hub);
-    $('tabSim').classList.toggle('on', !!sim);
-  }
-
+  $('more').onclick = () => openSheet('moreS');
+  $('peek').onclick = e => { if (e.target.id !== 'itWas') openSheet('details'); };
+  $('addPhones').onclick = () => openSheet('phones');
+  $('itWas').onclick = () => { openSheet('teach'); $('tTag').value = 'quad'; $('tMsg').textContent = 'Tagged as Quadcopter. Record while the sound is still playing.'; };
   // ---------- Teach: record tagged clips, keep only their fingerprints on this device ----------
   const Teach = (() => {
     const KEY = 'rotorear-samples-v1', USE = 'rotorear-use-samples';
@@ -128,7 +156,8 @@
     function draw() {
       $('tCounts').innerHTML = TAGS.map(t => { const n = samples.filter(x => x.tag === t.id).length; return `<div class="${n ? 'has' : ''}"><b>${n}</b>${t.label}</div>`; }).join('');
       $('tList').innerHTML = samples.slice().reverse().map(x => `<div><span>${TAGS.find(t => t.id === x.tag).label} <small>· ${Math.round(x.f0)} Hz · ${new Date(x.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>
-        ${x.clip ? `<button data-play="${x.id}">▶</button>` : '<span></span>'}<button data-del="${x.id}">✕</button></div>`).join('');
+        ${x.clip ? `<button data-play="${x.id}" aria-label="play">▶</button>` : '<span></span>'}<button data-del="${x.id}" aria-label="delete">✕</button></div>`).join('');
+      setText('teachN', samples.length + (samples.length === 1 ? ' sample' : ' samples'));
     }
     $('tList').onclick = async e => {
       const id = e.target.dataset.play || e.target.dataset.del; if (!id) return;
@@ -174,67 +203,72 @@
       msg('Saved: ' + TAGS.find(t => t.id === tag).label + ' @ ' + Math.round(fp.raw.f0) + ' Hz. ' + samples.filter(x => x.tag === tag).length + ' sample(s) of this kind.', 'ok');
     };
     draw();
-    return { apply, setDet, get samples() { return samples; } };
+    return { apply, setDet, get samples() { return samples; }, count: group => samples.filter(x => TAGS.find(t => t.id === x.tag).group === group).length };
   })();
   window.__teach = Teach;
 
-  // ---------- the map: this phone (+ phones in a room) or the simulator ----------
+  // ---------- the map: this phone (+ phones in a room) or the demo ----------
   const hp = new URLSearchParams(location.hash.slice(1));
-  let room = (hp.get('room') || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12), hub = null, sim = null;
+  let room = (hp.get('room') || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12), hub = null, sim = null, workings = false;
   const posKey = () => 'rotorear-pos-' + (room || 'solo'), calKey = () => 'rotorear-cal-' + (room || 'solo');
   const loadCal = () => { try { return JSON.parse(localStorage.getItem(calKey()) || '{}'); } catch (e) { return {}; } };
   let saved = JSON.parse(localStorage.getItem(posKey()) || '{}'), model = new R.MeshModel(saved, loadCal());
   const activeModel = () => sim ? sim.model : model;
-  const view = R.MapView($('map'), { onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
+  const view = R.MapView($('map'), { colors: () => cols, onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
     if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } } });
+  $('workings').onchange = () => workings = $('workings').checked;
   function sendLocal() { // this phone is a node of its own map (in-page, no network): numbers only
     if (!det || !listening()) return;
     const now = performance.now();
     model.ingest({ t: 'pong', k: ME, ts: now, tn: now }, now);
-    const ev = tap ? tap.take() : null; // envelope peaks heard during our own beep are dropped
+    const ev = tap ? tap.take() : null; // envelope peaks / onsets heard during our own alert tone are dropped
     const on = tap ? tap.takeOnsets() : null, quiet = now < gateUntil + 300;
     model.ingest(R.telemetry(det.out, ME, 'this phone', null, quiet ? null : ev, quiet ? null : on), now);
   }
 
   // Phones: this page hosts the room's map; other phones open mesh/#room=…&role=node
   const nodeUrl = r => new URL('mesh/#room=' + r + '&role=node', location.href.split('#')[0]).href;
+  let hubStatus = '';
   function joinRoom(r) {
     if (!r || hub) return;
     room = r; history.replaceState(null, '', '#room=' + r);
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
-    $('pNone').hidden = true; $('pRoom').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
-    hub = R.startHub(r, {
-      status: (s, cls) => { $('pStatus').textContent = s; $('pStatus').style.color = cls === 'ok' ? 'var(--quiet)' : 'var(--some)'; },
-      viewer: () => {}, data: (c, d) => { const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; }
-    });
-    tabs();
+    $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
+    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
   }
   $('pCreate').onclick = () => joinRoom(R.randKey(4));
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
   $('pCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('pLink').value); $('pCopy').textContent = 'Copied'; };
-  $('pShare').onclick = () => navigator.share ? navigator.share({ title: 'Rotor Ear node', url: $('pLink').value }).catch(() => {}) : $('pCopy').onclick();
+  $('pShare').onclick = () => { if (!hub) joinRoom(R.randKey(4)); const url = $('pLink').value; navigator.share ? navigator.share({ title: 'Rotor Ear listening phone', url }).catch(() => {}) : $('pCopy').onclick(); };
   $('pLeave').onclick = () => { location.hash = ''; location.reload(); };
   if (room) joinRoom(room);
 
-  // Sim mode: fake phones + a fake drone, same screen. Real sound delays, clock offsets, jitter, network delay.
-  $('tabSim').onclick = () => {
-    if (sim) { clearInterval(sim.iv1); clearInterval(sim.iv2); clearInterval(sim.iv3); sim.eng.stop(); sim = null; tabs(); return; }
-    ensureCtx();
-    const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'circle', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1) });
+  // Demo: 4 simulated phones + a scripted drone on this screen (real sound delays, clock offsets, jitter, network
+  // delay). Marked DEMO the whole time: stripe, "DEMO · DRONE", hatched marker, demo tone, DEMO timeline rows.
+  function startDemo() {
+    if (sim) return;
+    ensureCtx(); openSheet(null);
+    const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1) });
     const m = new R.MeshModel({}), links = eng.nodes.map(n => new R.LoopLink(m, n));
     eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.flight.blades = blades; });
-    sim = { eng, model: m, links };
-    sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = Object.assign({ t: 'truth' }, eng.drone); m.truthAt = now; }, 50);
+    sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null;
+    sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = eng.drone && Object.assign({ t: 'truth' }, eng.drone); m.truthAt = now; }, 50);
     sim.iv2 = setInterval(() => { const msgs = eng.messages(); links.forEach((l, i) => l.send(msgs[i])); }, 1000 / R.SEND_HZ);
     sim.iv3 = setInterval(() => { const ts = performance.now(); links.forEach(l => l.ping(ts)); }, 1000);
-    keepAwake(); tabs();
-  };
+    keepAwake();
+  }
+  function stopDemo() { if (!sim) return; clearInterval(sim.iv1); clearInterval(sim.iv2); clearInterval(sim.iv3); sim.eng.stop(); sim = null; ws.reset(); calib = null; }
+  const replayDemo = () => { if (sim) { sim.eng.replay(); ws.reset(); } };
+  $('tryDemo').onclick = $('mDemo').onclick = () => sim ? stopDemo() : startDemo();
+  $('endReplay').onclick = replayDemo;
+  $('endPhones').onclick = () => { stopDemo(); openSheet('phones'); };
+  const isDemo = () => !!sim || !!(model.state && model.state.demo);
 
   // ---------- clap calibration (Phones sheet): per-phone input latency + gain ----------
-  let calib = null;
+  let calib = null, countdown = 0;
   const calibFor = () => { const m = activeModel(); if (!calib || calib.m !== m) calib = new R.Calibrator(m, cal => { if (!sim) localStorage.setItem(calKey(), JSON.stringify(cal)); }); return calib; };
   $('cMode').onchange = () => $('cSpot').hidden = $('cMode').value !== 'quick';
-  $('cStart').onclick = () => { const c = calibFor(); if (c.active) { c.cancel(); return; } c.start($('cMode').value, $('cSpot').value); };
+  $('cStart').onclick = () => { const c = calibFor(); if (c.active) { c.cancel(); countdown = 0; return; } if (c.start($('cMode').value, $('cSpot').value) !== false) countdown = performance.now(); };
   $('cClear').onclick = () => { const c = calibFor(); c.cancel(); c.m.setCal({}); if (!sim) localStorage.removeItem(calKey()); c.msg = 'Calibration cleared.'; };
   $('cClick').onclick = () => { // a loud 1 ms click from this phone's speaker, for a clap-free calibration at this phone
     ensureCtx(); const sr = ctx.sampleRate, b = ctx.createBuffer(1, Math.round(sr * 0.02), sr), d = b.getChannelData(0);
@@ -242,84 +276,203 @@
     const src = ctx.createBufferSource(); src.buffer = b; src.connect(ctx.destination); src.start();
   };
   $('cSim').onclick = () => { const c = calibFor(), n = sim && c.spot && c.m.nodes.get(c.spot); if (n) sim.eng.clap(n.pos[0] + R.NEAR, n.pos[1]); };
-  function renderCal(st) {
+  $('cTable').onclick = e => { if (e.target.closest('[data-redo]')) { const c = calibFor(); c.cancel(); $('cMode').value = 'full'; $('cStart').onclick(); } };
+  const resWord = k => !k ? ['not calibrated', 0] : k.resMs == null ? ['1 clap · no check', 0.3] : k.resMs < 3 ? ['good · ' + k.resMs.toFixed(1) + ' ms', k.resMs / 10] : k.resMs < 6 ? ['fair · ' + k.resMs.toFixed(1) + ' ms', k.resMs / 10] : ['redo · ' + k.resMs.toFixed(1) + ' ms', 1];
+  let calKeyStr = '';
+  function renderCal(st, live) {
     const c = calibFor(); c.poll();
-    const live = st.nodes.filter(n => n.age < R.STALE_MS), cal = c.m.cal, ncal = live.filter(n => cal[n.key]).length;
+    const cal = c.m.cal, ncal = live.filter(n => cal[n.key]).length;
     window.__cal = { active: c.active, spot: c.spot && c.label(c.spot), k: c.k, msg: c.msg, cal, trusted: st.calTrusted };
-    if (sheet !== 'phones') return;
-    $('cSim').hidden = !sim; $('cStart').textContent = c.active ? '✕ Cancel' : '👏 Calibrate';
-    const spots = live.map(n => `<option value="${n.key}">next to ${n.label}</option>`).join('');
+    if (sheet !== 'phones') return { ncal };
+    $('cSim').hidden = !sim;
+    const cd = c.active && countdown ? 3 - Math.floor((performance.now() - countdown) / 1000) : 0;
+    setText('cStart', ''); $('cStart').innerHTML = c.active ? (cd > 0 ? `<b>${cd}…</b><small>get ready · tap to cancel</small>` : `<b>Clap!</b><small>listening for one sharp clap · tap to cancel</small>`) : '<b>Clap now</b><small>3 · 2 · 1 countdown, then clap once</small>';
+    const spots = live.map(n => `<option value="${n.key}">at phone ${n.label}</option>`).join('');
     if ($('cSpot').dataset.k !== spots) { $('cSpot').dataset.k = spots; $('cSpot').innerHTML = spots; }
-    $('cMsg').textContent = c.msg || (live.length < 2 ? 'Calibration needs 2+ phones listening.' : '');
-    $('cState').textContent = ncal ? `· ${ncal}/${live.length} calibrated` : '';
-    const f = (v, u) => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + ' ' + u;
-    const rows = live.map(n => { const k = cal[n.key]; return `<div><b style="color:${n.color}">${n.label}</b><span>latency ${k ? f(k.lat, 'ms') : '—'}</span><span>gain ${k ? f(k.gain, 'dB') : '—'}</span>` +
-      `<span class="${k && k.resMs != null ? (k.resMs < 3 ? 'ok' : 'bad') : ''}">residual ${k ? (k.resMs == null ? 'n/a (1 clap)' : k.resMs.toFixed(1) + ' ms / ' + (k.resDb == null ? '—' : k.resDb.toFixed(1) + ' dB')) : '—'}</span></div>`; }).join('');
-    $('cTable').innerHTML = rows ? '<div><b></b><small>vs. the average phone</small><span></span><span></span></div>' + rows : '';
+    setText('cNext', c.active && c.spot ? 'Next: clap next to phone ' + c.label(c.spot) : $('cMode').value === 'quick' ? 'Calibrate: one clap next to one phone' : 'Calibrate: clap next to each phone in turn');
+    setText('cMsg', c.msg || (live.length < 2 ? 'Calibration needs 2+ phones listening.' : ''));
+    setText('cState', ncal ? `· ${ncal}/${live.length} calibrated` : '');
+    setText('pStatus', sim ? 'DEMO · ' + live.length + ' simulated phones' : hub ? 'Room ' + room.toUpperCase() + ' · ' + live.length + ' connected' + (hubStatus && !live.length ? ' · ' + hubStatus : '') : 'this phone only');
+    const rows = [...live].sort((a, b) => a.label < b.label ? -1 : 1).map(n => { const k = cal[n.key], [w, f] = resWord(k), sync = n.key === ME ? 'this phone' : n.rtt != null ? 'sync ±' + Math.round(n.rtt / 2) + ' ms' : 'syncing…';
+      return `<div class="prow"><span class="pin">${n.label}</span><span class="nm"><b>${n.key === ME ? 'This phone' : esc(n.name || 'Phone ' + n.label)}</b><small>${sync}${k ? ` · latency ${k.lat >= 0 ? '+' : ''}${k.lat.toFixed(1)} ms · gain ${k.gain >= 0 ? '+' : ''}${k.gain.toFixed(1)} dB` : ''}</small>` +
+        `<span class="rbar"><i><u style="width:${Math.round(Math.min(1, f) * 100)}%"></u></i>${w}</span></span>${k && k.resMs >= 6 ? '<button data-redo>Redo</button>' : '<span></span>'}</div>`; }).join('');
+    if (rows !== calKeyStr) { calKeyStr = rows; $('cTable').innerHTML = rows; }
+    return { ncal };
+  }
+  // ---------- what the phones hear, in words ----------
+  const compass = (dx, dy) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360 / 45) % 8];
+  const humWord = w => ({ 'steady hum (fan / AC / mains)': 'Fan / AC hum', 'mains hum (50/60 Hz)': 'Mains hum', 'engine (low, irregular)': 'Engine noise' })[w] || (w ? w[0].toUpperCase() + w.slice(1).replace(/ \(your samples\)/, '') : 'Steady hum');
+  const shortFl = f => (f || '').replace('Heavy / loaded', 'Loaded').replace(' (Doppler)', '');
+  const kRpm = r => r >= 1000 ? (r / 1000).toFixed(1) + 'k rpm' : Math.round(r) + ' rpm';
+  function describe(st, live) {
+    const mesh = !!sim || live.some(n => n.key !== ME), o = det && det.out, c = o && o.cls, D = { mesh, n: live.length };
+    if (mesh) {
+      D.raw = st.banner === 'off' ? 'quiet' : st.banner; D.cls = st.label; D.score = st.score; D.hz = st.f0;
+      D.agree = st.voters ? `${st.voters} of ${live.length} phones agree` : '';
+      D.learned = st.learned ? `Tuned by your taught samples on ${st.learned} phone${st.learned > 1 ? 's' : ''}` : '';
+      const hear = live.filter(n => n.c >= 30 && n.st !== 'hum').map(n => n.label);
+      D.hear = hear.length === 1 ? `Phone ${hear[0]} hears a harmonic hum` : hear.length ? `Phones ${hear.join(', ')} hear a harmonic hum` : 'A phone hears a harmonic hum';
+      const hum = live.filter(n => n.st === 'hum').sort((a, b) => b.e - a.e)[0]; /* loudest = nearest */ D.hum = hum ? `${humWord(hum.wy)} near phone ${hum.label}` : 'Steady hum'; D.humWhy = hum ? hum.wy : ''; D.humAt = hum ? hum.label : '';
+      if (st.est) {
+        const p = live.reduce((a, n) => Math.hypot(n.pos[0] - st.est[0], n.pos[1] - st.est[1]) < Math.hypot(a.pos[0] - st.est[0], a.pos[1] - st.est[1]) ? n : a, live[0]);
+        const dx = st.est[0] - p.pos[0], dy = st.est[1] - p.pos[1], r = Math.hypot(dx, dy);
+        D.dir = r < 1.5 ? 'at phone ' + p.label : compass(dx, dy) + ' of phone ' + p.label; D.where = D.dir + (r >= 1.5 ? ' · ~' + Math.round(r) + ' m' : '');
+        const A = live.filter(n => st.agree.includes(n.key)), tr = A.length ? A.reduce((a, n) => a + n.trendDB, 0) / A.length : 0;
+        D.trend = tr > 1 ? 'getting closer' : tr < -1 ? 'moving away' : '';
+      }
+      D.rough = !!st.est && live.length >= 3 && !st.tdoaOk;
+      D.flight = st.flight; D.rpm = st.f0 * 60 / blades; D.heading = st.heading ? compass(st.heading[0], st.heading[1]) : '';
+    } else {
+      D.raw = o && listening() ? o.state : 'off'; D.cls = c ? c.label : ''; D.score = c ? c.conf : 0; D.hz = o ? o.f0 : 0;
+      D.agree = 'this phone only';
+      D.learned = c && c.learned ? `Matched your taught samples (${Teach.count(c.label)} ${c.label})` : '';
+      D.hear = 'This phone hears a harmonic hum'; D.hum = c && !c.drone ? humWord(c.why) : 'Steady hum'; D.humWhy = c ? c.why : '';
+      const me = live.find(n => n.key === ME), tr = me ? me.trendDB : 0;
+      D.trend = tr > 1.5 ? 'getting closer' : tr < -1.5 ? 'moving away' : 'same distance';
+      D.flight = o && o.flight && o.flight.state; D.rpm = o && o.flight ? o.flight.rpm : 0;
+    }
+    D.word = D.cls ? (D.mesh && st.voters < 2 && likelihood(D.score) === 'very likely' ? 'likely' : likelihood(D.score)) : '';
+    return D;
   }
 
-  // ---------- render: banner, map, timeline ----------
-  const shortFl = f => f.replace(' / loaded', '').replace(' (Doppler)', '').toLowerCase(), flTxt = f => f && f.state ? ' · ' + shortFl(f.state) : '';
-  const shortCls = l => ({ Quadcopter: 'quad', 'Fixed-wing': 'fixed-wing', 'Micro drone': 'micro', 'Not a drone': 'not a drone' })[l] || l;
-  function setBanner(st, title, cls, sub, learned) {
-    const b = $('banner'), badge = learned ? '<span class="learn">🎓 mine</span>' : '', key = st + title + cls + sub + badge;
-    if (b.dataset.s === key) return; b.dataset.s = key;
-    b.className = st === 'quiet' ? '' : st === 'hum' ? 'some' : st;
-    b.innerHTML = title + (cls || badge ? '<b class="cls">' + (cls || '') + badge + '</b>' : '') + '<small>' + sub + '</small>';
+  // ---------- timeline: one row per drone (time · type · how long · bearing · demo/real) ----------
+  const TL_KEY = 'rotorear-timeline-v2'; localStorage.removeItem('rotorear-timeline');
+  let tl = []; try { tl = JSON.parse(localStorage.getItem(TL_KEY) || '[]'); } catch (e) {}
+  let ep = null, hum = null, tlSaved = 0;
+  const saveTl = force => { const now = performance.now(); if (force || now - tlSaved > 2000) { tl = tl.slice(0, 40); localStorage.setItem(TL_KEY, JSON.stringify(tl)); tlSaved = now; } };
+  function lastDrone() {
+    const e = tl.find(x => x.type === 'drone'); if (!e) return '';
+    const d = new Date(e.t), days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(e.t).setHours(0, 0, 0, 0)) / 864e5);
+    return `Last drone ${clock(e.t)}${e.dir ? ' · ' + e.dir : ''}${e.demo ? ' (demo)' : ''}${days === 1 ? ' (yesterday)' : days > 1 ? ' (' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')' : ''}`;
   }
-  const TL_KEY = 'rotorear-timeline'; let tl = []; try { tl = JSON.parse(localStorage.getItem(TL_KEY) || '[]'); } catch (e) {}
-  let lastTl = '';
-  let prevB = '';
-  function logEvent(st, label) {
-    if (st === 'drone' && prevB !== 'drone') alertOnset(label.split(' · ')[0]);
-    prevB = st;
-    const k = st + label; if (k === lastTl) return; lastTl = k; if (st !== 'drone' && st !== 'hum') return;
-    const top = tl[0], now = Date.now();
-    if (top && top.k === k && now - top.t < 60000) { top.n = (top.n || 1) + 1; top.t = now; drawTimeline(); localStorage.setItem(TL_KEY, JSON.stringify(tl)); }
-    else addTl({ t: now, k, d: st === 'drone', l: label, sim: !!sim });
-  }
-  function addTl(e) { tl.unshift(e); tl = tl.slice(0, 40); localStorage.setItem(TL_KEY, JSON.stringify(tl)); drawTimeline(); }
-  function note(text) { addTl({ t: Date.now(), k: 'note', i: true, l: text }); }
+  let tlKey = '';
   function drawTimeline() {
-    $('timeline').innerHTML = tl.length ? tl.map(e => `<span class="ev ${e.d ? 'd' : ''} ${e.i ? 'i' : ''}">${new Date(e.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}<b>${e.sim ? '🧪 ' : ''}${e.l}${e.n > 1 ? ' ×' + e.n : ''}</b></span>`).join('') : '<span class="dim">detections will appear here</span>';
+    const html = tl.length ? tl.map(e => `<div class="tl"><b>${clock(e.t)}</b><span>${esc(e.l)}</span><span class="dur">${mmss(e.dur || 0)}</span><span class="dir">${esc((e.dir || '—').replace(/ of phone /, ' · ').replace(/^at phone /, ''))}</span><span class="tag${e.demo ? ' demo' : ''}">${e.demo ? 'DEMO' : 'real'}</span></div>`).join('')
+      : '<div class="tl empty">No detections yet. Each drone gets one row here.</div>';
+    if (html !== tlKey) { tlKey = html; $('tlList').innerHTML = html; }
   }
-  drawTimeline();
-
+  // ---------- one frame: state machine → status block, map, peek, actions, bar ----------
+  let watchStart = 0, prevS = 'ready', lastEst = null, lastDir = '', lastHead = '', lostInfo = null, renderKey = '';
   const f1 = v => v == null ? '—' : v.toFixed(1);
-  let mapInfoKey = '';
   function frame() {
     const M = activeModel(), st = M.update(), now = performance.now();
-    view.set(st); renderCal(st);
-    const live = st.nodes.filter(n => n.age < R.STALE_MS), remote = live.filter(n => n.key !== ME).length;
-    $('phonesN').textContent = 'Phones: ' + Math.max(1, model.state ? model.state.nodes.filter(n => n.age < R.STALE_MS).length : 1);
-    $('mapTag').textContent = sim ? '🧪 sim · ' + live.length + ' fake phones · fake drone' : remote ? 'room ' + room + ' · ' + live.length + ' phones' : hub ? 'room ' + room + ' · waiting for phones' : 'solo · this phone';
-    $('mapTag').className = sim ? 'sim' : '';
-    // banner: multi-phone/sim → the map's fused verdict; solo → this phone's detector
-    const c = det && det.out.cls, o = det && det.out;
-    if (sim || remote) {
-      const b = st.banner, lab = st.label;
-      const sub = b === 'drone' ? (st.flight ? st.flight + ' · ' : '') + `${st.agree.length} phones agree @ ${Math.round(st.f0)} Hz` + (st.calTrusted ? ' · calibrated arrival-time fix' : st.tdoaOk ? ' · arrival-time fix' : st.estT ? ' · loudness fix (arrival times disagree)' : ' · loudness fix') : b === 'some' ? 'a phone hears a harmonic hum…' : b === 'hum' ? 'harmonic hum, fingerprint says not a drone' : live.length + ' phones listening';
-      setBanner(b === 'off' ? 'off' : b, b === 'drone' ? 'DRONE' : b === 'hum' ? 'NOT A DRONE' : b === 'some' ? 'SOMETHING' : b === 'off' ? 'WAITING' : 'QUIET', b === 'drone' ? lab : '', sub, b === 'drone' && st.learned);
-      logEvent(b, b === 'drone' ? shortCls((lab || 'drone').split(' · ')[0]) + (st.flight ? ' · ' + shortFl(st.flight) : '') : 'not a drone');
-    } else if (o && listening()) {
-      const hz = Math.round(o.f0), trend = st.nodes.find(n => n.key === ME), tr = trend && trend.trendDB, dir = tr > 1.5 ? ' · approaching' : tr < -1.5 ? ' · moving away' : '';
-      const L = { quiet: ['QUIET', '', 'listening · no rotor signature'], some: ['SOMETHING', c ? c.label + ' · ' + c.conf + '%' : '', 'harmonic hum, checking…'],
-        drone: ['DRONE', c ? c.label + ' · ' + c.conf + '%' : 'fingerprinting…', (o.flight && o.flight.state ? o.flight.state + ' · ' + fmtRpm(o.flight.rpm) + ' · ' : 'rotor signature @ ') + hz + ' Hz' + dir], hum: ['NOT A DRONE', c ? c.conf + '% sure' : '', c ? c.why + ' @ ' + hz + ' Hz' : ''] }[o.state];
-      setBanner(o.state, L[0], L[1], L[2], c && c.learned && o.state !== 'quiet');
-      logEvent(o.state, o.state === 'drone' ? shortCls(c ? c.label : 'drone') + flTxt(o.flight) : c ? c.why.replace(/ \(your samples\)/, '') : 'not a drone');
-    } else { prevB = ''; setBanner('off', 'READY', '', errMsg || (hub ? 'room ' + room + ' is open · tap Listen' : 'tap Listen · or try Sim mode'), false); }
-    // map overlay: honest accuracy numbers in sim, what the lines mean otherwise
+    const live = st.nodes.filter(n => n.age < R.STALE_MS), D = describe(st, live), demo = isDemo();
+    const on = listening() || !!sim || live.some(n => n.key !== ME);
+    ws.update(now, on ? D.raw : 'off', on);
+    const s = ws.s, hot = s === 'drone' || s === 'tracking';
+    if (prevS === 'ready' && s !== 'ready') watchStart = now;
+    if (hot && st.est) { lastEst = st.est.slice(); lastDir = D.dir || lastDir; lastHead = D.heading || lastHead; }
+    // alert moment: 3 flashes + 3 beeps (demo: demo tone), sheets close; then 1 beep every 10 s until Got it
+    if (ws.ev === 'alert') {
+      lastDir = lastHead = ''; A.count++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
+      if (!muted()) { tone(demo ? 'demo' : 'alert', 3); if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 250]); }
+      ep = { t: Date.now(), type: 'drone', l: D.cls || 'Drone', dur: 0, dir: '', demo }; tl.unshift(ep); saveTl(true);
+    }
+    if (ws.ev === 'back') nextBeep = now + REPEAT_MS; // back within 60 s: no new alert sound
+    if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted()) tone(demo ? 'demo' : 'alert', 1); }
+    if (ws.ev === 'lost') { if (!muted()) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
+    if (ws.ev === 'gone') { ep = null; saveTl(true); }
+    if (ep && hot) { ep.dur = ws.lastSeen - ws.first; if (D.dir) ep.dir = D.dir; if (D.cls) ep.l = D.cls; saveTl(); }
+    if (s === 'notdrone' && prevS !== 'notdrone') { hum = { t: Date.now(), type: 'hum', l: 'Not a drone', dur: 0, dir: D.humAt ? 'phone ' + D.humAt : '', demo, t0: now }; tl.unshift(hum); saveTl(true); }
+    if (hum && D.raw === 'hum') hum.dur = now - hum.t0; else hum = null;
+    prevS = s;
+
+    $('app').classList.toggle('ready', s === 'ready'); $('app').classList.toggle('demo', demo);
+    renderStatus(D, st, live, now);
+    // map
+    const chip = hot && D.flight ? shortFl(D.flight) + (D.rpm ? ' · ' + kRpm(D.rpm) : '') : '';
+    const ring = st.truth && st.err.F != null ? st.err.F : st.estL && st.estF && st.tdoaOk ? Math.hypot(st.estL[0] - st.estF[0], st.estL[1] - st.estF[1]) : 2.5;
+    st.ui = { state: s, demo, workings, chip, ring: Math.min(5, Math.max(0.8, ring)), me: sim ? sim.eng.nodes[0].key : ME, lost: s === 'lost' && lostInfo ? { pos: lostInfo.pos, ago: mmss(now - ws.lastSeen) } : null };
+    if (!st.label && !D.mesh) st.label = D.cls; // solo marker text
+    if (!st.nodes.length && !sim && !hub) Object.assign(st, { solo: ME, nodes: [{ key: ME, label: 'A', pos: [0, 0], age: 0, c: 0, f: 0, st: 'quiet', trendDB: 0 }] }); // not listening yet: show this phone
+    view.set(st);
+    const cal = renderCal(st, live);
+    $('mapTag').innerHTML = demo ? '<span>DEMO · simulated phones</span>' : D.mesh ? `MAP · ${live.length} phones${st.calTrusted ? ' · calibrated' : ''}` : 'MAP · this phone only until others join';
+    $('addPhones').hidden = !!sim || !!hub || !(s === 'ready' || s === 'watching');
+    $('endCard').hidden = !(sim && sim.eng.ended);
     let info = '';
-    if (st.truth && st.err.L != null) info = `error vs true drone (10 s avg): <span class="l">loudness <b>${f1(st.err.L)} m</b></span> · <span class="t">arrival times <b>${f1(st.err.T)} m</b></span> · <span class="f">both <b>${f1(st.err.F)} m</b></span>` + (st.headErr.both != null ? ` · heading ±${st.headErr.both}°` : '') +
-      `<br>lines = arrival-time differences · <span class="l">○</span> loudness-only fit · ◌ true drone`;
-    else if (st.pairs.length) info = `${st.pairs.length} arrival-time lines · they cross where the drone is`;
-    if (info !== mapInfoKey) { mapInfoKey = info; $('mapInfo').innerHTML = info; $('mapInfo').style.display = info ? 'block' : 'none'; }
-    if (hub && sheet === 'phones') $('pNodes').innerHTML = live.map(n => `<div><span><b style="color:${n.color}">${n.label}</b> ${(n.name || '').replace(/[<>&]/g, '')} <small>· ${n.st}${n.rtt != null && n.key !== ME ? ' · sync ±' + Math.round(n.rtt / 2) + ' ms' : ''}</small></span><span></span><small>${n.f > 0 ? Math.round(n.f) + ' Hz' : ''}</small></div>`).join('');
-    Object.assign(window.__map = window.__map || {}, { mode: sim ? 'sim' : remote ? 'mesh' : 'solo', banner: st.banner, label: st.label, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt) });
+    if (workings && st.truth && st.err.L != null) info = `error vs true drone (10 s avg): loudness <b>${f1(st.err.L)} m</b> · arrival times <b>${f1(st.err.T)} m</b> · both <b>${f1(st.err.F)} m</b>` + (st.headErr.both != null ? ` · heading ±${st.headErr.both}°` : '') + '<br>lines = arrival-time differences · small ring = loudness-only fit · dashed = true drone';
+    else if (workings && st.pairs.length) info = `${st.pairs.length} arrival-time lines · they cross where the drone is`;
+    if ($('mapInfo').dataset.k !== info) { $('mapInfo').dataset.k = info; $('mapInfo').innerHTML = info; $('mapInfo').style.display = info ? 'block' : 'none'; }
+    // bar: Phones · Listen/Stop · Teach
+    const nPh = Math.max(1, live.length);
+    setText('phonesN', sim ? '4 · demo' : nPh < 2 ? '1 · solo' : nPh + (cal.ncal >= nPh ? ' · calib ✓' : ' · not calibrated'));
+    const lt = sim ? ['■ Exit demo', 'demo ' + mmss(Math.min(60, sim.eng.t) * 1000) + ' / 1:00'] : listening() ? (hot ? ['■ Listening', 'tracking ' + mmss(now - ws.first)] : s === 'lost' ? ['■ Listening', 'listening for it'] : ['■ Stop listening', 'listening ' + hms(now - listenStart)])
+      : hub && live.length ? ['▶ Listen here too', 'the room is watching'] : ['▶ Listen', 'tap once · sound on too'];
+    setText('startT', lt[0]); setText('startS', lt[1]);
+    $('pNone').hidden = !!room || !!sim; // no room controls during the demo
+    $('bar').classList.toggle('dim', hot);
+    setText('mMute', muted() ? 'Unmute (' + muteLeft() + ' left)' : 'Mute 5 min');
+    if (sheet === 'details') renderDetails(D, st);
+    S.watch = s;
+    Object.assign(window.__map = window.__map || {}, { mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
   }
   setInterval(frame, 100);
 
-  // ---------- fingerprint hexagon + spectrogram strip (this phone, or the loudest fake phone in sim) ----------
+  function renderStatus(D, st, live, now) {
+    const s = ws.s, hot = s === 'drone' || s === 'tracking', demo = isDemo(), [icon, word0] = STATES[s], mt = muted() ? 'MUTED · flash only · ' + muteLeft() : null;
+    let word = word0, cls = '', where = '', sub = '', pill = null, prog = null, note = '', peekT = 'Details ˄', peekS = 'timeline · why · fingerprint · flight', acts = null;
+    const quiet = now - Math.max(watchStart, ws.lastSeen || 0);
+    switch (s) {
+      case 'ready': cls = errMsg || (hub ? 'Ready · waiting for phones' : 'Not listening · tap Listen to start'); sub = lastDrone(); break;
+      case 'watching': cls = (D.n > 1 ? D.n + ' phones' : 'This phone') + ' · quiet ' + (quiet < 60000 ? Math.round(quiet / 1000) + ' s' : Math.round(quiet / 60000) + ' min');
+        sub = D.raw === 'hum' ? 'Ignoring: ' + D.hum : lastDrone(); pill = mt || 'Sound: ON'; break;
+      case 'checking': cls = D.hear; peekS = 'live: pitch ~' + Math.round(D.hz || 0) + ' Hz · fingerprint forming'; if (ws.holdK > 0) { prog = ws.holdK; note = `hold ${(ws.holdK * WATCH.hold / 1000).toFixed(1)} / ${WATCH.hold / 1000} s`; } break;
+      case 'notdrone': cls = D.hum + ' · ignored'; prog = 1 - (now - ws.since) / WATCH.notMs; note = `back to Watching in ${Math.max(0, Math.ceil((WATCH.notMs - (now - ws.since)) / 1000))} s`;
+        peekT = 'Why not ˄'; peekS = D.humWhy || 'not a rotor signature'; break;
+      case 'drone': case 'tracking':
+        word = demo ? 'DEMO · DRONE' : 'DRONE'; cls = (D.cls || 'Drone') + (D.word ? ' · ' + D.word : '');
+        where = D.rough ? (D.where ? D.where + ' · rough, calibrate ›' : 'Position is rough. Clap to calibrate ›') : D.mesh ? [D.where, D.trend].filter(Boolean).join(' · ') : D.trend + ' · one phone: no direction';
+        sub = [D.agree, 'seen ' + mmss(now - ws.first)].filter(Boolean).join(' · ');
+        pill = s === 'tracking' ? '✓ Acknowledged ' + clock(Date.now() - (now - ws.ackAt)) + ' · silent' : mt || (demo ? 'Demo tone · beeping' : 'Sound ON · beeping');
+        peekT = 'Why we think so ˄'; peekS = 'rotor hum ~' + Math.round(D.hz || 0) + ' Hz' + (D.learned ? ' · ' + D.learned.replace(/^Matched your taught samples \((\d+) .*\)$/, 'matches $1 of your samples') : D.flight ? ' · ' + shortFl(D.flight).toLowerCase() : '');
+        acts = s === 'drone' ? [demo ? ['replay', 'Replay demo', 'from 0:00'] : muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'banner keeps flashing'], ['ack', 'Got it', 'stops flash + beeps', 1]]
+          : [muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'also silences Lost tone'], ['details', 'Details', 'where · how sure · flight']];
+        break;
+      case 'lost': {
+        const L = lostInfo || {}; cls = 'Last seen ' + mmss(now - ws.lastSeen) + ' ago' + (L.dir ? ' · ' + L.dir : '');
+        sub = (ep ? ep.l : 'Drone') + ' · heard for ' + mmss(ws.lastSeen - ws.first) + (L.heading ? ' · was leaving ' + L.heading : ''); where = '';
+        prog = 1 - (now - ws.lastSeen) / WATCH.lostMs; note = 'Watching again in ' + mmss(WATCH.lostMs - (now - ws.lastSeen)); pill = mt;
+        peekS = ep ? `saved: ${clock(ep.t)} · ${ep.l} · ${mmss(ep.dur)}` : peekS;
+        acts = [['dismiss', 'Back to watching', 'clears now'], ['details', 'Details', 'timeline · where it was']]; break;
+      }
+    }
+    const b = $('status'); b.classList.remove('ready', 'watching', 'checking', 'notdrone', 'drone', 'tracking', 'lost'); b.classList.add(s);
+    setText('stIcon', icon); setText('stWord', word); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
+    $('pill').hidden = !pill; if (pill) { setText('pill', pill); $('pill').classList.toggle('muted', !!mt); }
+    $('stProg').hidden = prog == null; if (prog != null) $('stProg').firstChild.style.width = Math.round(Math.max(0, Math.min(1, prog)) * 100) + '%'; setText('stNote', note);
+    setText('peekT', peekT); setText('peekS', peekS); $('itWas').hidden = s !== 'notdrone';
+    const ak = acts ? JSON.stringify(acts) : '';
+    if (ak !== renderKey) { renderKey = ak; $('actions').hidden = !acts;
+      if (acts) acts.forEach((a, i) => { const el = $('act' + (i + 1)); el.dataset.a = a[0]; el.className = a[3] ? 'primary' : ''; el.innerHTML = `<b>${a[1]}</b><small>${a[2]}</small>`; }); }
+  }
+  $('stWhere').onclick = () => { if ($('stWhere').classList.contains('link')) openSheet('phones'); };
+  $('actions').onclick = e => {
+    const a = e.target.closest('button') && e.target.closest('button').dataset.a, now = performance.now();
+    if (a === 'ack') { ws.acknowledge(now); $('status').classList.remove('flash'); }
+    else if (a === 'mute') setMute(true); else if (a === 'unmute') setMute(false);
+    else if (a === 'details') openSheet('details'); else if (a === 'dismiss') { ws.dismiss(now); ep = null; } else if (a === 'replay') replayDemo();
+    renderKey = '';
+  };
+  window.__watch = { get s() { return ws.s; }, get holdK() { return ws.holdK; }, ack: () => $('act2').dataset.a === 'ack' && $('act2').click() };
+
+  function renderDetails(D, st) {
+    const s = ws.s, hot = s === 'drone' || s === 'tracking', why = [];
+    if (hot || s === 'checking' || s === 'lost') {
+      if (D.hz) why.push(`Rotor hum ~${Math.round(D.hz)} Hz with an even harmonic comb`);
+      why.push(D.mesh ? (st.voters ? `${st.voters} of ${D.n} phones hear it and agree` : 'No phone is sure yet') : 'Heard by this phone only (one phone can\'t tell direction)');
+      if (D.learned) why.push(D.learned);
+      if (D.rough) why.push('Arrival times disagree with loudness, so the position uses loudness only. Calibrate the phones (Phones sheet) to fix this.');
+    } else if (s === 'notdrone' || D.raw === 'hum') why.push(`${D.hum}: ${D.humWhy || 'not a rotor signature'}`, 'Ignored: a steady hum like this fools simple detectors');
+    else why.push('Nothing heard right now.');
+    const wk = why.join('|'); if ($('dWhy').dataset.k !== wk) { $('dWhy').dataset.k = wk; $('dWhy').innerHTML = why.map(w => '<li>' + esc(w) + '</li>').join(''); }
+    setText('dScore', D.cls && s !== 'watching' && s !== 'ready' ? String(Math.round(D.score)) : '—');
+    setText('dScoreS', D.cls ? `how close to the ${D.cls} template · not accuracy` : 'how close to a class template · not accuracy');
+    setText('flState', D.flight && (hot || s === 'checking') ? shortFl(D.flight) + (D.rpm ? ' · ' + kRpm(D.rpm) : '') : 'no flight data');
+    drawTimeline();
+  }
+
+  // ---------- Details: fingerprint hexagon, spectrogram, flight sparkline (this phone, or the loudest demo phone) ----------
   const primary = () => sim ? sim.eng.nodes.reduce((a, n) => n.det.out.conf > a.det.out.conf ? n : a).det : det;
   const fpc = $('fpRadar'), fg = fpc.getContext('2d'), AXES = ['pitch', 'split', 'beat', 'steady', 'sub', 'mains'];
   const norm = (v, i) => i === 0 ? (v + 1.5) / 3.3 : i === 3 ? v / 2 : i === 5 ? v : v / 1.5;
@@ -331,51 +484,46 @@
   let lastLbl = '';
   function drawFingerprint(c, state) {
     const W = fpc.width, cx = W / 2, Rr = W * 0.3; fg.clearRect(0, 0, W, W);
-    fg.strokeStyle = '#1c2438'; fg.lineWidth = 2;
+    fg.strokeStyle = cols.line; fg.lineWidth = 2;
     [0.5, 1].forEach(k => { fg.beginPath(); for (let i = 0; i <= 6; i++) { const a = -Math.PI / 2 + i * Math.PI / 3; fg[i ? 'lineTo' : 'moveTo'](cx + Rr * k * Math.cos(a), cx + Rr * k * Math.sin(a) * 0.8 + W * 0.02); } fg.stroke(); });
-    fg.fillStyle = '#6f7a95'; fg.font = '22px system-ui'; fg.textAlign = 'center'; fg.textBaseline = 'middle';
-    AXES.forEach((t, i) => { const a = -Math.PI / 2 + i * Math.PI / 3; fg.fillText(t, cx + (Rr + 30) * Math.cos(a), cx + (Rr + 20) * Math.sin(a) * 0.8 + W * 0.02); });
-    if (c) { const proto = CLASSES.find(k => k.id === c.nearest); if (proto) poly(proto.c, 'rgba(255,255,255,0.25)'); poly(c.x, c.drone ? '#ff3b5c' : '#ffb547', c.drone ? 'rgba(255,59,92,0.25)' : 'rgba(255,181,71,0.22)'); }
-    const lbl = c && state !== 'quiet' ? `<b>${c.label}</b> ${c.conf}%${c.learned ? ' 🎓' : ''}` : 'fingerprint';
+    fg.fillStyle = cols.ink2; fg.font = '26px system-ui'; fg.textAlign = 'center'; fg.textBaseline = 'middle';
+    AXES.forEach((t, i) => { const a = -Math.PI / 2 + i * Math.PI / 3; fg.fillText(t, cx + (Rr + 30) * Math.cos(a), cx + (Rr + 22) * Math.sin(a) * 0.8 + W * 0.02); });
+    if (c) { const proto = CLASSES.find(k => k.id === c.nearest); if (proto) poly(proto.c, cols.line); poly(c.x, cols.ink, cols.ink2 + '55'); }
+    const lbl = c && state !== 'quiet' ? `<b>${c.label}</b>` : 'fingerprint'; // the class only: the one number lives in Match score
     if (lbl !== lastLbl) { $('fpLbl').innerHTML = lbl; lastLbl = lbl; }
   }
-  drawFingerprint(null);
-  const cv = $('spec'), g2 = cv.getContext('2d'), FMAX = 8000, LOGMIN = 50;
-  function sizeCanvas() { const dpr = Math.min(2, devicePixelRatio || 1), w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; g2.fillStyle = '#000'; g2.fillRect(0, 0, w, h); } }
-  window.addEventListener('resize', () => { sizeCanvas(); buildAxis(); }); sizeCanvas();
+  const specs = [$('spec'), $('spec2')].map(cv => ({ cv, g: cv.getContext('2d') })), FMAX = 8000, LOGMIN = 50;
+  function sizeCanvas(sp) { const dpr = Math.min(2, devicePixelRatio || 1), w = Math.round(sp.cv.clientWidth * dpr), h = Math.round(sp.cv.clientHeight * dpr); if (w && h && (sp.cv.width !== w || sp.cv.height !== h)) { sp.cv.width = w; sp.cv.height = h; sp.g.fillStyle = '#000'; sp.g.fillRect(0, 0, w, h); } }
+  window.addEventListener('resize', () => { specs.forEach(sizeCanvas); buildAxis(); });
   const yToF = y01 => LOGMIN * Math.pow(FMAX / LOGMIN, y01), fToY = f => Math.log(Math.max(f, LOGMIN) / LOGMIN) / Math.log(FMAX / LOGMIN);
   function buildAxis() { const ax = $('axis'); ax.innerHTML = ''; [100, 300, 1000, 3000].forEach(f => { const el = document.createElement('b'); el.style.top = ((1 - fToY(f)) * 100) + '%'; el.textContent = f >= 1000 ? f / 1000 + 'k' : f; ax.appendChild(el); }); }
   buildAxis();
   const PAL = [];
   (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
     for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, gg1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (gg1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
-  function drawColumn(d, o) {
-    sizeCanvas(); const W = cv.width, H = cv.height, step = 2, db = d.db;
-    g2.drawImage(cv, step, 0, W - step, H, 0, 0, W - step, H);
+  function drawColumn(sp, d, o) {
+    sizeCanvas(sp); const { cv, g } = sp, W = cv.width, H = cv.height, step = 2, db = d.db; if (!W || !H) return;
+    g.drawImage(cv, step, 0, W - step, H, 0, 0, W - step, H);
     const x = W - step;
-    for (let y = 0; y < H; y += 2) { const i = Math.min(d.bins - 1, Math.round(yToF(1 - y / H) / d.binHz)); g2.fillStyle = PAL[(Math.max(0, Math.min(1, (db[i] + 105) / 75)) * 255) | 0]; g2.fillRect(x, y, step, 2); }
-    if (o.state !== 'quiet' && o.f0) { g2.fillStyle = o.state === 'drone' ? '#ff3b5c' : '#ffb547'; for (let h = 1; h <= NH; h++) { const y = (1 - fToY(o.f0 * h)) * H; if (y > 0) g2.fillRect(x, y - 1, step, 2); } }
+    for (let y = 0; y < H; y += 2) { const i = Math.min(d.bins - 1, Math.round(yToF(1 - y / H) / d.binHz)); g.fillStyle = PAL[(Math.max(0, Math.min(1, (db[i] + 105) / 75)) * 255) | 0]; g.fillRect(x, y, step, 2); }
+    if (o.state !== 'quiet' && o.f0) { g.fillStyle = '#ffffff'; for (let h = 1; h <= NH; h++) { const y = (1 - fToY(o.f0 * h)) * H; if (y > 0) g.fillRect(x, y - 1, step, 2); } }
   }
-  // flight state card: label, estimated RPM (blade-pass × 60 / blades), 20 s pitch sparkline
-  const fmtRpm = r => Math.round(r / 10) * 10 + ' rpm';
+  // flight: state + estimated RPM (blade-pass × 60 / blades) + 30 s pitch sparkline. "Loaded" is a word here and on
+  // the map chip only; it never raises an alert (it is an inference, not a sighting).
   let blades = +localStorage.getItem('rotorear-blades') || 2;
-  const setBlades = () => { if (det) det.flight.blades = blades; if (sim) sim.eng.nodes.forEach(n => n.det.flight.blades = blades); };
-  $('flRpm').onclick = () => { const b = parseInt(prompt('Blades per propeller? (most quadcopters: 2; the pitch heard is blades × shaft speed)', blades), 10); if (b >= 1 && b <= 8) { blades = b; localStorage.setItem('rotorear-blades', b); setBlades(); } };
-  const sp = $('spark'), sg = sp.getContext('2d'); let lastFl = '';
-  function drawFlight(fl, st) {
+  $('flBlades').value = String(blades);
+  $('flBlades').onchange = () => { blades = +$('flBlades').value; localStorage.setItem('rotorear-blades', blades); if (det) det.flight.blades = blades; if (sim) sim.eng.nodes.forEach(n => n.det.flight.blades = blades); };
+  const sp = $('spark'), sg = sp.getContext('2d');
+  function drawFlight(fl) {
     const dpr = Math.min(2, devicePixelRatio || 1), W = Math.round(sp.clientWidth * dpr), H = Math.round(sp.clientHeight * dpr);
-    if (sp.width !== W || sp.height !== H) { sp.width = W; sp.height = H; }
+    if (!W || !H) return; if (sp.width !== W || sp.height !== H) { sp.width = W; sp.height = H; }
     sg.clearRect(0, 0, W, H);
-    const on = fl && fl.state && st !== 'quiet', key = on ? fl.state + '|' + fmtRpm(fl.rpm) + blades : '';
-    if (key !== lastFl) { lastFl = key; $('flState').textContent = on ? fl.state : 'flight'; $('flState').className = on ? 'on' : '';
-      $('flRpm').innerHTML = on ? fmtRpm(fl.rpm) + ` <small>${blades}-blade</small>` : `— rpm <small>${blades}-blade</small>`; }
     if (!fl || !fl.spark || fl.spark.length < 2) return;
-    const now = performance.now(), pts = fl.spark.filter(p => now - p[0] < 20000); if (pts.length < 2) return;
+    const now = performance.now(), pts = fl.spark.filter(p => now - p[0] < 30000); if (pts.length < 2) return;
     const fs = pts.map(p => p[1]), mid = (Math.max(...fs) + Math.min(...fs)) / 2, span = Math.max(Math.max(...fs) - Math.min(...fs), mid * 0.04) * 1.2;
-    const X = t => W - (now - t) / 20000 * W, Y = f => H / 2 - (f - mid) / span * H;
-    if (fl.base) { sg.strokeStyle = '#3a4560'; sg.setLineDash([3 * dpr, 3 * dpr]); sg.beginPath(); sg.moveTo(0, Y(fl.base)); sg.lineTo(W, Y(fl.base)); sg.stroke(); sg.setLineDash([]); }
-    sg.strokeStyle = { Climbing: '#2ee6a6', Descending: '#4cc9ff', 'Heavy / loaded': '#ffb547', Maneuvering: '#c77dff', 'Passing by (Doppler)': '#ff8fab' }[fl.state] || '#d8e1f5';
-    sg.lineWidth = 2 * dpr; sg.beginPath(); pts.forEach((p, i) => sg[i ? 'lineTo' : 'moveTo'](X(p[0]), Y(p[1]))); sg.stroke();
+    const X = t => W - (now - t) / 30000 * W, Y = f => H / 2 - (f - mid) / span * H;
+    if (fl.base) { sg.strokeStyle = cols.ink2; sg.setLineDash([3 * dpr, 3 * dpr]); sg.lineWidth = dpr; sg.beginPath(); sg.moveTo(0, Y(fl.base)); sg.lineTo(W, Y(fl.base)); sg.stroke(); sg.setLineDash([]); }
+    sg.strokeStyle = cols.ink; sg.lineWidth = 2 * dpr; sg.beginPath(); pts.forEach((p, i) => sg[i ? 'lineTo' : 'moveTo'](X(p[0]), Y(p[1]))); sg.stroke();
   }
 
   let lastDetect = 0;
@@ -384,10 +532,10 @@
       lastDetect = t;
       const o = performance.now() < gateUntil ? det.out : det.step(t), c = o.cls; if (tap) tap.setF0(o.f0);
       Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw } });
-      const p = primary(); drawFingerprint(p.out.cls, p.out.state); drawFlight(p.out.flight, p.out.state);
+      if (sheet === 'details') { const p = primary(); drawFingerprint(p.out.cls, p.out.state); drawFlight(p.out.flight); }
     }
-    const p = primary(); if (p.db) drawColumn(p, p.out);
+    const p = primary(); if (p.db) { drawColumn(specs[0], p, p.out); if (sheet === 'details') drawColumn(specs[1], p, p.out); }
     requestAnimationFrame(loop);
   }
-  bell(); tabs();
+  drawFingerprint(null);
 })();
