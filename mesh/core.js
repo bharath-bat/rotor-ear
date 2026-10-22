@@ -129,6 +129,7 @@
     return {
       get mode() { return mode; },
       get count() { return [...conns].filter(c => c.open && c.metadata && c.metadata.role === 'node').length; },
+      sendTo(key, o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.key === key) try { c.send(o); } catch (e) {} }); },
       broadcastViewers(o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.role === 'viewer') try { c.send(o); } catch (e) {} }); }
     };
   }
@@ -156,7 +157,7 @@
       if (d.t !== 's' || !d.k) return null;
       const n = this.node(d.k, d);
       if (!this.saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
-      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', last: now });
+      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', geo: d.g || null, last: now });
       // calibration (if any): this phone's input latency (ms) and mic gain (dB) relative to the others
       const cal = this.cal[d.k] || { lat: 0, gain: 0 }, e = d.e - cal.gain;
       if (d.f > 0 && d.e > -100) n.es = n.es == null ? e : n.es + 0.5 * (e - n.es); else n.es = null;
@@ -264,7 +265,7 @@
       while (this.hErr.length && now - this.hErr[0][0] > 10000) this.hErr.shift();
       const hm = k => this.hErr.length ? Math.round(this.hErr.reduce((a, e) => a + e[k], 0) / this.hErr.length) : null;
       return this.state = {
-        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs, wy: n.wy,
+        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs, wy: n.wy, geo: n.geo,
           age: now - n.last, trendDB: n.trendDB || 0, rtt: n.rtt, synced: n.off != null, evRate: n.ev.filter(t => t > now - 3000).length / 3 })),
         agree: A.map(n => n.key), voters: voters.length, banner, label, score, learned: tn.filter(n => n.lr).length, demo: live.some(n => /^sim /.test(n.name || '')), flight: (() => { const c = {}; tn.forEach(n => { if (n.fs) c[n.fs] = (c[n.fs] || 0) + 1; }); return Object.keys(c).sort((a, b) => c[b] - c[a])[0] || ''; })(), solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
         est: E.F || E.L || null, estL: E.L, estT: E.T, estF: E.F, tdoaOk: !!(E.T && this.tdoaOk), calTrusted: !!(E.T && this.calTrusted), calSpot: this.calSpot, trail: this.trail.slice(),
@@ -274,22 +275,49 @@
     }
   }
 
+  // ---------------- Geo: anchor the local metre frame to GPS ----------------
+  // The solver keeps working in its own metres (pins you can drag). GPS (±5 m on phones) is too rough to place
+  // the pins, so it only anchors and orients that frame: the lowest-lettered phone with GPS is the origin, and
+  // with 2+ GPS phones a least-squares rotation (2D Procrustes, scale fixed at 1) lines the pins up with them.
+  const Geo = {
+    R: 6371008.8,
+    enu(lat0, lon0, lat, lon) { const r = Math.PI / 180; return [(lon - lon0) * r * Geo.R * Math.cos(lat0 * r), (lat - lat0) * r * Geo.R]; },
+    fromEnu(lat0, lon0, x, y) { const r = Math.PI / 180; return [lat0 + y / (Geo.R * r), lon0 + x / (Geo.R * r * Math.cos(lat0 * r))]; },
+    // pts: [{ pos: [x, y] local m, geo: [lat, lon, acc?] }] → frame { lat0, lon0, rot (rad, local→east/north), t: [e, n], res (m), n } or null
+    frame(pts) {
+      pts = pts.filter(p => p.geo && isFinite(p.geo[0]) && isFinite(p.geo[1])); if (!pts.length) return null;
+      const [lat0, lon0] = pts[0].geo, E = pts.map(p => Geo.enu(lat0, lon0, p.geo[0], p.geo[1])), L = pts.map(p => p.pos);
+      const mean = A => [0, 1].map(k => A.reduce((a, v) => a + v[k], 0) / A.length), cl = mean(L), ce = mean(E);
+      let rot = 0;
+      if (pts.length >= 2) { let sn = 0, cs = 0; L.forEach((l, i) => { const ax = l[0] - cl[0], ay = l[1] - cl[1], bx = E[i][0] - ce[0], by = E[i][1] - ce[1]; sn += ax * by - ay * bx; cs += ax * bx + ay * by; }); rot = Math.atan2(sn, cs); }
+      const c = Math.cos(rot), s = Math.sin(rot), t = [ce[0] - (c * cl[0] - s * cl[1]), ce[1] - (s * cl[0] + c * cl[1])];
+      const toEnu = (x, y) => [c * x - s * y + t[0], s * x + c * y + t[1]];
+      const res = Math.sqrt(L.reduce((a, l, i) => { const q = toEnu(l[0], l[1]); return a + (q[0] - E[i][0]) ** 2 + (q[1] - E[i][1]) ** 2; }, 0) / L.length);
+      return { lat0, lon0, rot, t, n: pts.length, res: +res.toFixed(2), toEnu,
+        toLatLng(x, y) { const q = toEnu(x, y); return Geo.fromEnu(lat0, lon0, q[0], q[1]); },
+        fromLatLng(lat, lon) { const q = Geo.enu(lat0, lon0, lat, lon), x = q[0] - t[0], y = q[1] - t[1]; return [c * x + s * y, -s * x + c * y]; },
+        bearing(dx, dy) { const q = [c * dx - s * dy, s * dx + c * dy]; return (Math.atan2(q[0], q[1]) * 180 / Math.PI + 360) % 360; } }; // local direction → degrees from true north
+    },
+  };
+
   // ---------------- MapView: draws a MeshModel state on a canvas ----------------
   // Calm by default: grey lettered pins, N arrow and a 5 m scale. The alert accent is used only for a confirmed
   // drone (marker, heading, uncertainty ring). Bearing lines are faint during a drone and hidden while quiet;
   // "Show workings" (S.ui.workings) brings back full lines, the loudness-only fit, the true drone (sim) and the legend.
   // S.ui (set by the page): { state, demo, workings, chip, lost: {pos, ago}, me, ring }
   function MapView(cv, opts = {}) {
-    const g = cv.getContext('2d'); let view = { x0: -3, y0: -3, s: 12 }, drag = null, S = null;
-    const sc = () => Math.min(cv.width, cv.height) / view.s;
-    const W2P = (x, y) => { const k = sc(); return [cv.width / 2 + (x - view.x0 - view.s / 2) * k, cv.height / 2 - (y - view.y0 - view.s / 2) * k]; };
-    const P2W = (px, py) => { const k = sc(); return [view.x0 + view.s / 2 + (px - cv.width / 2) / k, view.y0 + view.s / 2 - (py - cv.height / 2) / k]; };
+    const g = cv.getContext('2d'); let view = { x0: -3, y0: -3, s: 12 }, drag = null, S = null, ext = null;
+    // ext (opts.project): a street map under the canvas owns the projection: { W2P, P2W, k: px per m } in device px
+    const sc = () => ext ? ext.k : Math.min(cv.width, cv.height) / view.s;
+    const W2P = (x, y) => { if (ext) return ext.W2P(x, y); const k = sc(); return [cv.width / 2 + (x - view.x0 - view.s / 2) * k, cv.height / 2 - (y - view.y0 - view.s / 2) * k]; };
+    const P2W = (px, py) => { if (ext) return ext.P2W(px, py); const k = sc(); return [view.x0 + view.s / 2 + (px - cv.width / 2) / k, view.y0 + view.s / 2 - (py - cv.height / 2) / k]; };
     const DARK = { map: '#0f1218', ink: '#F4F6FA', ink2: '#B9C0CE', line: '#2A303C', pin: '#3a414f', pinInk: '#F4F6FA', alert: '#FF5A1F', check: '#E8B500', demo: '#A78BFA', panel: '#161A22' };
     function fitView(list) {
       if (drag) return;
       if (S.solo) { const n = list.find(m => m.key === S.solo); view = { x0: n.pos[0] - 6, y0: n.pos[1] - 6, s: 12 }; return; }
       const xs = [0, 6], ys = [0, 6]; list.forEach(n => { xs.push(n.pos[0]); ys.push(n.pos[1]); });
-      const L = S.ui && S.ui.lost && S.ui.lost.pos;
+      const L = S.ui && S.ui.lost && S.ui.lost.pos, RP = S.ui && S.ui.replay;
+      if (RP) RP.track.forEach(p => { xs.push(clamp(p[1], -30, 36)); ys.push(clamp(p[2], -30, 36)); });
       [S.est, L, S.ui && S.ui.workings && S.truth && [S.truth.x, S.truth.y]].forEach(p => { if (p) { xs.push(clamp(p[0], -12, 18)); ys.push(clamp(p[1], -12, 18)); } });
       const x0 = Math.min(...xs) - 3, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 3, y1 = Math.max(...ys) + 3, s = Math.max(x1 - x0, y1 - y0);
       view = { x0: (x0 + x1) / 2 - s / 2, y0: (y0 + y1) / 2 - s / 2, s };
@@ -304,7 +332,7 @@
     }
     // TDOA "bearing line" for a pair = the hyperbola r_b − r_a = c·dt, traced by marching squares
     function hyperbola(a, b, dt, col, w) {
-      const [X0, Y1] = P2W(0, 0), [X1, Y0] = P2W(cv.width, cv.height);
+      const cs = [P2W(0, 0), P2W(cv.width, 0), P2W(0, cv.height), P2W(cv.width, cv.height)], X0 = Math.min(...cs.map(c => c[0])), X1 = Math.max(...cs.map(c => c[0])), Y0 = Math.min(...cs.map(c => c[1])), Y1 = Math.max(...cs.map(c => c[1]));
       const k = dt / 1000 * C_SOUND, st = (X1 - X0) / 70, f = (x, y) => Math.hypot(x - b.pos[0], y - b.pos[1], 1) - Math.hypot(x - a.pos[0], y - a.pos[1], 1) - k;
       g.strokeStyle = col; g.lineWidth = w; g.beginPath();
       for (let x = X0; x < X1; x += st) for (let y = Y0; y < Y1; y += st) {
@@ -335,10 +363,10 @@
       if (cv.width !== Wd || cv.height !== Hd) { cv.width = Wd; cv.height = Hd; }
       requestAnimationFrame(draw); if (!S) return;
       const C = Object.assign({}, DARK, opts.colors ? opts.colors() : null), U = S.ui || {}, ws = U.state || '';
+      ext = opts.project ? opts.project(dpr) : null;
       const W = cv.width, H = cv.height, now = performance.now(), list = S.nodes, byKey = k => list.find(n => n.key === k);
       const hot = ws === 'drone' || ws === 'tracking', work = !!U.workings;
-      fitView(list);
-      g.fillStyle = C.map; g.fillRect(0, 0, W, H);
+      if (ext) g.clearRect(0, 0, W, H); else { fitView(list); g.fillStyle = C.map; g.fillRect(0, 0, W, H); }
       // N arrow + 5 m scale bar
       text('N ↑', W - 22 * dpr, 18 * dpr, C.ink2, 13 * dpr, true);
       const L5 = 5 * sc(), y5 = H - 16 * dpr; g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.beginPath(); g.moveTo(12 * dpr, y5); g.lineTo(12 * dpr + L5, y5); g.stroke(); text('5 m', 20 * dpr + L5, y5, C.ink2, 12 * dpr, false, 'left');
@@ -351,7 +379,7 @@
       if (E) {
         const [x, y] = W2P(E[0], E[1]), rr = Math.max(18 * dpr, (U.ring || 1.5) * sc());
         g.strokeStyle = C.alert; g.lineWidth = 2.5 * dpr; g.beginPath(); g.arc(x, y, rr, 0, 7); g.stroke();
-        if (S.heading) { const h = S.heading, m = Math.hypot(h[0], h[1]), Lh = rr + 34 * dpr; arrow(x + h[0] / m * rr * 0.6, y - h[1] / m * rr * 0.6, x + h[0] / m * Lh, y - h[1] / m * Lh, C.alert, 3 * dpr); }
+        if (S.heading) { const q = W2P(E[0] + S.heading[0], E[1] + S.heading[1]), hx = q[0] - x, hy = q[1] - y, m = Math.hypot(hx, hy) || 1, Lh = rr + 34 * dpr; arrow(x + hx / m * rr * 0.6, y + hy / m * rr * 0.6, x + hx / m * Lh, y + hy / m * Lh, C.alert, 3 * dpr); }
         tri(x, y + 2 * dpr, 14 * dpr);
         if (U.demo) { g.save(); g.clip(); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; for (let k = -30; k < 30; k += 5) { g.beginPath(); g.moveTo(x + k * dpr, y + 16 * dpr); g.lineTo(x + (k + 20) * dpr, y - 16 * dpr); g.stroke(); } g.restore(); tri(x, y + 2 * dpr, 14 * dpr); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.stroke(); }
         else { g.fillStyle = C.alert; g.fill(); }
@@ -362,6 +390,11 @@
         list.forEach(n => { if (!n.pos) return; const [px, py] = W2P(n.pos[0], n.pos[1]), dx = x - px, dy = y - py, d = Math.hypot(dx, dy); if (d < near) { if (d < 1) y = py + near; else { x = px + dx / d * near; y = py + dy / d * near; } } });
         g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.setLineDash([5 * dpr, 4 * dpr]); g.beginPath(); g.arc(x, y, 26 * dpr, 0, 7); g.stroke(); g.setLineDash([]);
         tri(x, y + 2 * dpr, 12 * dpr); g.stroke(); text('last seen ' + U.lost.ago + ' ago', x, y + 42 * dpr, C.ink, 12 * dpr);
+      }
+      if (U.replay && !hot) {
+        const RP = U.replay, pts = RP.track.filter(p => p[0] <= RP.t); g.strokeStyle = C.alert; g.lineWidth = 2.5 * dpr; g.setLineDash([6 * dpr, 5 * dpr]); g.beginPath();
+        pts.forEach((p, i) => { const [a, b] = W2P(p[1], p[2]); g[i ? 'lineTo' : 'moveTo'](a, b); }); g.stroke(); g.setLineDash([]);
+        const last = pts[pts.length - 1]; if (last) { const [x, y] = W2P(last[1], last[2]); tri(x, y + 2 * dpr, 13 * dpr); g.lineWidth = 3 * dpr; g.stroke(); if (RP.chip) chip(RP.chip, x, y + 30 * dpr, C, dpr); }
       }
       if (S.solo) drawSolo(list.find(n => n.key === S.solo), C, dpr, now, hot);
       list.forEach(n => {
@@ -540,5 +573,5 @@
   const PAL = [];
   (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
     for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, g1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (g1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
-  window.RotorMesh = { PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
+  window.RotorMesh = { Geo, PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
 })();

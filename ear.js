@@ -38,7 +38,20 @@
     $('nName').onchange = () => localStorage.setItem('rotorear-name', $('nName').value.trim());
     let label = '';
     const status = (s, cls) => { $('nStatus').textContent = (label ? 'Node ' + label + ' · ' : '') + s; $('nStatus').className = 'nstatus ' + (cls || ''); };
-    const link = new R.NodeLink(room, key, status, d => { if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); } });
+    const link = new R.NodeLink(room, key, status, d => {
+      if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); }
+      if (d.t === 'look') look.show(d);
+    });
+    const look = Look(link, key, room);
+    // GPS (opt-in): latitude/longitude numbers only, so the screen can lay a street map under the plan
+    let geo = null, geoW = null;
+    $('nGeo').onchange = () => {
+      if (!$('nGeo').checked) { if (geoW != null) navigator.geolocation.clearWatch(geoW); geoW = null; geo = null; $('nGeoS').textContent = ''; return; }
+      if (!navigator.geolocation) { $('nGeo').checked = false; $('nGeoS').textContent = 'No GPS access in this browser.'; return; }
+      $('nGeoS').textContent = 'waiting for a GPS fix…';
+      geoW = navigator.geolocation.watchPosition(p => { geo = [+p.coords.latitude.toFixed(6), +p.coords.longitude.toFixed(6), Math.round(p.coords.accuracy)]; $('nGeoS').textContent = `sharing GPS · ±${geo[2]} m`; },
+        e => { $('nGeoS').textContent = e.code === 1 ? 'GPS permission denied' : 'no GPS fix yet'; }, { enableHighAccuracy: true, maximumAge: 5000 });
+    };
 
     let ctx, an, bus, det, tap, mic, micSrc, sim = null, simGain, simSpk, spec = Spectro($('nSpec')), wake = null;
     function ensure() {
@@ -49,7 +62,7 @@
       R.TimingTap(ctx, bus).then(t => tap = t).catch(() => {}); // arrival times are optional
       simSpk = ctx.createGain(); simSpk.gain.value = 0; simSpk.connect(ctx.destination);
       setInterval(tick, 50);
-      setInterval(() => link.send(R.telemetry(det.out, key, $('nName').value.trim(), null, tap ? tap.take() : null, tap ? tap.takeOnsets() : null)), 1000 / R.SEND_HZ);
+      setInterval(() => { const m = R.telemetry(det.out, key, $('nName').value.trim(), null, tap ? tap.take() : null, tap ? tap.takeOnsets() : null); if (geo) m.g = geo; link.send(m); }, 1000 / R.SEND_HZ);
     }
     async function keepAwake() { try { if ('wakeLock' in navigator && !wake) { wake = await navigator.wakeLock.request('screen'); wake.onrelease = () => wake = null; } } catch (e) {} }
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (mic || sim)) keepAwake(); });
@@ -86,10 +99,73 @@
         sim = { d, nz }; simSpk.gain.value = $('nSimSpk').checked ? 1 : 0; updDist();
       } else if (sim) { sim.d.stop(); sim.nz.stop(); simGain.disconnect(); sim = null; }
     };
-    window.__node = { get out() { return det && det.out; }, key };
+    window.__node = { get out() { return det && det.out; }, key, look, get geo() { return geo; } };
     return { room, stop() { if (mic) $('nStart').onclick(); if (sim) { $('nSim').checked = false; $('nSim').onchange(); } } };
   }
 
+
+  // ---------------- camera confirm ----------------
+  // The screen sends {t:'look', id, cls, b: bearing° from north (only with GPS), w: words} to the ear nearest the
+  // drone. This phone shows an arrow (compass where available) and can record ~10 s of rear-camera video,
+  // no sound. The clip stays in this phone's IndexedDB; the screen only gets {t:'clip', id, n}.
+  const Log = window.RotorLog, Clips = window.RotorClips;
+  function Look(link, key, room) {
+    let cur = null, seen = 0, heading = null, rec = null, done = 0;
+    const onOri = e => { const h = e.webkitCompassHeading != null ? e.webkitCompassHeading : e.absolute && e.alpha != null ? 360 - e.alpha : null; if (h != null) heading = h; };
+    const listen = () => { window.addEventListener('deviceorientationabsolute', onOri); window.addEventListener('deviceorientation', onOri); };
+    const needPerm = window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function'; // iOS 13+: needs a tap
+    if (!needPerm) listen();
+    $('lookCompass').onclick = () => DeviceOrientationEvent.requestPermission().then(r => { if (r === 'granted') listen(); $('lookCompass').hidden = true; }).catch(() => { $('lookCompass').hidden = true; });
+    function draw() {
+      const on = cur && (rec || performance.now() - seen < 20000 || performance.now() - done < 10000);
+      $('look').hidden = !on || !!rec; $('rec').hidden = !rec;
+      if (!on) { if (cur && !rec) cur = null; return; }
+      const b = cur.b, rot = b == null ? null : heading != null ? b - heading : b;
+      $('lookArrow').hidden = rot == null; if (rot != null) $('lookArrow').style.transform = `rotate(${rot}deg)`;
+      $('lookCompass').hidden = !(needPerm && b != null && heading == null);
+      $('lookWords').textContent = (b == null ? 'Look ' : heading != null ? 'Follow the arrow, ' : `Bearing ${b}° (arrow: top of the phone = north), `) + cur.w;
+      $('lookCls').textContent = (cur.demo ? 'DEMO · ' : '') + (cur.cls || 'Drone') + ' · the screen asks this phone';
+      $('lookRec').disabled = !!done; $('lookRec').textContent = done ? 'Clip saved ✓ on this phone' : 'Record 10 s with the rear camera';
+    }
+    setInterval(draw, 200);
+    $('lookRec').onclick = async () => {
+      if (rec || !cur) return;
+      const id = cur.id; Log.upsert({ id, type: 'drone', t0: cur.t0, cls: cur.cls, demo: !!cur.demo, room });
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false }); } // video only, never sound
+      catch (e) { $('lookWords').textContent = 'Camera unavailable: ' + (e.message || e.name); return; }
+      const type = ['video/webm;codecs=vp9', 'video/webm', 'video/mp4'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+      const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined), chunks = [], t0 = performance.now();
+      rec = { mr, stream }; $('recVid').srcObject = stream; draw();
+      mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      const tick = setInterval(() => { $('recT').textContent = 'REC ' + Log.mmss(Math.max(0, 10000 - (performance.now() - t0))); }, 200);
+      mr.onstop = async () => {
+        clearInterval(tick); stream.getTracks().forEach(t => t.stop()); $('recVid').srcObject = null;
+        const blob = new Blob(chunks, { type: mr.mimeType || type || 'video/webm' });
+        await Clips.put({ id: 'c' + Date.now().toString(36), inc: id, t: Date.now(), type: blob.type, blob, secs: +((performance.now() - t0) / 1000).toFixed(1) });
+        const n = (await Clips.all()).filter(c => c.inc === id).length;
+        [0, 1000, 2500].forEach(ms => setTimeout(() => link.send({ t: 'clip', k: key, id, n }), ms)); // a flag, never the video
+        rec = null; done = performance.now(); seen = 0; drawLog();
+      };
+      mr.start(500); setTimeout(() => mr.state === 'recording' && mr.stop(), 10000);
+    };
+    $('recStop').onclick = () => { if (rec && rec.mr.state === 'recording') rec.mr.stop(); };
+    return { show(d) { if (!cur || cur.id !== d.id) { cur = d; done = 0; Log.upsert({ id: d.id, type: 'drone', t0: d.t0, cls: d.cls, demo: !!d.demo, room }); drawLog(); } else Object.assign(cur, d); seen = performance.now(); },
+      get state() { return { shown: !$('look').hidden, rec: !!rec, done: !!done, heading, cur } } };
+  }
+  // this phone's log: incidents it was asked about + its clips (play / download / delete)
+  const urls = {};
+  async function drawLog() {
+    const clips = await Clips.all().catch(() => []), by = {}; clips.forEach(c => (by[c.inc] = by[c.inc] || []).push(c));
+    const ids = new Set(Log.list.map(e => e.id)), orphans = clips.filter(c => !ids.has(c.inc));
+    $('eLogList').innerHTML = Log.list.slice(0, 30).map(e => Log.row(e, by[e.id]) + (by[e.id] || []).map(clipHtml).join('')).join('') + orphans.map(clipHtml).join('')
+      || '<div class="lempty">Nothing yet. When a screen confirms a drone near this phone, it may ask you to look and record a clip.</div>';
+  }
+  const clipHtml = c => { const u = urls[c.id] || (urls[c.id] = URL.createObjectURL(c.blob)), ext = /mp4/.test(c.type) ? 'mp4' : 'webm';
+    return `<div class="clip"><video src="${u}" controls playsinline preload="metadata"></video><div><b>${Log.clock(c.t)} · ${c.secs} s</b><small>on this phone only</small>
+      <a class="btn" href="${u}" download="rotor-ear-${new Date(c.t).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}">Download</a><button class="btn" data-del="${c.id}">Delete</button></div></div>`; };
+  $('eLogList').onclick = e => { const d = e.target.closest('[data-del]'); if (d && confirm('Delete this clip from this phone?')) Clips.del(d.dataset.del).then(drawLog); };
+  window.__earLog = { drawLog };
 
   // ---------------- ear mode ----------------
   let node = null;
@@ -98,6 +174,7 @@
   App.modes.ear = {
     enter(p) {
       if (node && node.room !== p.room) return location.reload(); // one room per page load
+      drawLog();
       if (!p.room) { $('earJoin').hidden = false; $('node').hidden = true; $('roomTag').textContent = 'Be an ear'; return; }
       if (!node) node = runNode(p.room);
     },

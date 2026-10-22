@@ -25,12 +25,12 @@
   function route() {
     const p = parse(), key = p.mode + '|' + p.room;
     if (key === App.key) return;
-    const old = App.cur && App.modes[App.cur];
+    const mod = m => App.modes[m === 'demo' ? 'screen' : m], old = App.cur && mod(App.cur);
     if (old && old.leave) old.leave(p.mode);
     App.cur = p.mode; App.key = key;
     Object.values(SECTION).forEach(id => document.getElementById(id).hidden = id !== SECTION[p.mode]);
     document.title = { home: 'Rotor Ear', screen: 'Rotor Ear · screen', demo: 'Rotor Ear · demo', ear: 'Rotor Ear · ear', sim: 'Rotor Ear · demo phones' }[p.mode];
-    const m = App.modes[p.mode === 'demo' ? 'screen' : p.mode];
+    const m = mod(p.mode);
     if (m && m.enter) m.enter(p);
     window.scrollTo(0, 0);
   }
