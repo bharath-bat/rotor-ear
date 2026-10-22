@@ -125,6 +125,33 @@ Phones sheet → **Calibrate**. Every phone listens for a sharp onset (an AudioW
 
 Corrections are stored per room in `localStorage` and applied to event times and levels in the arrival-time and loudness fits. When all agreeing phones are calibrated with residuals under 3 ms, the loudness sanity gate is dropped. Limits: it assumes the clap is at the phone (30 cm ≈ 0.9 ms), a phone's latency must stay stable (Bluetooth or a route change breaks it, so recalibrate), and mics clip on a clap right next to them, so the level is taken from the other phones.
 
+## Incident log
+
+Every episode the screen sees is saved on that device (`localStorage`, newest 100): start and end time, class, peak match, phones agreeing, flight states seen and the track (one point every 0.5 s, in the phones' metre frame). "Not a drone" episodes are logged too.
+
+- **Log sheet** (••• → Incident log, or Details → All incidents): one row per incident. Tap a row to replay its track on the map (sped up to about 12 s); ✕ stops it.
+- **Export JSON** downloads the whole log. **Printable report** opens a one-page A4 summary (table with a small track drawing per incident) that prints cleanly to PDF.
+- **Clear all…** asks first, and also deletes the clips on that device.
+- An ear keeps its own short log: the incidents it was asked to look at, with its clips.
+
+## Street map (optional)
+
+Phones sheet → **Street map**. Each ear may tick **Share GPS position** (off by default, per phone). It then sends only its latitude/longitude with its other numbers, never audio. With at least one GPS phone the screen draws OpenStreetMap tiles (Leaflet, attribution shown) under the map:
+
+- Positions still come from the metre-based solver. GPS only anchors the frame (the lowest-lettered GPS phone is the origin) and, with two or more GPS phones, turns it (a best-fit rotation, shown as "frame fit ±N m").
+- One GPS phone: north is taken as up on the plan.
+- No GPS, the demo, or failing tiles (offline, blocked host): the plain map, as before.
+- The tile URL can be swapped with `window.ROTOREAR_TILES` before load. OSM tiles are fine for light use; for a busy deployment use your own tile server.
+
+## Camera confirm
+
+When the screen confirms a drone, it asks the ear nearest the estimate (that ear keeps the prompt for the incident): **Look this way**.
+
+- With a street-map frame the prompt shows an arrow: the bearing from true north, turned by the phone's compass (`DeviceOrientation`; iPhone needs a **Use compass** tap). Without a compass the arrow is drawn with the top of the phone as north.
+- Without GPS it says it in words relative to the other phones ("toward phone C · ~6 m away").
+- **Record 10 s** opens the rear camera (video only, no sound) and saves the clip in that phone's IndexedDB, tagged with the incident id. Only a "clip saved" count goes to the screen, where the log shows 🎥.
+- Clips can be played, downloaded or deleted in that phone's log. They never leave the phone unless you download them.
+
 ## Code
 
 The code is plain JS:
@@ -132,9 +159,11 @@ The code is plain JS:
 - `app.js`: the start screen router (`#screen` / `#ear` / `#demo`) and old-link rewriting.
 - `detector.js`: detector and classifier, shared by every mode.
 - `watch.js`: the screen (watch post) and the scripted demo.
-- `ear.js`: ear mode and the relay demo phones.
+- `ear.js`: ear mode (with the look prompt, camera clip and the ear's log) and the relay demo phones.
+- `log.js`: the incident log, JSON export, printable report, and clip storage (IndexedDB).
+- `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
-- `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, MapView, SimEngine.
+- `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, the GPS frame (`Geo`), MapView, SimEngine.
 - `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
 - `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
 - `mesh/index.html` and `mesh/sim.html`: redirects only, for old links.
@@ -147,6 +176,9 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/teach.py`: wrong before teaching, right after.
 - `python3 test/flight.py`: flight-state table for hover / climb / descend / load / fly-by / maneuver WAVs.
 - `python3 test/alert.py`: the alert flow: beep never triggers the detector, Checking → DRONE, flash ×3 then steady, repeat beep, Got it, mute with expiry, Drone lost and back, Lost → Watching, fan ignored, Loaded is not an alert.
+- `python3 test/log.py`: an episode is saved with every field, the Log sheet lists it, tap replays, JSON export, the report prints to one A4 page, Clear all asks first.
+- `python3 test/geo.py`: GPS frame math (round trips, rotation recovery, bearings, noisy GPS, one phone), then three ears sharing GPS: pins land on their GPS spots on the street map, and failing tiles or no GPS fall back to the plain map. Tiles are a local stub; `OSM=1` uses real OpenStreetMap tiles.
+- `python3 test/camera.py`: with a fake camera, the nearest ear is asked to look, records a ~10 s clip into IndexedDB, the screen gets only the flag, and the ears' mesh messages stay small (no media).
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.

@@ -120,7 +120,7 @@
 
   // ---------- sheets: open from the bottom, close with Done or a swipe down; a DRONE alert closes them (not Teach: you may be recording it) ----------
   let sheet = null;
-  const SHEETS = ['teach', 'details', 'phones', 'moreS'];
+  const SHEETS = ['teach', 'details', 'phones', 'moreS', 'logS'];
   function openSheet(id) {
     sheet = sheet === id ? null : id;
     $('app').classList.toggle('sheet-open', !!sheet);
@@ -213,7 +213,7 @@
   const loadCal = () => { try { return JSON.parse(localStorage.getItem(calKey()) || '{}'); } catch (e) { return {}; } };
   let saved = JSON.parse(localStorage.getItem(posKey()) || '{}'), model = new R.MeshModel(saved, loadCal());
   const activeModel = () => sim ? sim.model : model;
-  const view = R.MapView($('map'), { colors: () => cols, onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
+  const view = R.MapView($('map'), { colors: () => cols, project: dpr => project(dpr), onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
     if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } } });
   $('workings').onchange = () => workings = $('workings').checked;
   function sendLocal() { // this phone is a node of its own map (in-page, no network): numbers only
@@ -222,7 +222,8 @@
     model.ingest({ t: 'pong', k: ME, ts: now, tn: now }, now);
     const ev = tap ? tap.take() : null; // envelope peaks / onsets heard during our own alert tone are dropped
     const on = tap ? tap.takeOnsets() : null, quiet = now < gateUntil + 300;
-    model.ingest(R.telemetry(det.out, ME, 'this phone', null, quiet ? null : ev, quiet ? null : on), now);
+    const m = R.telemetry(det.out, ME, 'this phone', null, quiet ? null : ev, quiet ? null : on); if (geoMe) m.g = geoMe;
+    model.ingest(m, now);
   }
 
   // Phones: this screen hosts the room's map; other phones open the join link ?room=… (ear mode)
@@ -233,7 +234,7 @@
     room = r; history.replaceState(null, '', location.pathname + '#screen&room=' + r); window.RotorApp.key = 'screen|' + r;
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
-    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
+    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
   }
   $('pCreate').onclick = () => joinRoom(R.randKey(4));
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
@@ -271,7 +272,7 @@
       if (p.demo) { startDemo(p.h); setTimeout(tapStart, 300); }
       if (pendingSheet) { openSheet(pendingSheet); pendingSheet = null; }
     },
-    leave() { stopDemo(); $('tapStart').hidden = true; if (micStream) toggleMic(); stopTest(); stopFile(); if (sheet) openSheet(null); },
+    leave() { inc = hum = replay = null; Log.save(true); stopDemo(); $('tapStart').hidden = true; if (micStream) toggleMic(); stopTest(); stopFile(); if (sheet) openSheet(null); },
   };
   const isDemo = () => !!sim || !!(model.state && model.state.demo);
 
@@ -346,22 +347,100 @@
     return D;
   }
 
-  // ---------- timeline: one row per drone (time · type · how long · bearing · demo/real) ----------
-  const TL_KEY = 'rotorear-timeline-v2'; localStorage.removeItem('rotorear-timeline');
-  let tl = []; try { tl = JSON.parse(localStorage.getItem(TL_KEY) || '[]'); } catch (e) {}
-  let ep = null, hum = null, tlSaved = 0;
-  const saveTl = force => { const now = performance.now(); if (force || now - tlSaved > 2000) { tl = tl.slice(0, 40); localStorage.setItem(TL_KEY, JSON.stringify(tl)); tlSaved = now; } };
+  // ---------- incident log (log.js): one entry per drone / not-a-drone episode, on this phone only ----------
+  const Log = window.RotorLog;
+  let inc = null, hum = null, replay = null;
   function lastDrone() {
-    const e = tl.find(x => x.type === 'drone'); if (!e) return '';
-    const d = new Date(e.t), days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(e.t).setHours(0, 0, 0, 0)) / 864e5);
-    return `Last drone ${clock(e.t)}${e.dir ? ' · ' + e.dir : ''}${e.demo ? ' (demo)' : ''}${days === 1 ? ' (yesterday)' : days > 1 ? ' (' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')' : ''}`;
+    const e = Log.list.find(x => x.type === 'drone'); if (!e) return '';
+    const d = new Date(e.t0), days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(e.t0).setHours(0, 0, 0, 0)) / 864e5);
+    return `Last drone ${clock(e.t0)}${e.dir ? ' · ' + e.dir : ''}${e.demo ? ' (demo)' : ''}${days === 1 ? ' (yesterday)' : days > 1 ? ' (' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')' : ''}`;
   }
-  let tlKey = '';
+  let tlKey = '', logKey = '';
   function drawTimeline() {
-    const html = tl.length ? tl.map(e => `<div class="tl"><b>${clock(e.t)}</b><span>${esc(e.l)}</span><span class="dur">${mmss(e.dur || 0)}</span><span class="dir">${esc((e.dir || '—').replace(/ of phone /, ' · ').replace(/^at phone /, ''))}</span><span class="tag${e.demo ? ' demo' : ''}">${e.demo ? 'DEMO' : 'real'}</span></div>`).join('')
-      : '<div class="tl empty">No detections yet. Each drone gets one row here.</div>';
+    const html = Log.list.length ? Log.list.slice(0, 3).map(e => Log.row(e)).join('') : '<div class="lempty">No detections yet. Each drone gets one entry.</div>';
     if (html !== tlKey) { tlKey = html; $('tlList').innerHTML = html; }
+    if (sheet !== 'logS') return;
+    const all = Log.list.map(e => Log.row(e)).join('') || '<div class="lempty">Nothing logged yet.</div>';
+    if (all !== logKey) { logKey = all; $('logList').innerHTML = all; setText('logN', Log.list.length + ' saved'); }
   }
+  $('openLog').onclick = $('mLog').onclick = () => openSheet('logS');
+  $('lExport').onclick = () => Log.exportJSON();
+  $('lReport').onclick = () => Log.openReport();
+  $('lClear').onclick = () => { if (confirm('Delete all ' + Log.list.length + ' log entries on this phone? This can\'t be undone.')) { Log.clear(); inc = hum = replay = null; logKey = tlKey = ''; } };
+  // tap an incident: replay its track on the map (sped up to ~12 s)
+  const onRow = e => { const b = e.target.closest('[data-inc]'); if (b) startReplay(b.dataset.inc); };
+  $('tlList').onclick = $('logList').onclick = onRow;
+  function startReplay(id) {
+    const e = Log.get(id); if (!e) return;
+    if (!e.track || e.track.length < 2) { setText('logN', 'no track for that one (a single phone can\'t place a drone)'); return; }
+    replay = { e, t0: performance.now(), len: e.track[e.track.length - 1][0] }; openSheet(null);
+  }
+  $('replayX').onclick = () => { replay = null; };
+  function clipFlag(d) { // an ear says "clip saved" for an incident: just a flag, the video stays on that phone
+    const e = Log.get(d.id), n = model.nodes.get(d.k); if (!e || !n) return;
+    e.clips = e.clips || []; if (!e.clips.some(c => c.phone === n.label)) { e.clips.push({ phone: n.label, n: d.n || 1 }); Log.save(true); logKey = tlKey = ''; }
+  }
+
+  // ---------- street map (Leaflet + OpenStreetMap) under the plan, anchored by GPS ----------
+  let geoMe = null, geoWatch = null, geoF = null, lmap = null, tiles = { ok: 0, bad: 0 }, geoOn = localStorage.getItem('rotorear-geomap') === '1', geoFit = 0, geoMsg = '';
+  $('geoMap').checked = geoOn;
+  $('geoMap').onchange = () => { geoOn = $('geoMap').checked; localStorage.setItem('rotorear-geomap', geoOn ? '1' : '0'); tiles = { ok: 0, bad: 0 }; };
+  $('geoMe').onchange = () => {
+    if (!$('geoMe').checked) { if (geoWatch != null) navigator.geolocation.clearWatch(geoWatch); geoWatch = null; geoMe = null; return; }
+    if (!navigator.geolocation) { geoMsg = 'This browser has no GPS access.'; $('geoMe').checked = false; return; }
+    geoWatch = navigator.geolocation.watchPosition(p => { geoMe = [+p.coords.latitude.toFixed(6), +p.coords.longitude.toFixed(6), Math.round(p.coords.accuracy)]; geoMsg = ''; },
+      e => { geoMsg = 'GPS: ' + (e.code === 1 ? 'permission denied' : 'no fix yet'); }, { enableHighAccuracy: true, maximumAge: 5000 });
+  };
+  const tilesFailed = () => tiles.bad >= 3 && tiles.bad > tiles.ok * 4; // most tiles failing (offline, blocked host): plain map
+  let leafletP = null;
+  const loadLeaflet = () => leafletP || (leafletP = new Promise((ok, no) => {
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'lib/leaflet.css'; document.head.appendChild(css);
+    const js = document.createElement('script'); js.src = 'lib/leaflet.js'; js.onload = ok; js.onerror = no; document.head.appendChild(js);
+  }));
+  function geoTick(st, live) { // every frame: GPS frame from the live phones; show / fit the street map when it can be used
+    const pts = live.filter(n => n.geo).sort((a, b) => a.label < b.label ? -1 : 1).map(n => ({ pos: n.pos, geo: n.geo }));
+    geoF = !sim && pts.length ? R.Geo.frame(pts) : null;
+    const use = geoOn && geoF && !tilesFailed();
+    $('geomap').hidden = !(use && lmap); $('mapbox').classList.toggle('geo', !!(use && lmap));
+    if (!use) return;
+    if (!lmap) { loadLeaflet().then(() => { if (lmap) return;
+      lmap = L.map('geomap', { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false, boxZoom: false, keyboard: false, zoomSnap: 0, maxZoom: 22, fadeAnimation: false });
+      L.tileLayer(window.ROTOREAR_TILES || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxNativeZoom: 19, maxZoom: 22, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' })
+        .on('tileload', () => tiles.ok++).on('tileerror', () => tiles.bad++).addTo(lmap);
+      lmap.setView(geoF.toLatLng(3, 3), 19); geoFit = 0; }).catch(() => { tiles.bad = 99; geoMsg = 'Street map library failed to load: plain map.'; }); return; }
+    const now = performance.now(); if (now - geoFit < 1000) return; geoFit = now;
+    lmap.invalidateSize(false);
+    const ps = st.nodes.map(n => n.pos).concat(st.est ? [st.est] : [], replay ? replay.e.track.map(p => [p[1], p[2]]) : []).map(p => geoF.toLatLng(p[0], p[1]));
+    lmap.fitBounds(L.latLngBounds(ps).pad(0.25), { animate: false, maxZoom: 21, padding: [24, 24] });
+  }
+  const project = dpr => {
+    if (!lmap || $('geomap').hidden || !geoF) return null;
+    const W2P = (x, y) => { const q = lmap.latLngToContainerPoint(geoF.toLatLng(x, y)); return [q.x * dpr, q.y * dpr]; }, a = W2P(0, 0), b = W2P(10, 0);
+    return { W2P, P2W: (px, py) => { const ll = lmap.containerPointToLatLng([px / dpr, py / dpr]); return geoF.fromLatLng(ll.lat, ll.lng); }, k: Math.hypot(b[0] - a[0], b[1] - a[1]) / 10 };
+  };
+
+  window.__mapNodes = () => activeModel().state.nodes.map(n => ({ label: n.label, name: n.name || '', pos: n.pos, geo: n.geo })); // tests
+  window.__geo = { get frame() { return geoF; }, get map() { return lmap; }, project, get shown() { return !$('geomap').hidden; }, get tiles() { return tiles; } };
+  window.__log = { get replay() { return replay && { id: replay.e.id, len: replay.len }; }, get inc() { return inc; } };
+
+  // ---------- camera confirm: ask the ear nearest the drone to look (it records; only a flag comes back) ----------
+  let lookAt = 0;
+  function lookWords(n, live, est) { // the direction from that ear in words, relative to the other phones
+    const ang = (a, b) => Math.atan2(b[0] - a[0], b[1] - a[1]), da = ang(n.pos, est), diff = x => Math.abs(((x - da) * 180 / Math.PI + 540) % 360 - 180);
+    const o = live.filter(m => m.key !== n.key).map(m => ({ m, d: diff(ang(n.pos, m.pos)) })).sort((a, b) => a.d - b.d);
+    const r = Math.round(Math.hypot(est[0] - n.pos[0], est[1] - n.pos[1]));
+    if (!o.length) return '~' + r + ' m away';
+    return (o[0].d < 25 || o.length < 2 ? 'toward phone ' + o[0].m.label : 'between phone ' + o[0].m.label + ' and phone ' + o[1].m.label) + ' · ~' + r + ' m away';
+  }
+  function askLook(st, live, now) { // the ear nearest the estimate at confirm time keeps the prompt for this incident
+    if (!hub || !inc || !st.est || now - lookAt < 1000) return; lookAt = now;
+    const ears = live.filter(n => n.key !== ME && !/^sim /.test(n.name || '')); if (!ears.length) return;
+    const n = ears.find(m => m.label === inc.asked) || ears.reduce((a, m) => Math.hypot(m.pos[0] - st.est[0], m.pos[1] - st.est[1]) < Math.hypot(a.pos[0] - st.est[0], a.pos[1] - st.est[1]) ? m : a);
+    const b = geoF ? Math.round(geoF.bearing(st.est[0] - n.pos[0], st.est[1] - n.pos[1])) : null;
+    hub.sendTo(n.key, { t: 'look', id: inc.id, t0: inc.t0, cls: inc.cls, demo: inc.demo, b, w: lookWords(n, live, st.est) });
+    inc.asked = n.label;
+  }
+
   // ---------- one frame: state machine → status block, map, peek, actions, bar ----------
   let watchStart = 0, prevS = 'ready', lastEst = null, lastDir = '', lastHead = '', lostInfo = null, renderKey = '';
   const f1 = v => v == null ? '—' : v.toFixed(1);
@@ -377,15 +456,23 @@
     if (ws.ev === 'alert') {
       lastDir = lastHead = ''; A.count++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
       if (!muted()) { tone(demo ? 'demo' : 'alert', 3); if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 250]); }
-      ep = { t: Date.now(), type: 'drone', l: D.cls || 'Drone', dur: 0, dir: '', demo }; tl.unshift(ep); saveTl(true);
+      replay = null;
+      inc = Log.add({ id: Log.newId(), type: 'drone', t0: Date.now(), t1: Date.now(), cls: D.cls || 'Drone', peak: D.score || 0, agree: D.agree, nAgree: st.voters || 1, flights: [], track: [], dir: '', demo, room,
+        pins: live.map(n => ({ label: n.label, pos: n.pos.slice() })), geo: geoF ? { lat0: geoF.lat0, lon0: geoF.lon0, rot: +geoF.rot.toFixed(4) } : null, clips: [] });
     }
     if (ws.ev === 'back') nextBeep = now + REPEAT_MS; // back within 60 s: no new alert sound
     if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted()) tone(demo ? 'demo' : 'alert', 1); }
     if (ws.ev === 'lost') { if (!muted()) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
-    if (ws.ev === 'gone') { ep = null; saveTl(true); }
-    if (ep && hot) { ep.dur = ws.lastSeen - ws.first; if (D.dir) ep.dir = D.dir; if (D.cls) ep.l = D.cls; saveTl(); }
-    if (s === 'notdrone' && prevS !== 'notdrone') { hum = { t: Date.now(), type: 'hum', l: 'Not a drone', dur: 0, dir: D.humAt ? 'phone ' + D.humAt : '', demo, t0: now }; tl.unshift(hum); saveTl(true); }
-    if (hum && D.raw === 'hum') hum.dur = now - hum.t0; else hum = null;
+    if (ws.ev === 'gone') { inc = null; Log.save(true); }
+    if (inc && hot) {
+      inc.t1 = Date.now(); if (D.dir) inc.dir = D.dir; if (D.cls) inc.cls = D.cls; inc.peak = Math.max(inc.peak, D.score || 0);
+      if ((st.voters || 1) > inc.nAgree) { inc.nAgree = st.voters; inc.agree = D.agree; }
+      const f = shortFl(D.flight); if (f && !inc.flights.includes(f)) inc.flights.push(f);
+      if (st.est) Log.point(inc, st.est[0], st.est[1]);
+      askLook(st, live, now); Log.save();
+    }
+    if (s === 'notdrone' && prevS !== 'notdrone') hum = Log.add({ id: Log.newId(), type: 'hum', t0: Date.now(), t1: Date.now(), cls: 'Not a drone' + (D.hum ? ' · ' + humWord(D.humWhy) : ''), dir: D.humAt ? 'phone ' + D.humAt : '', demo, room, track: [], flights: [] });
+    if (hum && D.raw === 'hum') { hum.t1 = Date.now(); Log.save(); } else hum = null;
     prevS = s;
 
     $('app').classList.toggle('ready', s === 'ready'); $('app').classList.toggle('demo', demo);
@@ -394,12 +481,21 @@
     const chip = hot && D.flight ? shortFl(D.flight) + (D.rpm ? ' · ' + kRpm(D.rpm) : '') : '';
     const ring = st.truth && st.err.F != null ? st.err.F : st.estL && st.estF && st.tdoaOk ? Math.hypot(st.estL[0] - st.estF[0], st.estL[1] - st.estF[1]) : 2.5;
     st.ui = { state: s, demo, workings, chip, ring: Math.min(5, Math.max(0.8, ring)), me: sim ? sim.eng.nodes[0].key : ME, lost: s === 'lost' && lostInfo ? { pos: lostInfo.pos, ago: mmss(now - ws.lastSeen) } : null };
+    if (replay && hot) replay = null;
+    if (replay) {
+      const e = replay.e, k = Math.max(1, replay.len / 12), t = Math.min(replay.len, (now - replay.t0) / 1000 * k);
+      st.ui.replay = { track: e.track, t, chip: 'replay ' + clock(e.t0) + ' · ' + mmss(t * 1000) + ' / ' + mmss(replay.len * 1000) };
+      if (!live.length && e.pins && e.pins.length) Object.assign(st, { solo: null, nodes: e.pins.map(p => ({ key: 'r' + p.label, label: p.label, pos: p.pos, age: 0, c: 0, f: 0, st: 'quiet', trendDB: 0 })) });
+      setText('replayT', 'REPLAY · ' + clock(e.t0) + ' · ' + (e.cls || 'Drone') + (e.demo ? ' · DEMO' : ''));
+    }
+    $('replayBar').hidden = !replay;
     if (!st.label && !D.mesh) st.label = D.cls; // solo marker text
+    geoTick(st, live);
     if (!st.nodes.length && !sim && !hub) Object.assign(st, { solo: ME, nodes: [{ key: ME, label: 'A', pos: [0, 0], age: 0, c: 0, f: 0, st: 'quiet', trendDB: 0 }] }); // not listening yet: show this phone
     view.set(st);
     const cal = renderCal(st, live);
-    $('mapTag').innerHTML = demo ? '<span>DEMO · simulated phones</span>' : D.mesh ? `MAP · ${live.length} phones${st.calTrusted ? ' · calibrated' : ''}` : 'MAP · this phone only until others join';
-    $('addPhones').hidden = !!sim || !!hub || !(s === 'ready' || s === 'watching');
+    $('mapTag').innerHTML = replay && !live.length ? 'MAP · replay of a logged track' : demo ? '<span>DEMO · simulated phones</span>' : D.mesh ? `MAP · ${live.length} phones${st.calTrusted ? ' · calibrated' : ''}${!$('geomap').hidden ? ' · street map' : ''}` : 'MAP · this phone only until others join';
+    $('addPhones').hidden = !!sim || !!hub || !!replay || !(s === 'ready' || s === 'watching');
     $('endCard').hidden = !(sim && sim.eng.ended);
     let info = '';
     if (workings && st.truth && st.err.L != null) info = `error vs true drone (10 s avg): loudness <b>${f1(st.err.L)} m</b> · arrival times <b>${f1(st.err.T)} m</b> · both <b>${f1(st.err.F)} m</b>` + (st.headErr.both != null ? ` · heading ±${st.headErr.both}°` : '') + '<br>lines = arrival-time differences · small ring = loudness-only fit · dashed = true drone';
@@ -412,9 +508,12 @@
       : hub && live.length ? ['▶ Listen here too', 'the room is watching'] : ['▶ Listen', 'tap once · sound on too'];
     setText('startT', lt[0]); setText('startS', lt[1]);
     $('pNone').hidden = !!room || !!sim; // no room controls during the demo
+    if (sheet === 'phones') { const g = live.filter(n => n.geo).length;
+      setText('geoMsg', (geoMsg ? geoMsg + ' ' : '') + (sim ? 'The demo has no GPS. ' : g ? `GPS from ${g} phone${g > 1 ? 's' : ''}${geoF && geoF.n > 1 ? ` · frame fit ±${geoF.res} m` : ' · one GPS phone: north is taken as up on the plan'}${tilesFailed() ? ' · map tiles failed, plain map shown' : ''}. ` : geoOn ? 'Waiting for a phone to share GPS. ' : '') + 'Ears can share GPS too (opt-in on each phone). Only latitude/longitude numbers reach this screen. GPS only anchors and turns the plan; pins keep their metre positions.'); }
     $('bar').classList.toggle('dim', hot);
     setText('mMute', muted() ? 'Unmute (' + muteLeft() + ' left)' : 'Mute 5 min');
     if (sheet === 'details') renderDetails(D, st);
+    if (sheet === 'logS') drawTimeline();
     S.watch = s;
     Object.assign(window.__map = window.__map || {}, { mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
   }
@@ -422,7 +521,7 @@
 
   function renderStatus(D, st, live, now) {
     const s = ws.s, hot = s === 'drone' || s === 'tracking', demo = isDemo(), [icon, word0] = STATES[s], mt = muted() ? 'MUTED · flash only · ' + muteLeft() : null;
-    let word = word0, cls = '', where = '', sub = '', pill = null, prog = null, note = '', peekT = 'Details ˄', peekS = 'timeline · why · fingerprint · flight', acts = null;
+    let word = word0, cls = '', where = '', sub = '', pill = null, prog = null, note = '', peekT = 'Details ˄', peekS = 'log · why · fingerprint · flight', acts = null;
     const quiet = now - Math.max(watchStart, ws.lastSeen || 0);
     switch (s) {
       case 'ready': cls = errMsg || (hub ? 'Ready · waiting for phones' : 'Not listening · tap Listen to start'); sub = lastDrone(); break;
@@ -442,10 +541,10 @@
         break;
       case 'lost': {
         const L = lostInfo || {}; cls = 'Last seen ' + mmss(now - ws.lastSeen) + ' ago' + (L.dir ? ' · ' + L.dir : '');
-        sub = (ep ? ep.l : 'Drone') + ' · heard for ' + mmss(ws.lastSeen - ws.first) + (L.heading ? ' · was leaving ' + L.heading : ''); where = '';
+        sub = (inc ? inc.cls : 'Drone') + ' · heard for ' + mmss(ws.lastSeen - ws.first) + (L.heading ? ' · was leaving ' + L.heading : ''); where = '';
         prog = 1 - (now - ws.lastSeen) / WATCH.lostMs; note = 'Watching again in ' + mmss(WATCH.lostMs - (now - ws.lastSeen)); pill = mt;
-        peekS = ep ? `saved: ${clock(ep.t)} · ${ep.l} · ${mmss(ep.dur)}` : peekS;
-        acts = [['dismiss', 'Back to watching', 'clears now'], ['details', 'Details', 'timeline · where it was']]; break;
+        peekS = inc ? `saved to the log: ${clock(inc.t0)} · ${inc.cls} · ${Log.dur(inc)}` : peekS;
+        acts = [['dismiss', 'Back to watching', 'clears now'], ['log', 'Log', 'replay · report']]; break;
       }
     }
     const b = $('status'); b.classList.remove('ready', 'watching', 'checking', 'notdrone', 'drone', 'tracking', 'lost'); b.classList.add(s);
@@ -462,7 +561,7 @@
     const a = e.target.closest('button') && e.target.closest('button').dataset.a, now = performance.now();
     if (a === 'ack') { ws.acknowledge(now); $('status').classList.remove('flash'); }
     else if (a === 'mute') setMute(true); else if (a === 'unmute') setMute(false);
-    else if (a === 'details') openSheet('details'); else if (a === 'dismiss') { ws.dismiss(now); ep = null; } else if (a === 'replay') replayDemo();
+    else if (a === 'details') openSheet('details'); else if (a === 'log') openSheet('logS'); else if (a === 'dismiss') { ws.dismiss(now); inc = null; Log.save(true); } else if (a === 'replay') replayDemo();
     renderKey = '';
   };
   window.__watch = { get s() { return ws.s; }, get holdK() { return ws.holdK; }, ack: () => $('act2').dataset.a === 'ack' && $('act2').click() };
