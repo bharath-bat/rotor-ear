@@ -2,8 +2,8 @@
 import numpy as np, wave, os
 SR = 48000; T = 12; t = np.arange(SR * T) / SR; rng = np.random.default_rng(7)
 os.makedirs(os.path.join(os.path.dirname(__file__), 'wav'), exist_ok=True)
-def save(name, x):
-    m = np.max(np.abs(x)); x = x / m * 0.6 if m > 0.01 else x
+def save(name, x, norm=True):
+    m = np.max(np.abs(x)); x = x / m * 0.6 if norm and m > 0.01 else x
     w = wave.open(os.path.join(os.path.dirname(__file__), 'wav', name + '.wav'), 'wb')
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR); w.writeframes((x * 32767).astype(np.int16).tobytes()); w.close()
 def comb(f_inst, n, tilt, amps=None):
@@ -69,10 +69,20 @@ c, v, d0 = 343.0, 12.0, 6.0
 xs = v * (tf - 9); r = np.hypot(xs, d0); vr = -v * xs / r      # vr > 0 = approaching
 save('fl_flyby', quadf(185 * c / (c - vr), 6 / r, 35, nz=0.03))
 save('fl_maneuver', quadf(185 * (1 + 0.05 * np.sin(2 * np.pi * 0.45 * tf) + 0.03 * np.sin(2 * np.pi * 1.1 * tf)), 1 + 0.3 * np.sin(2 * np.pi * 0.45 * tf), 36))
+# two drones at once (16 s): quads at 182 Hz and 258 Hz (pitches 42% apart) crossing paths: A flies away while B comes in,
+# so which one is louder swaps half-way (8 s); each keeps its own slow RPM wander
+def quadw(f0, amp, seed):
+    r = np.random.default_rng(seed)
+    x = sum(comb(f0 * (1 + d) * (1 + 0.003 * np.sin(2 * np.pi * (0.2 + 0.15 * i) * tf + r.uniform(0, 6))), 25, 0.8) for i, d in enumerate((0, 0.014, -0.011, 0.023)))
+    return x / np.max(np.abs(x)) * amp
+cross = np.clip((tf - 2) / 12, 0, 1)
+x = quadw(np.full_like(tf, 182.0), 1 - 0.75 * cross, 41) + quadw(np.full_like(tf, 258.0), 0.25 + 0.75 * cross, 42)
+save('two', x / np.max(np.abs(x)) + 0.08 * np.random.default_rng(43).standard_normal(len(tf)))
 # negatives carried over from the first Rotor Ear tests
 save('tone', np.sin(2 * np.pi * 1000 * t))
 save('white', noise())
 save('silence', np.zeros_like(t))
+save('hiss', 0.0035 * noise(), norm=False)  # a fairly quiet spot: steady faint hiss (a hearing radius of several metres)
 f0 = 140 + 40 * np.sin(2 * np.pi * 0.7 * t) + 25 * np.sin(2 * np.pi * 2.3 * t)
 env = np.clip(np.sin(2 * np.pi * 3.8 * t + np.sin(2 * np.pi * 0.5 * t)), 0, 1) ** 1.5 * (np.sin(2 * np.pi * 0.25 * t) > -0.6)
 save('speech', comb(f0, 30, 1.2) * env + 0.05 * noise())

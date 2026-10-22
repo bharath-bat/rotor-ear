@@ -40,6 +40,33 @@ One mobile screen, top to bottom:
 
 **Try the demo** (or ••• → Demo) plays a scripted 60 s scene on 4 simulated phones: 5 s of quiet, a fan near phone B that is ignored, a drone that approaches, climbs, hovers and leaves, then "Drone lost" and an end card. A permanent hatched **DEMO** stripe stays on the status block, the word reads **DEMO · DRONE**, the map is tagged and the marker hatched, the beep is a different, lower tone, and timeline rows are tagged DEMO. Simulated phones from `#demo&room=…` (named `sim …`) also count as demo.
 
+**Two drones crossing** (••• → Demo) runs until you exit: two simulated drones on crossing diagonals, the second (higher-pitched) one arriving 10 s in with its own alert.
+
+## Two drones at once
+
+The detector looks for up to two separate harmonic combs. The strongest comb is found first; its harmonics (±4.5 %, covering all rotors of one drone) are masked out and the strongest comb left over becomes the second sound, if its pitch is more than 8 % away, it has its own fundamental and at least 3 of its first 4 harmonics (so the odd partials left over from one hum, e.g. 150 Hz from 50 Hz mains, are not a second sound). Each sound keeps its own id, pitch history, confidence, state, fingerprint class and flight state / RPM.
+
+- **Mesh:** each phone sends its lead sound's numbers plus `s2` (the second sound's confidence, pitch, energy, state, class, flight). The map matches sounds across phones by pitch (±5 %) into up to two tracks, each with its own class vote, confidence, phones agreeing, position, trail and heading. Arrival times are timed on each phone's lead sound only, so the quieter drone is placed by loudness.
+- **Screen:** the first drone is drawn in the usual alert colour, the second in blue (Night `#3DA9FC`, Sun `#0062C4`). With two drones the status block reads **2 DRONES** with one line each (colour dot, class and likelihood, where, phones agreeing). A new drone raises its own alert (flash, beeps, buzz, un-acknowledged); a drone that drops out and comes back at the same pitch (±8 %) within 60 s is the same drone.
+- **Log:** each drone is its own incident; the second has a blue edge in the log and a blue track in the report.
+- Limits: two drones within 8 % of each other in pitch read as one; a much quieter second drone is only heard by the phones near it.
+
+## Coverage map
+
+Each phone measures its background noise in the drone band (the median local floor from 150 Hz to 2 kHz, 20th percentile over 3 s, refreshed every 2 s, only while it hears no harmonic sound unless one has gone on for 30 s) and turns it into a **hearing radius**: r = 10^((ref − noise − 12 dB) / 20), clamped to 2–300 m. The assumption, stated in the Phones sheet: a small quadcopter whose strongest harmonics are about 75 dB SPL at 1 m (−45 dBFS on a typical phone mic, −65 dB per bin in this analyser, where a full-scale sine reads about −20 dB), open ground and no wind (6 dB per doubling of distance), and the harmonics must stay 12 dB above the noise (the detector's 9 dB plus a margin). It is a rough guide, not a measured range.
+
+- The screen draws a soft circle per phone (plain and street map) and shades everything outside all circles; Phones sheet → **Coverage circles** turns them off. Each phone row says "hears ~N m"; an ear shows its own range under its spectrogram.
+- Only two numbers per phone are added to the messages: noise floor (dB) and radius (m).
+
+## Field kit: label sounds
+
+On an ear, during a detection and for 60 s after, a **Label this sound** card offers Quadcopter / Fixed-wing / Micro drone / Not a drone / Other (with a few words; counts as not a drone), optional notes, and an optional "keep 5 s of sound" (recorded from that moment, stored on that phone like a Teach clip). The fingerprint freezes once you pick a label.
+
+- **Save** keeps the six fingerprint numbers + label as a Teach sample on that ear (its detector uses it at once) and sends only the numbers + label to the screen (`{t:'label'}`; never audio, never notes).
+- The screen keeps a **session library** per room (Teach sheet): **Add all to Teach** makes them its own taught samples, **Export** writes the Teach file format.
+- The ear lists its labelled sounds with play / delete, and exports / imports them in the Teach format (its own export keeps its notes).
+- `samples.js` holds the shared sample store used by Teach and Label.
+
 ## Alerts and stay-awake
 
 - **Screen Wake Lock** while listening, re-acquired when the page becomes visible again. Browsers without it (iOS before 16.4) get a note in ••• that the screen may sleep. There is no silent-video trick.
@@ -78,7 +105,7 @@ Those features are matched against hand-set profiles to pick Quadcopter, Fixed-w
 You can record about 5 s of a real sound (or a drone video played aloud) and tag it:
 
 - Quadcopter, Fixed-wing or Micro drone.
-- Not a drone: fan/AC, engine/bike, bird, voice or other.
+- Not a drone: fan/AC, engine/bike, bird, voice, not a drone, or other.
 
 Rules for taught samples:
 
@@ -160,6 +187,7 @@ The code is plain JS:
 - `detector.js`: detector and classifier, shared by every mode.
 - `watch.js`: the screen (watch post) and the scripted demo.
 - `ear.js`: ear mode (with the look prompt, camera clip and the ear's log) and the relay demo phones.
+- `samples.js`: taught / labelled samples (Teach and the ear's Label), their clips and the Teach JSON format.
 - `log.js`: the incident log, JSON export, printable report, and clip storage (IndexedDB).
 - `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
@@ -179,6 +207,9 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/log.py`: an episode is saved with every field, the Log sheet lists it, tap replays, JSON export, the report prints to one A4 page, Clear all asks first.
 - `python3 test/geo.py`: GPS frame math (round trips, rotation recovery, bearings, noisy GPS, one phone), then three ears sharing GPS: pins land on their GPS spots on the street map, and failing tiles or no GPS fall back to the plain map. Tiles are a local stub; `OSM=1` uses real OpenStreetMap tiles.
 - `python3 test/camera.py`: with a fake camera, the nearest ear is asked to look, records a ~10 s clip into IndexedDB, the screen gets only the flag, and the ears' mesh messages stay small (no media).
+- `python3 test/two.py`: two drones on one phone (`two.wav`: two sources with their own ids, pitch, class, flight, alert and incident) and the two-drone demo (two tracks near the two true drones, two colours, two alerts, two incidents). `run.py` fails if any single-sound file shows a second drone.
+- `python3 test/coverage.py`: the radius math (+6 dB halves it, clamps), then three ears over the relay: the noisy one has the smallest circle, ranges listed in the Phones sheet, a phone that gets noisy shrinks its circle within seconds, circles on the street map too.
+- `python3 test/fieldkit.py`: two ears label hexa / box-fan recordings (notes, Other text, a kept clip), the screen's library gets numbers + label only, ear export → import, and the held-out recordings go from wrong to right after the library is added to Teach.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.

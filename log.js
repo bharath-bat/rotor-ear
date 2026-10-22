@@ -1,6 +1,7 @@
 // Rotor Ear · incident log, shared by the screen and the ear. Everything stays on this phone:
 // incidents in localStorage, camera clips in IndexedDB. Nothing here is ever uploaded.
-// Incident: { id, type: 'drone'|'hum', t0, t1, cls, peak (match score), agree ('3 of 4'), flights: [..],
+// Incident: { id, type: 'drone'|'hum', t0, t1, cls, peak (match score), agree ('3 of 4'), flights: [..], slot (0 | 1: the second of
+//   two drones at once, drawn blue), f0 (Hz),
 //   track: [[s since t0, x m, y m], ..], dir, demo, room, pins: [{label, pos}], geo: {lat0, lon0, rot} | null,
 //   clips: [{ phone, id }] (screen: "clip saved" flags from ears) }
 (function () {
@@ -29,7 +30,7 @@
     // one row in a log list (screen and ear)
     row(e, clips) {
       const n = (clips || []).length + (e.clips || []).length;
-      return `<button class="lrow" data-inc="${esc(e.id)}"><b>${clock(e.t0)}</b><span><i>${esc(e.cls || (e.type === 'hum' ? 'Not a drone' : 'Drone'))}</i><small>${day(e.t0)}${e.t1 ? ' · ' + Log.dur(e) : ''}${e.type === 'drone' && e.peak ? ' · ' + word(e.peak) : ''}${e.agree ? ' · ' + esc(e.agree) : ''}${e.flights && e.flights.length ? ' · ' + esc(e.flights.join(', ')) : ''}${n ? ' · 🎥 ' + n : ''}</small></span><span class="tag${e.demo ? ' demo' : ''}">${e.demo ? 'DEMO' : 'real'}</span></button>`;
+      return `<button class="lrow${e.slot ? ' d2' : ''}" data-inc="${esc(e.id)}"><b>${clock(e.t0)}</b><span><i>${esc(e.cls || (e.type === 'hum' ? 'Not a drone' : 'Drone'))}</i><small>${day(e.t0)}${e.t1 ? ' · ' + Log.dur(e) : ''}${e.type === 'drone' && e.peak ? ' · ' + word(e.peak) : ''}${e.agree ? ' · ' + esc(e.agree) : ''}${e.flights && e.flights.length ? ' · ' + esc(e.flights.join(', ')) : ''}${n ? ' · 🎥 ' + n : ''}</small></span><span class="tag${e.demo ? ' demo' : ''}">${e.demo ? 'DEMO' : 'real'}</span></button>`;
     },
     exportJSON() {
       const blob = new Blob([JSON.stringify({ app: 'Rotor Ear', exported: new Date().toISOString(), note: 'positions are metres in the phones\' local frame; geo anchors them when GPS was shared', incidents: list }, null, 1)], { type: 'application/json' });
@@ -41,7 +42,7 @@
       const svg = e => { const T = e.track || []; if (T.length < 2) return '<span class="none">no track</span>';
         const xs = T.map(p => p[1]).concat((e.pins || []).map(p => p.pos[0])), ys = T.map(p => p[2]).concat((e.pins || []).map(p => p.pos[1]));
         const x0 = Math.min(...xs) - 1, y0 = Math.min(...ys) - 1, s = Math.max(Math.max(...xs) - x0, Math.max(...ys) - y0) + 1, P = (x, y) => [((x - x0) / s * 90 + 5).toFixed(1), (95 - (y - y0) / s * 90).toFixed(1)];
-        return `<svg viewBox="0 0 100 100" width="76" height="76"><rect width="100" height="100" fill="#fff" stroke="#bbb"/>${(e.pins || []).map(p => { const [a, b] = P(p.pos[0], p.pos[1]); return `<circle cx="${a}" cy="${b}" r="5" fill="#ddd" stroke="#555"/><text x="${a}" y="${+b + 2.5}" font-size="7" text-anchor="middle">${esc(p.label)}</text>`; }).join('')}<polyline fill="none" stroke="#C93500" stroke-width="2" points="${T.map(p => P(p[1], p[2]).join(',')).join(' ')}"/></svg>`; };
+        return `<svg viewBox="0 0 100 100" width="76" height="76"><rect width="100" height="100" fill="#fff" stroke="#bbb"/>${(e.pins || []).map(p => { const [a, b] = P(p.pos[0], p.pos[1]); return `<circle cx="${a}" cy="${b}" r="5" fill="#ddd" stroke="#555"/><text x="${a}" y="${+b + 2.5}" font-size="7" text-anchor="middle">${esc(p.label)}</text>`; }).join('')}<polyline fill="none" stroke="${e.slot ? '#0062C4' : '#C93500'}" stroke-width="2" points="${T.map(p => P(p[1], p[2]).join(',')).join(' ')}"/></svg>`; };
       const drones = items.filter(e => e.type === 'drone'), g = items.find(e => e.geo);
       return `<!doctype html><html><head><meta charset="utf-8"><title>Rotor Ear report</title><style>
 @page{size:A4;margin:12mm}body{font:11px/1.35 system-ui,sans-serif;color:#111;margin:0;padding:12px}h1{font-size:20px;margin:0}

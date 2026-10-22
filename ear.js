@@ -42,7 +42,9 @@
       if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); }
       if (d.t === 'look') look.show(d);
     });
-    const look = Look(link, key, room);
+    const look = Look(link, key, room), lab = Label(link, key, () => ({ ctx, bus, on: !!(mic || sim) }));
+    const useSamples = () => { if (det) { det.learned = Smp.list; det.useLearned = Smp.use; det.forget(); } }; // labels tune this phone like Teach
+    Smp.onChange(useSamples);
     // GPS (opt-in): latitude/longitude numbers only, so the screen can lay a street map under the plan
     let geo = null, geoW = null;
     $('nGeo').onchange = () => {
@@ -57,7 +59,7 @@
     function ensure() {
       if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
       ctx = new (window.AudioContext || window.webkitAudioContext)();
-      an = RotorEar.makeAnalyser(ctx); det = new RotorEar.RotorDetector(an);
+      an = RotorEar.makeAnalyser(ctx); det = new RotorEar.RotorDetector(an); useSamples();
       bus = ctx.createGain(); bus.connect(an);
       R.TimingTap(ctx, bus).then(t => tap = t).catch(() => {}); // arrival times are optional
       simSpk = ctx.createGain(); simSpk.gain.value = 0; simSpk.connect(ctx.destination);
@@ -73,7 +75,8 @@
       $('nE').textContent = o.f0 ? Math.round(o.e) : '—';
       const sub = o.state === 'drone' ? 'rotor hum ~' + Math.round(o.f0) + ' Hz · the map shows where' : o.state === 'hum' ? (o.cls ? o.cls.why + ' · ignored' : 'ignored') : o.state === 'some' ? 'this phone hears a harmonic hum' : (sim ? 'simulating · numbers go to the map' : mic ? 'listening · numbers go to the map' : 'tap Start listening');
       setBanner($('nBanner'), mic || sim ? o.state : 'off', sub, o.state === 'drone' ? clsText(o) : '');
-      spec(det.db, det.binHz, o.f0, o.state);
+      spec(det.db, det.binHz, o.f0, o.state); lab.hear(o, mic || sim);
+      $('nRange').textContent = (mic || sim) && o.hr ? `Coverage: would hear a small drone out to ~${o.hr} m here (background ${Math.round(o.nf)} dB). Rough: open ground, no wind.` : '';
     }
     $('nStart').onclick = async () => {
       ensure(); keepAwake();
@@ -99,10 +102,68 @@
         sim = { d, nz }; simSpk.gain.value = $('nSimSpk').checked ? 1 : 0; updDist();
       } else if (sim) { sim.d.stop(); sim.nz.stop(); simGain.disconnect(); sim = null; }
     };
-    window.__node = { get out() { return det && det.out; }, key, look, get geo() { return geo; } };
+    window.__node = { get out() { return det && det.out; }, key, look, lab, get geo() { return geo; } };
     return { room, stop() { if (mic) $('nStart').onclick(); if (sim) { $('nSim').checked = false; $('nSim').onchange(); } } };
   }
 
+
+  // ---------------- field kit: label what this phone just heard ----------------
+  // During a detection, and for 60 s after, the ear offers "Label this sound": pick what it was (or Other + words), add
+  // notes, optionally keep 5 s of sound (recorded from now, stored on this phone like a Teach clip). Saving keeps the
+  // fingerprint numbers + label as a Teach sample here and sends only those numbers + the label to the screen.
+  const Smp = window.RotorSamples, esc = t => String(t == null ? '' : t).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
+  const KEEP_MS = 60000;
+  function Label(link, key, audio) {
+    let last = null, pick = null, tag = '', busy = false;
+    const msg = (t, cls) => { $('lbMsg').textContent = t; $('lbMsg').className = 'msg ' + (cls || ''); };
+    const ago = t => { const s = Math.round((performance.now() - t) / 1000); return s < 2 ? 'now' : s + ' s ago'; };
+    function draw() {
+      const fp = pick || last, show = !!fp && (busy || !!pick || performance.now() - fp.t < KEEP_MS);
+      $('label').hidden = !show; if (!show) return;
+      $('lbWhen').textContent = `heard ${ago(fp.t)} · ~${Math.round(fp.f0)} Hz · app says ${fp.guess}`;
+      $('lbChips').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.t === tag));
+      $('lbText').hidden = tag !== 'other'; $('lbSave').disabled = busy || !tag || (tag === 'other' && !$('lbText').value.trim());
+    }
+    setInterval(draw, 250);
+    $('lbChips').onclick = e => { const b = e.target.closest('[data-t]'); if (!b || busy) return; tag = b.dataset.t; if (!pick) pick = last; msg(''); draw(); }; // the fingerprint freezes once you start
+    $('lbText').oninput = draw;
+    $('lbSave').onclick = async () => {
+      const fp = pick || last; if (!fp || !tag || busy) return;
+      busy = true; draw(); let blob = null;
+      const a = audio();
+      if ($('lbKeep').checked && a.on && window.MediaRecorder) { // the next 5 s of sound, kept on this phone only
+        const dest = a.ctx.createMediaStreamDestination(); a.bus.connect(dest); const rec = new MediaRecorder(dest.stream), chunks = [];
+        rec.ondataavailable = ev => chunks.push(ev.data); rec.start(); msg('Keeping 5 s of sound on this phone…');
+        await new Promise(res => setTimeout(res, 5000)); await new Promise(res => { rec.addEventListener('stop', res, { once: true }); rec.stop(); });
+        a.bus.disconnect(dest); if (chunks.length) blob = new Blob(chunks, { type: rec.mimeType });
+      }
+      const smp = Object.assign({ id: Smp.newId(), tag, x: fp.x, f0: +fp.f0.toFixed(1), t: Date.now(), from: 'label' }, tag === 'other' ? { text: $('lbText').value.trim().slice(0, 60) } : null, $('lbNote').value.trim() ? { note: $('lbNote').value.trim().slice(0, 200) } : null);
+      await Smp.add(smp, blob);
+      const out = { t: 'label', k: key, smp: Smp.share(smp) }; // numbers + label only
+      [0, 1000, 2500].forEach(ms => setTimeout(() => link.send(out), ms));
+      msg(`Saved: ${Smp.name(smp)} @ ${Math.round(smp.f0)} Hz${blob ? ' · clip kept here' : ''}. Sent the numbers + label to the screen.`, 'ok');
+      busy = false; pick = null; tag = ''; last = null; $('lbText').value = $('lbNote').value = ''; $('lbKeep').checked = false; drawList(); setTimeout(() => { if (!last) $('label').hidden = true; }, 4000);
+    };
+    // this phone's labelled set (all its samples, Teach format)
+    function drawList() {
+      const L = Smp.list; $('lbN').textContent = L.length ? '· ' + L.length : '';
+      $('lbList').innerHTML = L.slice().reverse().map(x => `<div><span>${esc(Smp.name(x))} <small>· ${Math.round(x.f0)} Hz · ${new Date(x.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${x.note ? ' · ' + esc(x.note) : ''}</small></span>
+        ${x.clip ? `<button data-play="${x.id}" aria-label="play">▶</button>` : '<span></span>'}<button data-del="${x.id}" aria-label="delete">✕</button></div>`).join('') || '<p class="note">Nothing labelled yet.</p>';
+    }
+    $('lbList').onclick = async e => { const b = e.target.closest('button'); if (!b) return;
+      if (b.dataset.del) return Smp.remove(b.dataset.del);
+      try { const blob = await Smp.clip(b.dataset.play); if (blob) new Audio(URL.createObjectURL(blob)).play(); } catch (er) {} };
+    $('lbExport').onclick = () => Smp.download(null, 'rotor-ear-labels', true); // your own file: keeps your notes
+    $('lbImport').onclick = () => $('lbImportFile').click();
+    $('lbImportFile').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+      const m = t => $('lbLMsg').textContent = t;
+      try { m('Imported ' + Smp.merge(Smp.parse(await f.text())) + ' new samples.'); } catch (er) { m('Import failed: ' + er.message); } };
+    Smp.onChange(drawList); drawList();
+    return {
+      hear(o, on) { if (on && o.cls && o.state !== 'quiet' && !busy) last = { x: o.cls.x.slice(), f0: o.cls.raw.f0, guess: o.state === 'hum' ? 'not a drone' : o.cls.label, t: performance.now() }; },
+      get state() { return { shown: !$('label').hidden, last: last && { f0: last.f0, guess: last.guess }, pick: !!pick, tag, busy }; },
+    };
+  }
 
   // ---------------- camera confirm ----------------
   // The screen sends {t:'look', id, cls, b: bearing° from north (only with GPS), w: words} to the ear nearest the
@@ -205,8 +266,9 @@
         setInterval(() => eng.step(performance.now()), 50);
         setInterval(() => {
           const msgs = eng.messages(); eng.nodes.forEach((n, i) => n.link.send(msgs[i]));
-          const d = S.drone = eng.drone; if (d) eng.nodes[0].link.send({ t: 'truth', x: +d.x.toFixed(2), y: +d.y.toFixed(2), vx: +d.vx.toFixed(2), vy: +d.vy.toFixed(2) });
-          $('sStatus').textContent = d ? 'virtual drone at (' + d.x.toFixed(1) + ', ' + d.y.toFixed(1) + ') m' : '';
+          const tr = eng.truth(); S.drone = eng.drone; S.drone2 = eng.drone2; if (tr) eng.nodes[0].link.send(tr);
+          const at = d => '(' + d.x.toFixed(1) + ', ' + d.y.toFixed(1) + ') m';
+          $('sStatus').textContent = tr ? 'virtual drone at ' + at(tr) + (tr.d2 ? ' · second drone at ' + at(tr.d2) : '') : '';
           $('sNodes').innerHTML = eng.nodes.map(n => { const o = n.det.out; return `<div class="nrow"><div class="pin">${'ABCD'[n.i]}</div><div class="nm">sim ${'ABCD'[n.i]} · ${n.r.toFixed(1)} m · clock ${n.off >= 0 ? '+' : ''}${Math.round(n.off)} ms · mic ${n.bias >= 0 ? '+' : ''}${n.bias.toFixed(1)} ms ${n.gainDb >= 0 ? '+' : ''}${n.gainDb.toFixed(1)} dB<small>${n.status}${o.cls ? ' · ' + o.cls.label + ' · ' + RotorEar.likelihood(o.cls.conf) : ''}</small><div class="meter"><i style="width:${o.conf}%"></i></div></div><div class="num">${o.f0 ? Math.round(o.f0) : '—'} Hz</div><div class="num">${o.e > -100 ? Math.round(o.e) : '—'} dB</div></div>`; }).join('');
         }, 1000 / R.SEND_HZ);
       };

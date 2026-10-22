@@ -1,8 +1,8 @@
 /* Rotor Ear watch post. One accent (orange-red) used only for a confirmed drone. Night (default) and Sun themes. */
 :root{--surface:#0B0D12;--panel:#161A22;--panel2:#1d222c;--ink:#F4F6FA;--ink-2:#B9C0CE;--line:#2A303C;--map:#0f1218;--pin:#3a414f;--pin-ink:#F4F6FA;
-  --alert:#FF5A1F;--alert-fill:#C93500;--alert-ink:#FFFFFF;--check:#E8B500;--demo:#A78BFA;--btn:#F4F6FA;--btn-ink:#0B0D12}
+  --alert:#FF5A1F;--alert-fill:#C93500;--drone2:#3DA9FC;--shade:rgba(0,0,0,.42);--alert-ink:#FFFFFF;--check:#E8B500;--demo:#A78BFA;--btn:#F4F6FA;--btn-ink:#0B0D12}
 html.sun{--surface:#FFFFFF;--panel:#F1F2F4;--panel2:#E6E8EC;--ink:#0E1116;--ink-2:#3A404B;--line:#C9CDD4;--map:#FAFAFB;--pin:#D5D8DE;--pin-ink:#0E1116;
-  --alert:#D63A00;--alert-fill:#C93500;--check:#8A6A00;--demo:#5B3FD1;--btn:#1A1D23;--btn-ink:#FFFFFF}
+  --alert:#D63A00;--alert-fill:#C93500;--drone2:#0062C4;--shade:rgba(20,24,32,.2);--check:#8A6A00;--demo:#5B3FD1;--btn:#1A1D23;--btn-ink:#FFFFFF}
 [hidden]{display:none!important}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--surface);color:var(--ink);font:15px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-variant-numeric:tabular-nums;overscroll-behavior:none}
@@ -20,6 +20,10 @@ button{font:inherit;color:inherit}
 #stWhere{font-size:15px;margin-top:2px}#stWhere:empty,#stSub:empty{display:none}
 #stWhere.link{text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 #stSub{font-size:13px;color:var(--ink-2);margin-top:3px}
+#stDrones:empty{display:none}#stDrones{margin-top:6px;display:grid;gap:4px}
+.drow{display:grid;grid-template-columns:18px 1fr;column-gap:6px;align-items:center}.drow b{font-size:16px;font-weight:800}.drow small{grid-column:2;font-size:13px;opacity:.92}
+.dot{width:14px;height:14px;border-radius:50%;display:inline-block;border:2px solid #fff}.dot.d1{background:var(--alert)}.dot.d2{background:var(--drone2)}
+.lrow.d2{border-left:5px solid var(--drone2)}
 .srow2{display:flex;align-items:center;gap:10px;margin-top:8px}.srow2:has(#pill[hidden]):has(#stProg[hidden]){display:none}
 #pill{min-height:36px;padding:6px 14px;border-radius:999px;border:1.5px solid var(--ink);background:transparent;font-size:13px;font-weight:700}
 #pill.muted{border-style:dashed}
@@ -32,6 +36,7 @@ button{font:inherit;color:inherit}
 #status.drone,#status.tracking{background:var(--alert-fill);border-color:var(--alert-fill);color:var(--alert-ink)}
 #status.drone #stWord,#status.tracking #stWord{font-size:44px}
 #app.demo #status.drone #stWord,#app.demo #status.tracking #stWord{font-size:36px;white-space:nowrap}
+#status #stWord.long{font-size:30px!important}
 #status.drone #more,#status.tracking #more,#status.lost #more{display:none}
 #status.checking #stWord{font-size:30px}#status.notdrone #stWord,#status.lost #stWord{font-size:36px}
 #status.drone #stCls,#status.tracking #stCls{font-size:17px;font-weight:700}
@@ -52,7 +57,7 @@ button{font:inherit;color:inherit}
 /* compact strip while a sheet is open */
 #app.sheet-open #status{padding:8px 12px}#app.sheet-open #status .srow{min-height:36px}
 #app.sheet-open #stWord{font-size:26px!important}#app.sheet-open #stIcon{font-size:24px}
-#app.sheet-open #stWhere,#app.sheet-open #stSub,#app.sheet-open .srow2{display:none}#app.sheet-open #stCls{font-size:14px!important;margin-top:2px}
+#app.sheet-open #stWhere,#app.sheet-open #stSub,#app.sheet-open #stDrones,#app.sheet-open .srow2{display:none}#app.sheet-open #stCls{font-size:14px!important;margin-top:2px}
 #app.sheet-open #demoStripe{margin:-8px -12px 6px}
 
 /* ---------- map hero ---------- */
@@ -112,6 +117,10 @@ button{font:inherit;color:inherit}
 .btn{flex:1;min-height:48px;padding:8px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:15px;font-weight:600;text-align:center}
 .btn.on{border:2px solid var(--ink)}.btn.big{width:100%;min-height:56px;font-size:17px;margin:8px 0;background:var(--btn);color:var(--btn-ink);border:0}.btn.wide{display:block;width:100%;margin-top:8px}
 .list{margin-top:8px}
+.lbhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.lbhead b{font-size:17px}.lbhead small{color:var(--ink-2);font-size:13px;text-align:right}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.chips button{min-height:44px;padding:0 14px;border-radius:22px;border:1px solid var(--line);background:var(--panel);font-weight:700;font-size:15px}
+.chips button.on{border:2px solid var(--ink);background:var(--surface)}
+#label input:not([type]){width:100%;min-height:44px;margin:4px 0;padding:0 10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px}
 .list div{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;font-size:14px;min-height:48px;border-bottom:1px solid var(--line)}
 .list small{color:var(--ink-2)}
 .list button{min-width:44px;min-height:44px;background:none;border:1px solid var(--line);border-radius:10px;font-size:15px}

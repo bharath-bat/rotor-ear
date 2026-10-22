@@ -22,7 +22,7 @@
     document.documentElement.classList.toggle('sun', theme === 'sun');
     document.querySelectorAll('[data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === theme));
     const cs = getComputedStyle(document.documentElement), v = k => cs.getPropertyValue(k).trim();
-    cols = { map: v('--map'), ink: v('--ink'), ink2: v('--ink-2'), line: v('--line'), pin: v('--pin'), pinInk: v('--pin-ink'), alert: v('--alert'), check: v('--check'), demo: v('--demo'), panel: v('--panel') };
+    cols = { map: v('--map'), ink: v('--ink'), ink2: v('--ink-2'), line: v('--line'), pin: v('--pin'), pinInk: v('--pin-ink'), alert: v('--alert'), alert2: v('--drone2'), shade: v('--shade'), check: v('--check'), demo: v('--demo'), panel: v('--panel') };
     document.querySelector('meta[name=theme-color]').content = v('--surface');
   }
   document.querySelectorAll('[data-theme]').forEach(b => b.onclick = () => { theme = b.dataset.theme; localStorage.setItem('rotorear-theme', theme); applyTheme(); });
@@ -32,7 +32,7 @@
   function ensureCtx() {
     if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = makeAnalyser(ctx); det = new RotorDetector(analyser); det.flight.blades = blades; Teach.apply();
+    analyser = makeAnalyser(ctx); det = new RotorDetector(analyser); det.blades = blades; Teach.apply();
     bus = ctx.createGain(); bus.connect(analyser); // everything the detector hears; also what Teach records
     spk = ctx.createGain(); spk.connect(ctx.destination);
     ana = ctx.createGain(); ana.connect(bus);
@@ -79,6 +79,10 @@
     o.start(t0); o.stop(t0 + t + 0.1); o.onended = () => g.disconnect();
     if (!into) gateUntil = Math.max(gateUntil, performance.now() + t * 1000 + 300);
     A.beeps++; A.tones.push(kind);
+  }
+  function raiseAlert(now, demo) { // the alert moment: 3 flashes + 3 beeps (demo: demo tone) + buzz; sheets close
+    A.count++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
+    if (!muted()) { tone(demo ? 'demo' : 'alert', 3); if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 250]); }
   }
   function flash() { const b = $('status'); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); flashT = performance.now(); setTimeout(() => b.classList.remove('flash'), 1550); }
   const A = window.__alert = { count: 0, beeps: 0, tones: [], beepIntoDetector: k => tone(k || 'alert', 1, bus), get gated() { return performance.now() < gateUntil; },
@@ -141,49 +145,35 @@
   $('itWas').onclick = () => { openSheet('teach'); $('tTag').value = 'quad'; $('tMsg').textContent = 'Tagged as Quadcopter. Record while the sound is still playing.'; };
   // ---------- Teach: record tagged clips, keep only their fingerprints on this device ----------
   const Teach = (() => {
-    const KEY = 'rotorear-samples-v1', USE = 'rotorear-use-samples';
-    let samples = []; try { samples = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) {}
-    const valid = smp => smp && TAGS.some(t => t.id === smp.tag) && Array.isArray(smp.x) && smp.x.length === FEATS.length && smp.x.every(Number.isFinite);
-    samples = samples.filter(valid);
-    $('tUse').checked = localStorage.getItem(USE) !== '0';
-    $('tTag').innerHTML = TAGS.map(t => `<option value="${t.id}">${t.group === 'Not a drone' ? 'Not a drone: ' : ''}${t.label}</option>`).join('');
+    const Smp = window.RotorSamples;
+    $('tUse').checked = Smp.use;
+    $('tTag').innerHTML = TAGS.map(t => `<option value="${t.id}">${t.group === 'Not a drone' && t.label !== t.group ? 'Not a drone: ' : ''}${t.label}</option>`).join('');
     const msg = (t, cls) => { $('tMsg').textContent = t; $('tMsg').className = 'msg ' + (cls || ''); };
-    const save = () => { localStorage.setItem(KEY, JSON.stringify(samples)); apply(); draw(); };
-    function setDet(d) { d.learned = samples; d.useLearned = $('tUse').checked; d.probs = d.lprobs = null; }
+    function setDet(d) { d.learned = Smp.list; d.useLearned = Smp.use; d.forget(); }
     function apply() { if (det) setDet(det); if (sim) sim.eng.nodes.forEach(n => setDet(n.det)); }
-    const db = () => new Promise((res, rej) => { const r = indexedDB.open('rotorear', 1); r.onupgradeneeded = () => r.result.createObjectStore('clips'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-    const clipOp = async (mode, fn) => { const d = await db(); return new Promise((res, rej) => { const q = fn(d.transaction('clips', mode).objectStore('clips')); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); };
     function draw() {
+      const samples = Smp.list;
       $('tCounts').innerHTML = TAGS.map(t => { const n = samples.filter(x => x.tag === t.id).length; return `<div class="${n ? 'has' : ''}"><b>${n}</b>${t.label}</div>`; }).join('');
-      $('tList').innerHTML = samples.slice().reverse().map(x => `<div><span>${TAGS.find(t => t.id === x.tag).label} <small>· ${Math.round(x.f0)} Hz · ${new Date(x.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>
+      $('tList').innerHTML = samples.slice().reverse().map(x => `<div><span>${esc(Smp.name(x))} <small>· ${Math.round(x.f0)} Hz · ${new Date(x.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${x.from === 'label' ? ' · labelled' : ''}</small></span>
         ${x.clip ? `<button data-play="${x.id}" aria-label="play">▶</button>` : '<span></span>'}<button data-del="${x.id}" aria-label="delete">✕</button></div>`).join('');
       setText('teachN', samples.length + (samples.length === 1 ? ' sample' : ' samples'));
     }
+    Smp.onChange(() => { apply(); draw(); });
     $('tList').onclick = async e => {
       const id = e.target.dataset.play || e.target.dataset.del; if (!id) return;
-      if (e.target.dataset.del) { samples = samples.filter(x => x.id !== id); try { await clipOp('readwrite', st => st.delete(id)); } catch (er) {} save(); return; }
-      try { const blob = await clipOp('readonly', st => st.get(id)); if (blob) new Audio(URL.createObjectURL(blob)).play(); } catch (er) { msg('Could not play that clip.', 'bad'); }
+      if (e.target.dataset.del) return Smp.remove(id);
+      try { const blob = await Smp.clip(id); if (blob) new Audio(URL.createObjectURL(blob)).play(); } catch (er) { msg('Could not play that clip.', 'bad'); }
     };
-    $('tUse').onchange = () => { localStorage.setItem(USE, $('tUse').checked ? '1' : '0'); apply(); };
+    $('tUse').onchange = () => { Smp.use = $('tUse').checked; };
     $('tReset').onclick = async () => {
-      if (!samples.length || !confirm('Delete all ' + samples.length + ' taught samples on this device?')) return;
-      samples = []; try { await clipOp('readwrite', st => st.clear()); } catch (e) {} save(); msg('All samples deleted.');
+      if (!Smp.list.length || !confirm('Delete all ' + Smp.list.length + ' taught samples on this device?')) return;
+      await Smp.clear(); msg('All samples deleted.');
     };
-    $('tExport').onclick = () => {
-      const data = { app: 'rotor-ear', kind: 'samples', v: 1, feats: FEATS, samples: samples.map(({ id, tag, x, f0, t }) => ({ id, tag, x, f0, t })) };
-      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
-      a.download = 'rotor-ear-samples-' + new Date().toISOString().slice(0, 10) + '.json'; a.click();
-      msg('Exported ' + samples.length + ' samples (fingerprints only, no audio).', 'ok');
-    };
+    $('tExport').onclick = () => { Smp.download(); msg('Exported ' + Smp.list.length + ' samples (fingerprints only, no audio).', 'ok'); };
     $('tImport').onclick = () => $('tImportFile').click();
     $('tImportFile').onchange = async e => {
       const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-      try {
-        const d = JSON.parse(await f.text());
-        if (d.app !== 'rotor-ear' || String(d.feats) !== String(FEATS)) throw new Error('not a Rotor Ear samples file');
-        const have = new Set(samples.map(x => x.id)), add = (d.samples || []).filter(x => valid(x) && !have.has(x.id)).map(({ id, tag, x, f0, t }) => ({ id, tag, x, f0, t }));
-        samples = samples.concat(add); save(); msg('Imported ' + add.length + ' new samples.', 'ok');
-      } catch (er) { msg('Import failed: ' + er.message, 'bad'); }
+      try { msg('Imported ' + Smp.merge(Smp.parse(await f.text())) + ' new samples.', 'ok'); } catch (er) { msg('Import failed: ' + er.message, 'bad'); }
     };
     $('tRec').onclick = async () => {
       if (!listening()) await toggleMic();
@@ -196,14 +186,12 @@
       const fp = det.stopCapture(); $('tRec').disabled = false; $('tProg').style.width = '0';
       if (rec) await new Promise(res => { rec.addEventListener('stop', res, { once: true }); rec.stop(); });
       if (!fp) return msg('No steady harmonic hum in that clip, so there is nothing to learn (Rotor Ear already ignores it). Try again closer to the sound.', 'bad');
-      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      const smp = { id, tag, x: fp.x, f0: +fp.raw.f0.toFixed(1), t: Date.now() };
-      if (rec && chunks.length) { try { await clipOp('readwrite', st => st.put(new Blob(chunks, { type: rec.mimeType }), id)); smp.clip = true; } catch (e) {} }
-      samples.push(smp); save();
-      msg('Saved: ' + TAGS.find(t => t.id === tag).label + ' @ ' + Math.round(fp.raw.f0) + ' Hz. ' + samples.filter(x => x.tag === tag).length + ' sample(s) of this kind.', 'ok');
+      const smp = { id: Smp.newId(), tag, x: fp.x, f0: +fp.raw.f0.toFixed(1), t: Date.now(), from: 'teach' };
+      await Smp.add(smp, rec && chunks.length ? new Blob(chunks, { type: rec.mimeType }) : null);
+      msg('Saved: ' + TAGS.find(t => t.id === tag).label + ' @ ' + Math.round(fp.raw.f0) + ' Hz. ' + Smp.list.filter(x => x.tag === tag).length + ' sample(s) of this kind.', 'ok');
     };
     draw();
-    return { apply, setDet, get samples() { return samples; }, count: group => samples.filter(x => TAGS.find(t => t.id === x.tag).group === group).length };
+    return { apply, setDet, get samples() { return Smp.list; }, count: Smp.count };
   })();
   window.__teach = Teach;
 
@@ -216,6 +204,11 @@
   const view = R.MapView($('map'), { colors: () => cols, project: dpr => project(dpr), onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
     if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } } });
   $('workings').onchange = () => workings = $('workings').checked;
+  // coverage circles: each phone's estimated hearing radius (from its own background noise), gaps shaded
+  let cover = localStorage.getItem('rotorear-cover') !== '0';
+  $('covOn').checked = cover; $('covOn').onchange = () => { cover = $('covOn').checked; localStorage.setItem('rotorear-cover', cover ? '1' : '0'); };
+  $('covNote').textContent = 'Shaded = no phone would hear a drone there. ' + RotorEar.COVER.text + ' Updates every few seconds.';
+  const rangeOf = n => n.hr ? (n.hr >= RotorEar.COVER.maxM ? '300+ m' : n.hr <= RotorEar.COVER.minM ? 'under 2 m (noisy)' : '~' + n.hr + ' m') : 'measuring…';
   function sendLocal() { // this phone is a node of its own map (in-page, no network): numbers only
     if (!det || !listening()) return;
     const now = performance.now();
@@ -226,6 +219,29 @@
     model.ingest(m, now);
   }
 
+  // Session library: what the room's ears labelled (fingerprint numbers + label only), kept per room on this screen.
+  // "Add all to Teach" makes them this screen's own taught samples; Export writes the Teach file format.
+  const Lib = (() => {
+    const Smp = window.RotorSamples, k = () => 'rotorear-lib-' + (room || 'solo'); let L = [];
+    function draw() {
+      setText('libN', L.length ? '· ' + L.length : '');
+      $('libList').innerHTML = L.slice().reverse().map(x => `<div><span>${esc(Smp.name(x))} <small>· ${Math.round(x.f0)} Hz · phone ${esc(x.by)} · ${clock(x.t)}${Smp.list.some(y => y.id === x.id) ? ' · in Teach' : ''}</small></span><span></span><span></span></div>`).join('')
+        || '<p class="note">Nothing yet. On an ear, tap a label during or right after a detection.</p>';
+    }
+    Smp.onChange(draw);
+    return {
+      load() { try { L = JSON.parse(localStorage.getItem(k()) || '[]').filter(Smp.valid); } catch (e) { L = []; } draw(); },
+      add(d) { // { t: 'label', k: ear key, smp }: keep only the numbers + label, once per id
+        if (!Smp.valid(d.smp) || L.some(x => x.id === d.smp.id)) return; const n = model.nodes.get(d.k);
+        L.push(Object.assign(Smp.share(d.smp), { by: n ? n.label : '?' })); localStorage.setItem(k(), JSON.stringify(L)); draw();
+      },
+      get list() { return L; },
+      toTeach() { return Smp.merge(L); },
+    };
+  })();
+  $('libAdd').onclick = () => { const n = Lib.toTeach(); setText('tMsg', n ? `Added ${n} labelled sample${n > 1 ? 's' : ''} to Teach.` : 'Nothing new to add.'); };
+  $('libExport').onclick = () => window.RotorSamples.download(Lib.list, 'rotor-ear-library-' + (room || 'solo'));
+  Lib.load(); window.__lib = Lib;
   // Phones: this screen hosts the room's map; other phones open the join link ?room=… (ear mode)
   const nodeUrl = r => location.href.split(/[?#]/)[0] + '?room=' + r;
   let hubStatus = '';
@@ -234,7 +250,8 @@
     room = r; history.replaceState(null, '', location.pathname + '#screen&room=' + r); window.RotorApp.key = 'screen|' + r;
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
-    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
+    Lib.load();
+    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); if (d && d.t === 'label') return Lib.add(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
   }
   $('pCreate').onclick = () => joinRoom(R.randKey(4));
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
@@ -249,9 +266,9 @@
     ensureCtx(); openSheet(null);
     const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1) });
     const m = new R.MeshModel({}), links = eng.nodes.map(n => new R.LoopLink(m, n));
-    eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.flight.blades = blades; });
+    eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.blades = blades; });
     sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null;
-    sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = eng.drone && Object.assign({ t: 'truth' }, eng.drone); m.truthAt = now; }, 50);
+    sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = eng.truth(); m.truthAt = now; }, 50);
     sim.iv2 = setInterval(() => { const msgs = eng.messages(); links.forEach((l, i) => l.send(msgs[i])); }, 1000 / R.SEND_HZ);
     sim.iv3 = setInterval(() => { const ts = performance.now(); links.forEach(l => l.ping(ts)); }, 1000);
     keepAwake();
@@ -260,6 +277,7 @@
   const replayDemo = () => { if (sim) { sim.eng.replay(); ws.reset(); } };
   const App = window.RotorApp;
   $('tryDemo').onclick = $('mDemo').onclick = () => App.go(sim ? 'screen' : 'demo');
+  $('mDemo2').onclick = () => { if (sim) App.go('screen'); App.go('demo&path=two'); }; // runs until Exit demo
   $('endReplay').onclick = replayDemo;
   let pendingSheet = null;
   $('endPhones').onclick = () => { pendingSheet = 'phones'; App.go('screen'); };
@@ -306,7 +324,7 @@
     setText('cState', ncal ? `· ${ncal}/${live.length} calibrated` : '');
     setText('pStatus', sim ? 'DEMO · ' + live.length + ' simulated phones' : hub ? 'Room ' + room.toUpperCase() + ' · ' + live.length + ' connected' + (hubStatus && !live.length ? ' · ' + hubStatus : '') : 'this phone only');
     const rows = [...live].sort((a, b) => a.label < b.label ? -1 : 1).map(n => { const k = cal[n.key], [w, f] = resWord(k), sync = n.key === ME ? 'this phone' : n.rtt != null ? 'sync ±' + Math.round(n.rtt / 2) + ' ms' : 'syncing…';
-      return `<div class="prow"><span class="pin">${n.label}</span><span class="nm"><b>${n.key === ME ? 'This phone' : esc(n.name || 'Phone ' + n.label)}</b><small>${sync}${k ? ` · latency ${k.lat >= 0 ? '+' : ''}${k.lat.toFixed(1)} ms · gain ${k.gain >= 0 ? '+' : ''}${k.gain.toFixed(1)} dB` : ''}</small>` +
+      return `<div class="prow"><span class="pin">${n.label}</span><span class="nm"><b>${n.key === ME ? 'This phone' : esc(n.name || 'Phone ' + n.label)}</b><small>hears ${rangeOf(n)} · ${sync}${k ? ` · latency ${k.lat >= 0 ? '+' : ''}${k.lat.toFixed(1)} ms · gain ${k.gain >= 0 ? '+' : ''}${k.gain.toFixed(1)} dB` : ''}</small>` +
         `<span class="rbar"><i><u style="width:${Math.round(Math.min(1, f) * 100)}%"></u></i>${w}</span></span>${k && k.resMs >= 6 ? '<button data-redo>Redo</button>' : '<span></span>'}</div>`; }).join('');
     if (rows !== calKeyStr) { calKeyStr = rows; $('cTable').innerHTML = rows; }
     return { ncal };
@@ -316,6 +334,21 @@
   const humWord = w => ({ 'steady hum (fan / AC / mains)': 'Fan / AC hum', 'mains hum (50/60 Hz)': 'Mains hum', 'engine (low, irregular)': 'Engine noise' })[w] || (w ? w[0].toUpperCase() + w.slice(1).replace(/ \(your samples\)/, '') : 'Steady hum');
   const shortFl = f => (f || '').replace('Heavy / loaded', 'Loaded').replace(' (Doppler)', '');
   const kRpm = r => r >= 1000 ? (r / 1000).toFixed(1) + 'k rpm' : Math.round(r) + ' rpm';
+  function whereOf(est, live) { // { dir: 'NE of phone B', where: 'NE of phone B · ~4 m' } from the nearest phone
+    const p = live.reduce((a, n) => Math.hypot(n.pos[0] - est[0], n.pos[1] - est[1]) < Math.hypot(a.pos[0] - est[0], a.pos[1] - est[1]) ? n : a, live[0]);
+    const dx = est[0] - p.pos[0], dy = est[1] - p.pos[1], r = Math.hypot(dx, dy), dir = r < 1.5 ? 'at phone ' + p.label : compass(dx, dy) + ' of phone ' + p.label;
+    return { dir, where: dir + (r >= 1.5 ? ' · ~' + Math.round(r) + ' m' : '') };
+  }
+  // every drone heard right now (two at once): mesh = the confirmed tracks; one phone = its detector's drone sources
+  const soloSlot = {};
+  function dronesOf(st, live, D) {
+    if (D.mesh) return st.tracks.filter(t => t.hot).map(t => Object.assign({ key: 't' + t.id, slot: t.slot, f0: t.f0, cls: t.label || 'Drone', score: t.score, nAgree: t.voters, agree: `${t.voters} of ${live.length} phones agree`,
+      flight: t.flight, rpm: t.f0 * 60 / blades, est: t.est, lead: t.id === st.lead }, t.est ? whereOf(t.est, live) : { dir: '', where: '' }));
+    const os = det && listening() ? det.outs.filter(o => o.state === 'drone') : [];
+    Object.keys(soloSlot).forEach(k => { if (!os.some(o => 's' + o.id === k)) delete soloSlot[k]; });
+    return os.map(o => { const key = 's' + o.id; if (soloSlot[key] == null) soloSlot[key] = Object.values(soloSlot).includes(0) ? 1 : 0;
+      return { key, slot: soloSlot[key], f0: o.f0, cls: o.cls ? o.cls.label : 'Drone', score: o.cls ? o.cls.conf : 0, nAgree: 1, agree: 'this phone only', flight: o.flight && o.flight.state, rpm: o.flight ? o.flight.rpm : 0, est: null, dir: '', where: '', lead: o === det.out }; });
+  }
   function describe(st, live) {
     const mesh = !!sim || live.some(n => n.key !== ME), o = det && det.out, c = o && o.cls, D = { mesh, n: live.length };
     if (mesh) {
@@ -326,9 +359,7 @@
       D.hear = hear.length === 1 ? `Phone ${hear[0]} hears a harmonic hum` : hear.length ? `Phones ${hear.join(', ')} hear a harmonic hum` : 'A phone hears a harmonic hum';
       const hum = live.filter(n => n.st === 'hum').sort((a, b) => b.e - a.e)[0]; /* loudest = nearest */ D.hum = hum ? `${humWord(hum.wy)} near phone ${hum.label}` : 'Steady hum'; D.humWhy = hum ? hum.wy : ''; D.humAt = hum ? hum.label : '';
       if (st.est) {
-        const p = live.reduce((a, n) => Math.hypot(n.pos[0] - st.est[0], n.pos[1] - st.est[1]) < Math.hypot(a.pos[0] - st.est[0], a.pos[1] - st.est[1]) ? n : a, live[0]);
-        const dx = st.est[0] - p.pos[0], dy = st.est[1] - p.pos[1], r = Math.hypot(dx, dy);
-        D.dir = r < 1.5 ? 'at phone ' + p.label : compass(dx, dy) + ' of phone ' + p.label; D.where = D.dir + (r >= 1.5 ? ' · ~' + Math.round(r) + ' m' : '');
+        Object.assign(D, whereOf(st.est, live));
         const A = live.filter(n => st.agree.includes(n.key)), tr = A.length ? A.reduce((a, n) => a + n.trendDB, 0) / A.length : 0;
         D.trend = tr > 1 ? 'getting closer' : tr < -1 ? 'moving away' : '';
       }
@@ -343,13 +374,39 @@
       D.trend = tr > 1.5 ? 'getting closer' : tr < -1.5 ? 'moving away' : 'same distance';
       D.flight = o && o.flight && o.flight.state; D.rpm = o && o.flight ? o.flight.rpm : 0;
     }
-    D.word = D.cls ? (D.mesh && st.voters < 2 && likelihood(D.score) === 'very likely' ? 'likely' : likelihood(D.score)) : '';
+    const word = (cls, score, n) => cls ? (D.mesh && n < 2 && likelihood(score) === 'very likely' ? 'likely' : likelihood(score)) : '';
+    D.word = word(D.cls, D.score, st.voters);
+    D.drones = dronesOf(st, live, D); D.drones.forEach(d => d.word = word(d.cls, d.score, d.nAgree));
     return D;
   }
 
   // ---------- incident log (log.js): one entry per drone / not-a-drone episode, on this phone only ----------
   const Log = window.RotorLog;
   let inc = null, hum = null, replay = null;
+  // each drone of an episode gets its own incident; a drone that drops out and comes back within 60 s at the same
+  // pitch (±8%) keeps its incident (and its alert), and so does one whose sound is replaced by another within 3 s
+  // (a sudden pitch jump, not a second drone). inc = the lead drone's incident.
+  let known = [];
+  function newIncident(d, live, demo) {
+    return Log.add({ id: Log.newId(), type: 'drone', t0: Date.now(), t1: Date.now(), cls: d.cls, peak: d.score || 0, agree: d.agree, nAgree: d.nAgree || 1, flights: [], track: [], dir: '', demo, room, slot: d.slot || 0, f0: Math.round(d.f0),
+      pins: live.map(n => ({ label: n.label, pos: n.pos.slice() })), geo: geoF ? { lat0: geoF.lat0, lon0: geoF.lon0, rot: +geoF.rot.toFixed(4) } : null, clips: [] });
+  }
+  function trackDrones(list, live, now, demo) { // → number of drones new to this episode
+    let fresh = 0;
+    list.forEach(d => {
+      const gone = x => !list.some(y => y.key === x.key);
+      let k = known.find(x => x.key === d.key) || known.find(x => gone(x) && Math.abs(x.f0 - d.f0) / x.f0 < 0.08 && now - x.last < 60000)
+        || known.find(x => gone(x) && now - x.last < 3000); // one sound swapped for another within 3 s: the same drone changing pitch
+      if (!k) { k = { inc: newIncident(d, live, demo) }; known.push(k); fresh++; }
+      Object.assign(k, { key: d.key, f0: d.f0, last: now }); d.inc = k.inc;
+      const e = k.inc; e.t1 = Date.now(); e.slot = d.slot; if (d.dir) e.dir = d.dir; if (d.cls !== 'Drone' || !e.cls) e.cls = d.cls; e.peak = Math.max(e.peak, d.score || 0);
+      if ((d.nAgree || 1) > e.nAgree) { e.nAgree = d.nAgree; e.agree = d.agree; }
+      const f = shortFl(d.flight); if (f && !e.flights.includes(f)) e.flights.push(f);
+      if (d.est) Log.point(e, d.est[0], d.est[1]);
+    });
+    const L = list.find(d => d.lead) || list[0]; if (L) inc = L.inc;
+    return fresh;
+  }
   function lastDrone() {
     const e = Log.list.find(x => x.type === 'drone'); if (!e) return '';
     const d = new Date(e.t0), days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(e.t0).setHours(0, 0, 0, 0)) / 864e5);
@@ -452,24 +509,19 @@
     const s = ws.s, hot = s === 'drone' || s === 'tracking';
     if (prevS === 'ready' && s !== 'ready') watchStart = now;
     if (hot && st.est) { lastEst = st.est.slice(); lastDir = D.dir || lastDir; lastHead = D.heading || lastHead; }
-    // alert moment: 3 flashes + 3 beeps (demo: demo tone), sheets close; then 1 beep every 10 s until Got it
+    // alert moment (see raiseAlert()); then 1 beep every 10 s until Got it
     if (ws.ev === 'alert') {
-      lastDir = lastHead = ''; A.count++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
-      if (!muted()) { tone(demo ? 'demo' : 'alert', 3); if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 250]); }
-      replay = null;
-      inc = Log.add({ id: Log.newId(), type: 'drone', t0: Date.now(), t1: Date.now(), cls: D.cls || 'Drone', peak: D.score || 0, agree: D.agree, nAgree: st.voters || 1, flights: [], track: [], dir: '', demo, room,
-        pins: live.map(n => ({ label: n.label, pos: n.pos.slice() })), geo: geoF ? { lat0: geoF.lat0, lon0: geoF.lon0, rot: +geoF.rot.toFixed(4) } : null, clips: [] });
+      lastDir = lastHead = ''; raiseAlert(now, demo); replay = null; known = [];
+      if (!D.drones.length) D.drones = [{ key: 'lead', slot: 0, f0: D.hz || 0, cls: D.cls || 'Drone', score: D.score, nAgree: st.voters || 1, agree: D.agree, flight: D.flight, dir: D.dir, est: st.est, lead: true }];
     }
     if (ws.ev === 'back') nextBeep = now + REPEAT_MS; // back within 60 s: no new alert sound
     if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted()) tone(demo ? 'demo' : 'alert', 1); }
     if (ws.ev === 'lost') { if (!muted()) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
-    if (ws.ev === 'gone') { inc = null; Log.save(true); }
-    if (inc && hot) {
-      inc.t1 = Date.now(); if (D.dir) inc.dir = D.dir; if (D.cls) inc.cls = D.cls; inc.peak = Math.max(inc.peak, D.score || 0);
-      if ((st.voters || 1) > inc.nAgree) { inc.nAgree = st.voters; inc.agree = D.agree; }
-      const f = shortFl(D.flight); if (f && !inc.flights.includes(f)) inc.flights.push(f);
-      if (st.est) Log.point(inc, st.est[0], st.est[1]);
-      askLook(st, live, now); Log.save();
+    if (ws.ev === 'gone') { inc = null; known = []; Log.save(true); }
+    if (hot) {
+      // a second drone while the first is still up: its own alert (flash, tone, buzz, un-acknowledged)
+      if (trackDrones(D.drones, live, now, demo) && ws.ev !== 'alert') { ws.again(); raiseAlert(now, demo); }
+      if (inc) askLook(st, live, now); Log.save();
     }
     if (s === 'notdrone' && prevS !== 'notdrone') hum = Log.add({ id: Log.newId(), type: 'hum', t0: Date.now(), t1: Date.now(), cls: 'Not a drone' + (D.hum ? ' · ' + humWord(D.humWhy) : ''), dir: D.humAt ? 'phone ' + D.humAt : '', demo, room, track: [], flights: [] });
     if (hum && D.raw === 'hum') { hum.t1 = Date.now(); Log.save(); } else hum = null;
@@ -480,7 +532,8 @@
     // map
     const chip = hot && D.flight ? shortFl(D.flight) + (D.rpm ? ' · ' + kRpm(D.rpm) : '') : '';
     const ring = st.truth && st.err.F != null ? st.err.F : st.estL && st.estF && st.tdoaOk ? Math.hypot(st.estL[0] - st.estF[0], st.estL[1] - st.estF[1]) : 2.5;
-    st.ui = { state: s, demo, workings, chip, ring: Math.min(5, Math.max(0.8, ring)), me: sim ? sim.eng.nodes[0].key : ME, lost: s === 'lost' && lostInfo ? { pos: lostInfo.pos, ago: mmss(now - ws.lastSeen) } : null };
+    const chips = {}; D.drones.forEach(d => { if (d.key[0] === 't') chips[d.key.slice(1)] = d.flight ? shortFl(d.flight) + (d.rpm ? ' · ' + kRpm(d.rpm) : '') : ''; });
+    st.ui = { state: s, demo, workings, chip, chips, cover: cover && !replay, ring: Math.min(5, Math.max(0.8, ring)), me: sim ? sim.eng.nodes[0].key : ME, lost: s === 'lost' && lostInfo ? { pos: lostInfo.pos, ago: mmss(now - ws.lastSeen) } : null };
     if (replay && hot) replay = null;
     if (replay) {
       const e = replay.e, k = Math.max(1, replay.len / 12), t = Math.min(replay.len, (now - replay.t0) / 1000 * k);
@@ -504,7 +557,7 @@
     // bar: Phones · Listen/Stop · Teach
     const nPh = Math.max(1, live.length);
     setText('phonesN', sim ? '4 · demo' : nPh < 2 ? '1 · solo' : nPh + (cal.ncal >= nPh ? ' · calib ✓' : ' · not calibrated'));
-    const lt = sim ? ['■ Exit demo', 'demo ' + mmss(Math.min(60, sim.eng.t) * 1000) + ' / 1:00'] : listening() ? (hot ? ['■ Listening', 'tracking ' + mmss(now - ws.first)] : s === 'lost' ? ['■ Listening', 'listening for it'] : ['■ Stop listening', 'listening ' + hms(now - listenStart)])
+    const lt = sim ? ['■ Exit demo', 'demo ' + mmss((sim.eng.length ? Math.min(sim.eng.length, sim.eng.t) : sim.eng.t) * 1000) + (sim.eng.length ? ' / ' + mmss(sim.eng.length * 1000) : '')] : listening() ? (hot ? ['■ Listening', 'tracking ' + mmss(now - ws.first)] : s === 'lost' ? ['■ Listening', 'listening for it'] : ['■ Stop listening', 'listening ' + hms(now - listenStart)])
       : hub && live.length ? ['▶ Listen here too', 'the room is watching'] : ['▶ Listen', 'tap once · sound on too'];
     setText('startT', lt[0]); setText('startS', lt[1]);
     $('pNone').hidden = !!room || !!sim; // no room controls during the demo
@@ -515,7 +568,7 @@
     if (sheet === 'details') renderDetails(D, st);
     if (sheet === 'logS') drawTimeline();
     S.watch = s;
-    Object.assign(window.__map = window.__map || {}, { mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
+    Object.assign(window.__map = window.__map || {}, { drones: D.drones.map(d => ({ key: d.key, slot: d.slot, f0: Math.round(d.f0), cls: d.cls, est: d.est, inc: d.inc && d.inc.id })), tracks: st.tracks, alerts: A.count, cover: st.ui.cover ? st.nodes.filter(n => n.hr && n.age < R.STALE_MS).map(n => ({ label: n.label, hr: n.hr, nf: n.nf })) : null, mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
   }
   setInterval(frame, 100);
 
@@ -548,7 +601,11 @@
       }
     }
     const b = $('status'); b.classList.remove('ready', 'watching', 'checking', 'notdrone', 'drone', 'tracking', 'lost'); b.classList.add(s);
-    setText('stIcon', icon); setText('stWord', word); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
+    // two drones at once: one line each, in its map colour
+    const many = hot && D.drones.length > 1, dl = many ? D.drones.map(d => `<div class="drow"><i class="dot d${d.slot + 1}"></i><b>${esc(d.cls)}${d.word ? ' · ' + d.word : ''}</b><small>${[d.where, d.agree].filter(Boolean).map(esc).join(' · ')}</small></div>`).join('') : '';
+    if ($('stDrones').dataset.k !== dl) { $('stDrones').dataset.k = dl; $('stDrones').innerHTML = dl; }
+    if (many) { word = (demo ? 'DEMO · ' : '') + D.drones.length + ' DRONES'; cls = where = ''; sub = 'seen ' + mmss(now - ws.first); }
+    setText('stIcon', icon); setText('stWord', word); $('stWord').classList.toggle('long', word.length > 13); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
     $('pill').hidden = !pill; if (pill) { setText('pill', pill); $('pill').classList.toggle('muted', !!mt); }
     $('stProg').hidden = prog == null; if (prog != null) $('stProg').firstChild.style.width = Math.round(Math.max(0, Math.min(1, prog)) * 100) + '%'; setText('stNote', note);
     setText('peekT', peekT); setText('peekS', peekS); $('itWas').hidden = s !== 'notdrone';
@@ -625,7 +682,7 @@
   // the map chip only; it never raises an alert (it is an inference, not a sighting).
   let blades = +localStorage.getItem('rotorear-blades') || 2;
   $('flBlades').value = String(blades);
-  $('flBlades').onchange = () => { blades = +$('flBlades').value; localStorage.setItem('rotorear-blades', blades); if (det) det.flight.blades = blades; if (sim) sim.eng.nodes.forEach(n => n.det.flight.blades = blades); };
+  $('flBlades').onchange = () => { blades = +$('flBlades').value; localStorage.setItem('rotorear-blades', blades); if (det) det.blades = blades; if (sim) sim.eng.nodes.forEach(n => n.det.blades = blades); };
   const sp = $('spark'), sg = sp.getContext('2d');
   function drawFlight(fl) {
     const dpr = Math.min(2, devicePixelRatio || 1), W = Math.round(sp.clientWidth * dpr), H = Math.round(sp.clientHeight * dpr);
@@ -644,7 +701,8 @@
     if (t - lastDetect > 45) {
       lastDetect = t;
       const o = performance.now() < gateUntil ? det.out : det.step(t), c = o.cls; if (tap) tap.setF0(o.f0);
-      Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw } });
+      Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw } ,
+        srcs: det.src.map(q => ({ id: q.id, state: q.out.state, conf: q.out.conf, f0: Math.round(q.out.f0), cls: q.out.cls && q.out.cls.label, fl: q.out.flight && q.out.flight.state })), lead: det.li, nf: o.nf, hr: o.hr });
       if (sheet === 'details') { const p = primary(); drawFingerprint(p.out.cls, p.out.state); drawFlight(p.out.flight); }
     }
     const p = primary(); if (p.db) { drawColumn(specs[0], p, p.out); drawColumn(specs[1], p, p.out); } // Details keeps drawing while closed, so it opens with history
