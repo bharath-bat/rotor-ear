@@ -28,13 +28,15 @@
       if (f0 && st !== 'quiet') { g.fillStyle = st === 'drone' ? '#ff3b5c' : '#ffb547'; for (let h = 1; h <= 10; h++) { const y = (1 - Math.log(f0 * h / 50) / L) * H; if (y > 0) g.fillRect(x, y - 1, 2, 2); } }
     };
   }
+  // same state words, shapes and confidence wording as the watch post (detector.js)
+  const STATE_OF = { quiet: 'watching', some: 'checking', drone: 'drone', hum: 'notdrone', off: 'ready' };
   function setBanner(el, st, sub, cls) {
-    const L = { quiet: 'QUIET', some: 'SOMETHING', drone: 'DRONE NEARBY', hum: 'NOT A DRONE', off: 'READY' };
-    const key = st + sub + (cls || ''); if (el.dataset.k === key) return; el.dataset.k = key;
-    el.className = 'banner ' + (st === 'quiet' ? '' : st === 'hum' ? 'some' : st);
-    el.innerHTML = (L[st] || st) + (cls ? '<b class="cls">' + cls + '</b>' : '') + '<small>' + sub + '</small>';
+    const s = STATE_OF[st] || 'ready', [icon, word] = RotorEar.STATES[s];
+    const key = s + sub + (cls || ''); if (el.dataset.k === key) return; el.dataset.k = key;
+    el.className = 'banner ' + s;
+    el.innerHTML = `<b class="w">${icon} ${word}</b>` + (cls ? '<b class="cls">' + cls + '</b>' : '') + '<small>' + sub + '</small>';
   }
-  const clsText = o => o.cls ? o.cls.label + ' · ' + o.cls.conf + '%' : '';
+  const clsText = o => o.cls ? o.cls.label + ' · ' + RotorEar.likelihood(o.cls.conf) : '';
 
   // ---------------- NODE ----------------
   function runNode(room) {
@@ -66,8 +68,8 @@
       $('nConf').textContent = o.conf; $('nMeter').style.width = o.conf + '%';
       $('nF0').textContent = o.f0 && o.conf > 15 ? Math.round(o.f0) : '—';
       $('nE').textContent = o.f0 ? Math.round(o.e) : '—';
-      const sub = o.state === 'drone' ? 'rotor signature @ ' + Math.round(o.f0) + ' Hz' : o.state === 'hum' ? (o.cls ? o.cls.why : '') : o.state === 'some' ? 'harmonic hum, checking…' : (sim ? 'simulating' : 'listening');
-      setBanner($('nBanner'), o.state, sub, o.state === 'drone' || o.state === 'some' ? clsText(o) : o.state === 'hum' && o.cls ? o.cls.conf + '% sure' : '');
+      const sub = o.state === 'drone' ? 'rotor hum ~' + Math.round(o.f0) + ' Hz · the map shows where' : o.state === 'hum' ? (o.cls ? o.cls.why + ' · ignored' : 'ignored') : o.state === 'some' ? 'this phone hears a harmonic hum' : (sim ? 'simulating · numbers go to the map' : mic ? 'listening · numbers go to the map' : 'tap Start listening');
+      setBanner($('nBanner'), mic || sim ? o.state : 'off', sub, o.state === 'drone' ? clsText(o) : '');
       spec(det.db, det.binHz, o.f0, o.state);
     }
     $('nStart').onclick = async () => {

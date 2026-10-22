@@ -21,7 +21,7 @@
   // ---------------- what a node sends (numbers only) ----------------
   const telemetry = (o, key, name, p, ev, on) => {
     const m = { t: 's', k: key, n: name, c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state };
-    if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; m.fr = +o.cls.raw.f0.toFixed(2); if (o.cls.learned) m.lr = 1; }
+    if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; m.fr = +o.cls.raw.f0.toFixed(2); if (o.cls.learned) m.lr = 1; if (o.cls.why) m.wy = o.cls.why; }
     if (o.flight && o.flight.state) m.fs = o.flight.state;
     if (p) m.p = p;
     if (ev && ev.length) m.ev = ev.map(t => +t.toFixed(2));
@@ -156,7 +156,7 @@
       if (d.t !== 's' || !d.k) return null;
       const n = this.node(d.k, d);
       if (!this.saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
-      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, fs: d.fs || '', last: now });
+      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', last: now });
       // calibration (if any): this phone's input latency (ms) and mic gain (dB) relative to the others
       const cal = this.cal[d.k] || { lat: 0, gain: 0 }, e = d.e - cal.gain;
       if (d.f > 0 && d.e > -100) n.es = n.es == null ? e : n.es + 0.5 * (e - n.es); else n.es = null;
@@ -231,7 +231,7 @@
       const voters = A.filter(n => n.st === 'drone');
       const tally = {}; voters.forEach(n => { if (n.cl) tally[n.cl] = (tally[n.cl] || 0) + n.c * n.cp; });
       const top = Object.keys(tally).sort((a, b) => tally[b] - tally[a])[0], tn = voters.filter(n => n.cl === top);
-      const label = top ? top + ' · ' + Math.round(tn.reduce((a, n) => a + n.cp, 0) / tn.length) + '%' : '';
+      const label = top || '', score = tn.length ? Math.round(tn.reduce((a, n) => a + n.cp, 0) / tn.length) : 0; // class + its mean match score
       if (A.length >= 2 && voters.length >= 2) this.hold = now + 1500;
       const banner = now < this.hold ? 'drone' : live.some(n => n.st === 'hum') && !live.some(n => n.st === 'drone') ? 'hum' : live.some(n => n.c >= 30) ? 'some' : live.length ? 'quiet' : 'off';
       const P = A.length >= 3 ? this.pairs(A, now) : [];
@@ -264,9 +264,9 @@
       while (this.hErr.length && now - this.hErr[0][0] > 10000) this.hErr.shift();
       const hm = k => this.hErr.length ? Math.round(this.hErr.reduce((a, e) => a + e[k], 0) / this.hErr.length) : null;
       return this.state = {
-        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs,
+        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs, wy: n.wy,
           age: now - n.last, trendDB: n.trendDB || 0, rtt: n.rtt, synced: n.off != null, evRate: n.ev.filter(t => t > now - 3000).length / 3 })),
-        agree: A.map(n => n.key), voters: voters.length, banner, label, learned: tn.some(n => n.lr), flight: (() => { const c = {}; tn.forEach(n => { if (n.fs) c[n.fs] = (c[n.fs] || 0) + 1; }); return Object.keys(c).sort((a, b) => c[b] - c[a])[0] || ''; })(), solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
+        agree: A.map(n => n.key), voters: voters.length, banner, label, score, learned: tn.filter(n => n.lr).length, demo: live.some(n => /^sim /.test(n.name || '')), flight: (() => { const c = {}; tn.forEach(n => { if (n.fs) c[n.fs] = (c[n.fs] || 0) + 1; }); return Object.keys(c).sort((a, b) => c[b] - c[a])[0] || ''; })(), solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
         est: E.F || E.L || null, estL: E.L, estT: E.T, estF: E.F, tdoaOk: !!(E.T && this.tdoaOk), calTrusted: !!(E.T && this.calTrusted), calSpot: this.calSpot, trail: this.trail.slice(),
         pairs: P.map(q => ({ a: q.a.key, b: q.b.key, dt: +q.dt.toFixed(2), sd: +q.sd.toFixed(2), n: q.n })),
         heading: hd && Math.hypot(...hd.v) > 0.05 ? hd.v : null, truth: tr, err, headErr: { both: hm(1), loud: hm(2), doppler: hm(3) }
@@ -274,86 +274,103 @@
     }
   }
 
-  // ---------------- MapView: draws a MeshModel state on a square canvas ----------------
+  // ---------------- MapView: draws a MeshModel state on a canvas ----------------
+  // Calm by default: grey lettered pins, N arrow and a 5 m scale. The alert accent is used only for a confirmed
+  // drone (marker, heading, uncertainty ring). Bearing lines are faint during a drone and hidden while quiet;
+  // "Show workings" (S.ui.workings) brings back full lines, the loudness-only fit, the true drone (sim) and the legend.
+  // S.ui (set by the page): { state, demo, workings, chip, lost: {pos, ago}, me, ring }
   function MapView(cv, opts = {}) {
     const g = cv.getContext('2d'); let view = { x0: -3, y0: -3, s: 12 }, drag = null, S = null;
-    // view = square world box (x0,y0,s) fitted to the canvas's shorter side, centred
     const sc = () => Math.min(cv.width, cv.height) / view.s;
     const W2P = (x, y) => { const k = sc(); return [cv.width / 2 + (x - view.x0 - view.s / 2) * k, cv.height / 2 - (y - view.y0 - view.s / 2) * k]; };
     const P2W = (px, py) => { const k = sc(); return [view.x0 + view.s / 2 + (px - cv.width / 2) / k, view.y0 + view.s / 2 - (py - cv.height / 2) / k]; };
+    const DARK = { map: '#0f1218', ink: '#F4F6FA', ink2: '#B9C0CE', line: '#2A303C', pin: '#3a414f', pinInk: '#F4F6FA', alert: '#FF5A1F', check: '#E8B500', demo: '#A78BFA', panel: '#161A22' };
     function fitView(list) {
       if (drag) return;
       if (S.solo) { const n = list.find(m => m.key === S.solo); view = { x0: n.pos[0] - 6, y0: n.pos[1] - 6, s: 12 }; return; }
       const xs = [0, 6], ys = [0, 6]; list.forEach(n => { xs.push(n.pos[0]); ys.push(n.pos[1]); });
-      [S.est, S.truth && [S.truth.x, S.truth.y]].forEach(p => { if (p) { xs.push(clamp(p[0], -12, 18)); ys.push(clamp(p[1], -12, 18)); } });
+      const L = S.ui && S.ui.lost && S.ui.lost.pos;
+      [S.est, L, S.ui && S.ui.workings && S.truth && [S.truth.x, S.truth.y]].forEach(p => { if (p) { xs.push(clamp(p[0], -12, 18)); ys.push(clamp(p[1], -12, 18)); } });
       const x0 = Math.min(...xs) - 3, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 3, y1 = Math.max(...ys) + 3, s = Math.max(x1 - x0, y1 - y0);
       view = { x0: (x0 + x1) / 2 - s / 2, y0: (y0 + y1) / 2 - s / 2, s };
     }
     const arrow = (x0, y0, x1, y1, col, w) => { const a = Math.atan2(y1 - y0, x1 - x0), h = 4 * w; g.strokeStyle = g.fillStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
       g.beginPath(); g.moveTo(x1, y1); g.lineTo(x1 - h * Math.cos(a - 0.45), y1 - h * Math.sin(a - 0.45)); g.lineTo(x1 - h * Math.cos(a + 0.45), y1 - h * Math.sin(a + 0.45)); g.closePath(); g.fill(); };
+    const tri = (x, y, r) => { g.beginPath(); g.moveTo(x, y - r); g.lineTo(x + r * 0.95, y + r * 0.7); g.lineTo(x - r * 0.95, y + r * 0.7); g.closePath(); };
+    const text = (t, x, y, col, px, bold, align) => { g.fillStyle = col; g.font = `${bold ? '600 ' : ''}${px}px system-ui`; g.textAlign = align || 'center'; g.textBaseline = 'middle'; g.fillText(t, x, y); g.textAlign = 'left'; g.textBaseline = 'alphabetic'; };
+    function chip(t, x, y, C, dpr) { // neutral grey flight chip under the marker
+      g.font = `500 ${12 * dpr}px system-ui`; const w = g.measureText(t).width + 20 * dpr, h = 24 * dpr;
+      g.fillStyle = C.panel; g.strokeStyle = C.line; g.lineWidth = 1 * dpr; g.beginPath(); g.roundRect(x - w / 2, y - h / 2, w, h, h / 2); g.fill(); g.stroke(); text(t, x, y, C.ink, 12 * dpr, false);
+    }
     // TDOA "bearing line" for a pair = the hyperbola r_b − r_a = c·dt, traced by marching squares
-    function hyperbola(a, b, dt, col, dpr) {
+    function hyperbola(a, b, dt, col, w) {
       const [X0, Y1] = P2W(0, 0), [X1, Y0] = P2W(cv.width, cv.height);
       const k = dt / 1000 * C_SOUND, st = (X1 - X0) / 70, f = (x, y) => Math.hypot(x - b.pos[0], y - b.pos[1], 1) - Math.hypot(x - a.pos[0], y - a.pos[1], 1) - k;
-      g.strokeStyle = col; g.lineWidth = 2.2 * dpr; g.beginPath();
+      g.strokeStyle = col; g.lineWidth = w; g.beginPath();
       for (let x = X0; x < X1; x += st) for (let y = Y0; y < Y1; y += st) {
         const v = [f(x, y), f(x + st, y), f(x + st, y + st), f(x, y + st)], P = [[x, y], [x + st, y], [x + st, y + st], [x, y + st]], cr = [];
-        for (let e = 0; e < 4; e++) { const u = v[e], w = v[(e + 1) % 4]; if ((u < 0) !== (w < 0)) { const t = u / (u - w), p = P[e], q = P[(e + 1) % 4]; cr.push(W2P(p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))); } }
+        for (let e = 0; e < 4; e++) { const u = v[e], w2 = v[(e + 1) % 4]; if ((u < 0) !== (w2 < 0)) { const t = u / (u - w2), p = P[e], q = P[(e + 1) % 4]; cr.push(W2P(p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))); } }
         if (cr.length >= 2) { g.moveTo(cr[0][0], cr[0][1]); g.lineTo(cr[1][0], cr[1][1]); }
       }
       g.stroke();
     }
-    // One phone can't tell direction, only "is it getting closer?". Show that honestly: rings for how
-    // strongly it hears rotors, and chevrons pointing in (louder = approaching) or out (moving away).
-    function drawSolo(n, dpr, now) {
+    // One phone can't tell direction, only "is it getting closer?": rings for how strongly it hears rotors,
+    // and chevrons pointing in (louder = approaching) or out (moving away).
+    function drawSolo(n, C, dpr, now, hot) {
       if (!n || n.age > STALE_MS) return;
-      const [x, y] = W2P(n.pos[0], n.pos[1]), hot = n.st === 'drone', col = hot ? '#ff3b5c' : n.st === 'some' || n.st === 'hum' ? '#ffb547' : '#2ee6a6';
-      for (let k = 0; k < 3; k++) { const ph = ((now / 1400 + k / 3) % 1), R = (20 + ph * 120) * dpr; g.strokeStyle = col; g.globalAlpha = (1 - ph) * (0.15 + n.c / 130); g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, R, 0, 7); g.stroke(); }
+      const [x, y] = W2P(n.pos[0], n.pos[1]), col = hot ? C.alert : C.ink2;
+      if (n.c > 5) for (let k = 0; k < 3; k++) { const ph = ((now / 1400 + k / 3) % 1), R = (20 + ph * 120) * dpr; g.strokeStyle = col; g.globalAlpha = (1 - ph) * (0.15 + n.c / 130); g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, R, 0, 7); g.stroke(); }
       g.globalAlpha = 1;
       if (n.f > 0 && n.c > 20) {
         const inb = n.trendDB > 1.5, outb = n.trendDB < -1.5;
         if (inb || outb) for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4, r0 = 90 * dpr, r1 = 54 * dpr, [s0, s1] = inb ? [r0, r1] : [r1, r0];
-          arrow(x + s0 * Math.cos(a), y + s0 * Math.sin(a), x + s1 * Math.cos(a), y + s1 * Math.sin(a), inb ? '#ff3b5c' : '#90a4c8', 3 * dpr); }
-        g.fillStyle = '#fff'; g.font = `bold ${14 * dpr}px system-ui`; g.textAlign = 'center';
-        g.fillText(hot ? (n.cl || 'DRONE') + (inb ? ' · approaching' : outb ? ' · moving away' : ' · same distance') : n.st === 'hum' ? 'not a drone' : 'hum…', x, y - 104 * dpr);
-        g.font = `${11 * dpr}px system-ui`; g.fillStyle = '#9fb0d0'; g.fillText('one phone: no direction · add phones for a position', x, y + 120 * dpr); g.textAlign = 'left';
+          arrow(x + s0 * Math.cos(a), y + s0 * Math.sin(a), x + s1 * Math.cos(a), y + s1 * Math.sin(a), hot && inb ? C.alert : C.ink2, 3 * dpr); }
+        text(hot ? (S.label || 'Drone') + (inb ? ' · approaching' : outb ? ' · moving away' : ' · same distance') : n.st === 'hum' ? '✓ not a drone' : 'hears a hum…', x, y - 104 * dpr, C.ink, 15 * dpr, true);
+        if (hot && S.ui && S.ui.chip) chip(S.ui.chip, x, y + 40 * dpr, C, dpr);
+        text('one phone: no direction · add phones for a position', x, y + 120 * dpr, C.ink2, 12 * dpr);
       }
     }
     function draw() {
       const dpr = Math.min(2, devicePixelRatio || 1), Wd = Math.round(cv.clientWidth * dpr), Hd = Math.round(cv.clientHeight * dpr) || Wd;
       if (cv.width !== Wd || cv.height !== Hd) { cv.width = Wd; cv.height = Hd; }
       requestAnimationFrame(draw); if (!S) return;
+      const C = Object.assign({}, DARK, opts.colors ? opts.colors() : null), U = S.ui || {}, ws = U.state || '';
       const W = cv.width, H = cv.height, now = performance.now(), list = S.nodes, byKey = k => list.find(n => n.key === k);
+      const hot = ws === 'drone' || ws === 'tracking', work = !!U.workings;
       fitView(list);
-      const [wx0, wy1] = P2W(0, 0), [wx1, wy0] = P2W(W, H);
-      g.fillStyle = '#03050a'; g.fillRect(0, 0, W, H);
-      g.lineWidth = 1; g.font = `${11 * dpr}px system-ui`; g.fillStyle = '#3a4560';
-      for (let m = Math.ceil(wx0); m <= wx1; m++) { const [x] = W2P(m, 0); g.strokeStyle = m % 5 ? '#0e1424' : '#1a2238'; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); if (m % 2 === 0 && !S.solo) g.fillText(m + 'm', x + 2, H - 4 * dpr); }
-      for (let m = Math.ceil(wy0); m <= wy1; m++) { const [, y] = W2P(0, m); g.strokeStyle = m % 5 ? '#0e1424' : '#1a2238'; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); if (m % 2 === 0 && !S.solo) g.fillText(m + 'm', 3 * dpr, y - 2); }
-      (S.pairs || []).forEach(q => { const a = byKey(q.a), b = byKey(q.b); if (a && b) hyperbola(a, b, q.dt, a.color + 'aa', dpr); });
-      if (S.calSpot) { const [x, y] = W2P(S.calSpot[0], S.calSpot[1]), ph = 1 + 0.3 * Math.sin(performance.now() / 120); g.strokeStyle = '#ffd166'; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 24 * dpr * ph, 0, 7); g.stroke(); g.font = `${22 * dpr}px system-ui`; g.textAlign = 'center'; g.fillText('👏', x, y - 26 * dpr); g.textAlign = 'left'; }
-      if (S.truth) { const [x, y] = W2P(S.truth.x, S.truth.y); g.strokeStyle = '#ffffffaa'; g.lineWidth = 2 * dpr; g.setLineDash([3 * dpr, 3 * dpr]); g.beginPath(); g.arc(x, y, 9 * dpr, 0, 7); g.stroke(); g.setLineDash([]); g.fillStyle = '#ffffffaa'; g.fillText('true', x - 10 * dpr, y + 22 * dpr); }
-      const T = S.trail || []; for (let i = 1; i < T.length; i++) { const [a, b] = W2P(T[i - 1][0], T[i - 1][1]), [c, d] = W2P(T[i][0], T[i][1]); g.strokeStyle = `rgba(255,59,92,${i / T.length * 0.8})`; g.lineWidth = 3 * dpr * i / T.length; g.beginPath(); g.moveTo(a, b); g.lineTo(c, d); g.stroke(); }
-      if (S.estL && S.estF && opts.showLoud !== false) { const [x, y] = W2P(S.estL[0], S.estL[1]); g.strokeStyle = '#ffb547aa'; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 6 * dpr, 0, 7); g.stroke(); }
-      const E = S.est;
+      g.fillStyle = C.map; g.fillRect(0, 0, W, H);
+      // N arrow + 5 m scale bar
+      text('N ↑', W - 22 * dpr, 18 * dpr, C.ink2, 13 * dpr, true);
+      const L5 = 5 * sc(), y5 = H - 16 * dpr; g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.beginPath(); g.moveTo(12 * dpr, y5); g.lineTo(12 * dpr + L5, y5); g.stroke(); text('5 m', 20 * dpr + L5, y5, C.ink2, 12 * dpr, false, 'left');
+      if (hot || work) (S.pairs || []).forEach(q => { const a = byKey(q.a), b = byKey(q.b); if (a && b) hyperbola(a, b, q.dt, work ? a.color + 'cc' : C.ink2 + '40', (work ? 2.2 : 1.2) * dpr); });
+      if (S.calSpot) { const [x, y] = W2P(S.calSpot[0], S.calSpot[1]), ph = 1 + 0.3 * Math.sin(now / 120); g.strokeStyle = C.check; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 24 * dpr * ph, 0, 7); g.stroke(); text('👏 clap here', x, y - 34 * dpr, C.ink, 13 * dpr, true); }
+      if (work && S.truth) { const [x, y] = W2P(S.truth.x, S.truth.y); g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.setLineDash([3 * dpr, 3 * dpr]); g.beginPath(); g.arc(x, y, 9 * dpr, 0, 7); g.stroke(); g.setLineDash([]); text('true', x, y + 20 * dpr, C.ink2, 11 * dpr); }
+      if (work && S.estL && S.estF) { const [x, y] = W2P(S.estL[0], S.estL[1]); g.strokeStyle = C.check; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 6 * dpr, 0, 7); g.stroke(); }
+      const E = hot ? S.est : null, T = S.trail || [];
+      if (hot || ws === 'lost') { g.fillStyle = C.alert; for (let i = 0; i < T.length; i += 3) { const [a, b] = W2P(T[i][0], T[i][1]); g.globalAlpha = 0.15 + 0.5 * i / T.length; g.beginPath(); g.arc(a, b, 2.5 * dpr, 0, 7); g.fill(); } g.globalAlpha = 1; }
       if (E) {
-        const [x, y] = W2P(E[0], E[1]), pulse = 1 + 0.25 * Math.sin(now / 160);
-        const gr = g.createRadialGradient(x, y, 0, x, y, 34 * dpr * pulse); gr.addColorStop(0, 'rgba(255,90,110,0.95)'); gr.addColorStop(0.25, 'rgba(255,59,92,0.55)'); gr.addColorStop(1, 'rgba(255,59,92,0)');
-        g.fillStyle = gr; g.beginPath(); g.arc(x, y, 34 * dpr * pulse, 0, 7); g.fill();
-        g.fillStyle = '#fff'; g.beginPath(); g.arc(x, y, 5 * dpr, 0, 7); g.fill();
-        if (S.heading) { const h = S.heading, m = Math.hypot(h[0], h[1]), L = 46 * dpr; arrow(x, y, x + h[0] / m * L, y - h[1] / m * L, '#c77dff', 3 * dpr); g.fillStyle = '#c77dff'; g.font = `${10 * dpr}px system-ui`; g.fillText('heading', x + h[0] / m * L + 4 * dpr, y - h[1] / m * L); }
-        g.fillStyle = '#ffd6dd'; g.font = `bold ${12 * dpr}px system-ui`; g.fillText(S.label || 'DRONE?', x + 10 * dpr, y + 18 * dpr);
+        const [x, y] = W2P(E[0], E[1]), rr = Math.max(18 * dpr, (U.ring || 1.5) * sc());
+        g.strokeStyle = C.alert; g.lineWidth = 2.5 * dpr; g.beginPath(); g.arc(x, y, rr, 0, 7); g.stroke();
+        if (S.heading) { const h = S.heading, m = Math.hypot(h[0], h[1]), Lh = rr + 34 * dpr; arrow(x + h[0] / m * rr * 0.6, y - h[1] / m * rr * 0.6, x + h[0] / m * Lh, y - h[1] / m * Lh, C.alert, 3 * dpr); }
+        tri(x, y + 2 * dpr, 14 * dpr);
+        if (U.demo) { g.save(); g.clip(); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; for (let k = -30; k < 30; k += 5) { g.beginPath(); g.moveTo(x + k * dpr, y + 16 * dpr); g.lineTo(x + (k + 20) * dpr, y - 16 * dpr); g.stroke(); } g.restore(); tri(x, y + 2 * dpr, 14 * dpr); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.stroke(); }
+        else { g.fillStyle = C.alert; g.fill(); }
+        if (U.chip) chip(U.chip, x, y + rr + 18 * dpr, C, dpr);
       }
-      if (S.solo) drawSolo(list.find(n => n.key === S.solo), dpr, now);
+      if (ws === 'lost' && U.lost && U.lost.pos && !S.solo) {
+        const [x, y] = W2P(U.lost.pos[0], U.lost.pos[1]); g.strokeStyle = C.alert; g.lineWidth = 2 * dpr; g.setLineDash([5 * dpr, 4 * dpr]); g.beginPath(); g.arc(x, y, 26 * dpr, 0, 7); g.stroke(); g.setLineDash([]);
+        tri(x, y + 2 * dpr, 12 * dpr); g.stroke(); text('last seen ' + U.lost.ago + ' ago', x, y + 42 * dpr, C.ink, 12 * dpr);
+      }
+      if (S.solo) drawSolo(list.find(n => n.key === S.solo), C, dpr, now, hot);
       list.forEach(n => {
-        const [x, y] = W2P(n.pos[0], n.pos[1]), stale = n.age > STALE_MS, r = 13 * dpr;
-        if (!stale && n.c > 5) { g.strokeStyle = n.st === 'drone' ? '#ff3b5c' : n.st === 'some' || n.st === 'hum' ? '#ffb547' : n.color; g.globalAlpha = 0.5; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, r + 4 * dpr + n.c / 100 * 12 * dpr, 0, 7); g.stroke(); g.globalAlpha = 1; }
-        // direction arrow: toward the estimate (multi-phone) …
-        if (E && (S.agree || []).includes(n.key)) { const dx = E[0] - n.pos[0], dy = E[1] - n.pos[1], m = Math.hypot(dx, dy) || 1; arrow(x + dx / m * (r + 4 * dpr), y - dy / m * (r + 4 * dpr), x + dx / m * (r + 26 * dpr), y - dy / m * (r + 26 * dpr), n.color, 2.5 * dpr); }
-        // … and loudness trend (louder = approaching, quieter = moving away), shown as in/out chevrons
-        if (!S.solo && !stale && n.f > 0 && Math.abs(n.trendDB) > 0.8) { const inb = n.trendDB > 0; g.fillStyle = inb ? '#2ee6a6' : '#90a4c8'; g.font = `bold ${11 * dpr}px system-ui`; g.fillText(inb ? '▲ louder' : '▼ quieter', x - 22 * dpr, y + r + 16 * dpr); }
-        g.fillStyle = stale ? '#3a4560' : n.color; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
-        g.fillStyle = '#04121a'; g.font = `bold ${13 * dpr}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(n.label, x, y + 1); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+        const [x, y] = W2P(n.pos[0], n.pos[1]), stale = n.age > STALE_MS, r = 16 * dpr;
+        if (!stale && ws === 'checking' && n.c >= 30 && n.st !== 'hum') { const ph = (now / 1000) % 1; g.strokeStyle = C.check; g.lineWidth = 2 * dpr; g.setLineDash([5 * dpr, 4 * dpr]);
+          [8, 18].forEach(k => { g.globalAlpha = 1 - ph * 0.6; g.beginPath(); g.arc(x, y, r + (k + ph * 6) * dpr, 0, 7); g.stroke(); }); g.setLineDash([]); g.globalAlpha = 1; if (!S.solo) text('hears it', x, y + r + 34 * dpr, C.ink, 12 * dpr, true); }
+        if (!stale && n.st === 'hum' && !S.solo) text('✓ hum', x, y + r + 16 * dpr, C.ink, 12 * dpr, true);
+        if (!stale && (ws === 'watching' || ws === 'ready') && n.key === U.me) { const ph = (Math.sin(now / 4000 * 2 * Math.PI) + 1) / 2; g.strokeStyle = C.ink2; g.lineWidth = 1.5 * dpr; g.setLineDash([4 * dpr, 4 * dpr]); g.globalAlpha = 0.4 + 0.5 * ph; g.beginPath(); g.arc(x, y, r + (6 + 6 * ph) * dpr, 0, 7); g.stroke(); g.setLineDash([]); g.globalAlpha = 1; }
+        g.fillStyle = stale ? C.line : C.pin; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill(); g.strokeStyle = C.ink2; g.lineWidth = 1.2 * dpr; g.stroke();
+        text(n.label, x, y + 1, stale ? C.ink2 : C.pinInk, 14 * dpr, true);
+        if (n.key === U.me && (ws === 'watching' || ws === 'ready')) text('this phone', x, y + r + 24 * dpr, C.ink2, 12 * dpr);
       });
     }
     requestAnimationFrame(draw);
@@ -458,7 +475,22 @@
         return node;
       });
       this.src = src;
+      if (this.o.path === 'demo') { // the fan of the scripted demo, heard by each phone at 1/r from a spot near phone B
+        this.fan = RotorEar.syntheticFan(ctx); this.fanPos = [s + 1, -1];
+        this.nodes.forEach(n => { n.fg = ctx.createGain(); n.fg.gain.value = 0; this.fan.connect(n.fg); n.fg.connect(n.bus); });
+      }
     }
+    // The scripted 60-second demo: 0–5 s quiet · 5–12 s a fan near phone B (ignored) · 12–20 s a drone approaches
+    // from the NE · 20–30 s crosses the square and climbs · 30–45 s hovers · 45–55 s leaves to the SW · then the end card.
+    script(t) {
+      const s = this.o.side / 6, L = (a, b, u) => a + (b - a) * clamp(u, 0, 1), seg = (p, q, u) => [L(p[0], q[0], u), L(p[1], q[1], u)];
+      const K = [[12, [13, 13]], [20, [7.5, 7.5]], [26, [3.5, 4]], [45, [3.5, 4]], [55, [-13, -13]]];
+      let P = K[0][1]; for (let i = 1; i < K.length; i++) if (t < K[i][0] || i === K.length - 1) { P = seg(K[i - 1][1], K[i][1], (t - K[i - 1][0]) / (K[i][0] - K[i - 1][0])); break; }
+      const lev = t < 12 ? 0 : t < 14 ? (t - 12) / 2 : t < 47 ? 1 : Math.max(0, 1 - (t - 47) / 5);
+      return { P: [P[0] * s, P[1] * s], lev, pitch: t < 26 ? 1 : t < 30 ? 1 + 0.08 * (t - 26) / 4 : 1.08, fan: t >= 5 && t < 12 ? 1 : 0 };
+    }
+    get ended() { return this.o.path === 'demo' && this.t >= 55; }
+    replay() { this.t = 0; }
     pathAt(t) {
       const w = 2 * Math.PI / 40, s = this.o.side / 6, k = this.o.path;
       const P = k === 'circle' ? [3 + 3 * Math.cos(w * t), 3 + 3 * Math.sin(w * t)] : k === 'eight' ? [3 + 5 * Math.sin(w * t), 3 + 3 * Math.sin(2 * w * t)]
@@ -467,12 +499,15 @@
     }
     step(now) {
       const dt = this.last ? (now - this.last) / 1000 : 0; this.last = now; this.t += dt * this.o.speed;
-      const d = this.pathAt(this.t), d2 = this.pathAt(this.t + 0.05), sp = this.o.speed / 0.05;
-      this.drone = { x: d[0], y: d[1], vx: (d2[0] - d[0]) * sp, vy: (d2[1] - d[1]) * sp };
+      const demo = this.o.path === 'demo', sc = demo ? this.script(this.t) : null, at = t => demo ? this.script(t).P : this.pathAt(t);
+      const d = at(this.t), d2 = at(this.t + 0.05), sp = this.o.speed / 0.05, lev = demo ? sc.lev : 1;
+      this.drone = lev > 0 ? { x: d[0], y: d[1], vx: (d2[0] - d[0]) * sp, vy: (d2[1] - d[1]) * sp } : null;
+      if (demo && sc.pitch !== this.pitch) { this.pitch = sc.pitch; this.src.setPitch(sc.pitch, 0.3); }
       this.nodes.forEach(n => {
         const r = Math.hypot(d[0] - n.p[0], d[1] - n.p[1], this.o.alt); n.r = r;
         n.dl.delayTime.setTargetAtTime(r / C_SOUND, this.ctx.currentTime, 0.03);
-        n.g.gain.setTargetAtTime(0.6 / Math.max(1, r), this.ctx.currentTime, 0.05);
+        n.g.gain.setTargetAtTime(lev * 0.6 / Math.max(1, r), this.ctx.currentTime, 0.05);
+        if (n.fg) n.fg.gain.setTargetAtTime(sc.fan * 0.5 / Math.max(1, Math.hypot(this.fanPos[0] - n.p[0], this.fanPos[1] - n.p[1])), this.ctx.currentTime, 0.2);
         const out = n.det.step(now); if (n.tap) n.tap.setF0(out.f0);
       });
     }
@@ -488,7 +523,7 @@
         s.connect(dl); dl.connect(g); g.connect(n.bus); s.start(t0); s.onended = () => setTimeout(() => g.disconnect(), 1200);
       });
     }
-    stop() { this.src.stop(); this.nodes.forEach(n => { n.nz.stop(); n.bus.disconnect(); }); }
+    stop() { this.src.stop(); if (this.fan) this.fan.stop(); this.nodes.forEach(n => { n.nz.stop(); n.bus.disconnect(); }); }
   }
   // In-page loopback "link" for the watch post's sim mode: same messages, a simulated 5–40 ms network,
   // and the same ping/pong clock sync as the real relay.

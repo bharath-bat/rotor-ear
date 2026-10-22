@@ -19,17 +19,18 @@ input{background:#0a0f1b;border:1px solid var(--line);color:var(--txt);border-ra
 .v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}.v u{text-decoration:none;font-size:12px;color:var(--dim);margin-left:2px}
 .code{font-size:34px;font-weight:800;letter-spacing:4px;color:var(--accent)}
 .share{display:flex;gap:6px;margin-top:6px}.share input{font-size:12px;padding:8px}
-.banner{border-radius:16px;padding:14px 10px;text-align:center;font-weight:800;font-size:26px;letter-spacing:2px;background:#0b1a16;color:var(--quiet);border:2px solid #134a3a;transition:background .4s,color .4s}
-.banner .cls{display:block;font-size:16px;letter-spacing:1px;margin-top:4px;color:#ffd6dd}.banner.some .cls{color:var(--some)}
-.banner small{display:block;font-size:12px;font-weight:500;letter-spacing:.5px;color:var(--dim);margin-top:3px}
-.banner.some{background:#221a0b;color:var(--some);border-color:#5c4214}
-.banner.drone{color:#fff;border-color:var(--drone);animation:pulse 1s ease-in-out infinite}
-.banner.off{background:var(--panel);color:var(--dim);border-color:var(--line)}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,.7);background:#3a0c18}50%{box-shadow:0 0 0 12px rgba(255,59,92,0);background:#7a1228}}
+/* status block: same words, shapes and single accent as the watch post */
+.banner{border-radius:16px;padding:14px 14px;background:#161A22;color:#F4F6FA;border:2px solid #2A303C}
+.banner .w{display:block;font-size:34px;font-weight:800;line-height:1.1}
+.banner .cls{display:block;font-size:17px;font-weight:700;margin-top:4px}
+.banner small{display:block;font-size:14px;color:#B9C0CE;margin-top:3px}
+.banner.ready .w{color:#B9C0CE}
+.banner.checking{background:transparent;border:2px dashed #E8B500}
+.banner.drone{background:#C93500;border-color:#C93500;color:#fff}.banner.drone small{color:#fff}
 .status{font-size:13px;color:var(--dim);margin:8px 2px;min-height:1.2em}.status.ok{color:var(--quiet)}.status.bad{color:var(--some)}
 .stats3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:8px 0}
 .meter{height:8px;border-radius:5px;background:#141b2c;overflow:hidden;margin-top:5px}
-.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--quiet),var(--some) 55%,var(--drone));transition:width .15s}
+.meter i{display:block;height:100%;width:0;background:#B9C0CE;transition:width .15s}
 .specbox{border-radius:14px;overflow:hidden;border:1px solid var(--line);background:#000}
 .specbox canvas{display:block;width:100%;height:150px}
 .sim{margin:10px 0}.simrow{display:flex;gap:10px;align-items:center;font-size:13px;color:var(--dim);margin:4px 0}.simrow input{flex:1;padding:0}
