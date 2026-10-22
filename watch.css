@@ -12,6 +12,11 @@ html,body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.35 system-u
 #banner.off{background:var(--panel);color:var(--dim);border-color:var(--line)}
 #banner .learn{display:inline-block;margin-left:6px;font-size:11px;letter-spacing:.5px;padding:1px 7px;border-radius:8px;background:var(--accent);color:#04121a;vertical-align:2px}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,.7);background:#3a0c18}50%{box-shadow:0 0 0 10px rgba(255,59,92,0);background:#7a1228}}
+#bannerbox{position:relative}
+#bell{position:absolute;right:6px;top:6px;background:#05070c99;border:0;border-radius:10px;font-size:16px;padding:3px 6px;line-height:1}
+#banner.flash{animation:flash .3s steps(2) 6}
+@keyframes flash{0%{background:#fff;color:#7a1228;border-color:#fff}100%{background:#ff3b5c;color:#fff}}
+#timeline .ev.i{border-style:dashed}#timeline .ev.i b{color:var(--dim);font-weight:400}
 /* map hero */
 #mapbox{position:relative;border-radius:16px;overflow:hidden;border:1px solid var(--line);background:#03050a;min-height:0}
 #map{display:block;width:100%;height:100%;touch-action:none}
@@ -21,7 +26,13 @@ html,body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.35 system-u
 #mapInfo b{color:#fff}#mapInfo .l{color:#ffb547}#mapInfo .t{color:#4cc9ff}#mapInfo .f{color:#ff8fab}
 #mapInfo select{background:#0a0f1b;color:var(--txt);border:1px solid var(--line);border-radius:6px;font-size:11px;padding:1px 3px}
 /* middle row */
-#mid{display:grid;grid-template-columns:108px 1fr;gap:8px;min-height:0}
+#mid{display:grid;grid-template-columns:100px 116px 1fr;gap:6px;min-height:0}
+.flight{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:5px 6px;display:flex;flex-direction:column;min-width:0}
+#flState{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+#flState.on{color:#fff}
+#spark{display:block;width:100%;flex:1;min-height:0}
+#flRpm{background:none;border:0;color:var(--accent);font:600 13px system-ui;text-align:left;padding:0;white-space:nowrap}
+#flRpm small{color:var(--dim);font-weight:400;font-size:10px}
 .hex{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:14px}
 .hex canvas{display:block;width:100%;height:88px}
 #fpLbl{font-size:11px;text-align:center;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px}
@@ -73,3 +84,6 @@ label.chk input{width:20px;height:20px;accent-color:var(--accent)}
 .note{font-size:12px;color:var(--dim);line-height:1.5}
 input[type=file]{display:none}
 #err{color:var(--drone)}
+#cal{margin-top:14px;border-top:1px solid var(--line);padding-top:4px}
+#cState{text-transform:none;letter-spacing:0;color:var(--quiet)}
+.list.cal div{grid-template-columns:28px 1fr 1fr 1.3fr}.list.cal .bad{color:var(--some)}.list.cal .ok{color:var(--quiet)}

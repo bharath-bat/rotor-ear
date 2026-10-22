@@ -1,5 +1,5 @@
 // RotorDetector: the shared Rotor Ear detector + sound fingerprint classifier.
-// Used by the single-phone page (index.html + app.js) and by Phone Mesh Radar (mesh/).
+// Used by the watch post (index.html + watch.js) and by Phone Mesh Radar (mesh/).
 // Passive: it only reads an AnalyserNode. No audio ever leaves the device.
 (function (g) {
   'use strict';
@@ -38,6 +38,64 @@
     return a;
   }
 
+
+  // ---- flight state from the rotor pitch over time ----
+  // Blade-pass pitch follows rotor speed: throttle up (climb, heavier load) raises it, throttle down lowers it.
+  // A moving drone also shifts pitch by Doppler (±v/343: ±3% at 10 m/s), which only *changes* when the
+  // drone passes by, and then the pitch drop coincides with a loudness peak; that is how we tell them apart.
+  const FLIGHT = { climbPct: 0.8, steadyPct: 0.45, swingPct: 1.1, heavyPct: 5, heavyDb: 4 };
+  const lsq = pts => { // [x, y] → slope, intercept, residual std
+    const n = pts.length, mx = pts.reduce((a, p) => a + p[0], 0) / n, my = pts.reduce((a, p) => a + p[1], 0) / n;
+    let sxy = 0, sxx = 0; pts.forEach(p => { sxy += (p[0] - mx) * (p[1] - my); sxx += (p[0] - mx) ** 2; });
+    const b = sxx ? sxy / sxx : 0, a = my - b * mx;
+    return { b, a, sd: Math.sqrt(pts.reduce((s, p) => s + (p[1] - a - b * p[0]) ** 2, 0) / n) };
+  };
+  class FlightTracker {
+    constructor() { this.blades = 2; this.reset(); }
+    reset() { this.h = []; this.spark = []; this.base = null; this.state = ''; this.cand = ''; this.candT = 0; this.lastOn = 0; }
+    // now ms, f = refined pitch Hz (0 = no comb this frame), e = harmonic band energy dB, on = a drone is detected
+    update(now, f, e, on) {
+      if (!on) { if (now - this.lastOn > 8000 && this.h.length) this.reset(); this.state = ''; return null; }
+      this.lastOn = now;
+      if (f > 0) this.h.push([now, Math.log(f) * 100, e]); // log-pitch in "percent" units
+      while (this.h.length && now - this.h[0][0] > 6000) this.h.shift();
+      const H = this.h, last = k => H.filter(x => now - x[0] <= k);
+      if (!H.length) return null;
+      const r = last(500), fs = Math.exp((r.length ? median(r.map(x => x[1])) : H[H.length - 1][1]) / 100);
+      if (!this.spark.length || now - this.spark[this.spark.length - 1][0] >= 250) { this.spark.push([now, fs]); if (this.spark.length > 80) this.spark.shift(); }
+      const w = last(2500), out = { f: fs, rpm: fs * 60 / this.blades, rate: 0, dbRate: 0, state: this.state, base: this.base && this.base.f, spark: this.spark };
+      if (w.length < 15 || now - w[0][0] < 2000) return out;
+      const p = lsq(w.map(x => [(x[0] - now) / 1000, x[1]])), l = lsq(w.map(x => [(x[0] - now) / 1000, x[2]]));
+      out.rate = p.b; out.dbRate = l.b; // %/s and dB/s
+      // fly-by test: over the last ~5 s, loudness rose then fell (a peak) while the pitch fell
+      const w5 = last(5000); let flyby = false;
+      if (w5.length > 30 && now - w5[0][0] > 4000) {
+        const T = w5.map(x => (x[0] - now) / 1000), mt = T.reduce((a, b) => a + b, 0) / T.length;
+        const q = lsq(w5.map((x, i) => [(T[i] - mt) ** 2, x[2]])); // dB ≈ a + b·(t − mid)²
+        const pp = lsq(w5.map((x, i) => [T[i], x[1]]));
+        // …or the pitch is falling right after the drone got clearly louder (it is passing us now)
+        const ago = w5.filter(x => now - x[0] > 3500).map(x => x[2]), rec = last(1000).map(x => x[2]);
+        const rose = ago.length > 3 && median(rec) - median(ago) > 3;
+        flyby = (q.b < -0.6 || rose) && pp.b < -FLIGHT.climbPct * 0.7;
+      }
+      const steady = Math.abs(p.b) < FLIGHT.steadyPct;
+      if (steady && p.sd < 0.5 && !this.base && now - H[0][0] > 2500) this.base = { f: fs, e: median(w.map(x => x[2])) };
+      let st;
+      if (p.sd > FLIGHT.swingPct) st = 'Maneuvering';
+      else if (flyby) st = 'Passing by (Doppler)';
+      else if (p.b > FLIGHT.climbPct) st = 'Climbing';
+      else if (p.b < -FLIGHT.climbPct) st = 'Descending';
+      else if (steady && this.base && (fs / this.base.f - 1) * 100 > FLIGHT.heavyPct && Math.abs(median(w.map(x => x[2])) - this.base.e) < FLIGHT.heavyDb) st = 'Heavy / loaded';
+      else if (steady) st = 'Hovering';
+      else st = this.state || 'Hovering';
+      // a new state must hold for 0.7 s before it is shown
+      if (st !== this.cand) { this.cand = st; this.candT = now; }
+      if (st !== this.state && (now - this.candT > 700 || !this.state)) this.state = st;
+      out.state = this.state;
+      return out;
+    }
+  }
+
   class RotorDetector {
     constructor(analyser) {
       this.an = analyser;
@@ -48,6 +106,7 @@
       this.pre = new Float64Array(this.bins + 1);
       this.hist = []; this.eh = []; this.fp = []; this.onset = 0; this.probs = null; this.lprobs = null; this.cap = null; this.conf = 0; this.state = 'quiet'; this.since = 0;
       this.learned = []; this.useLearned = true; // taught samples: [{tag, x}]
+      this.flight = new FlightTracker();
       this.out = { conf: 0, state: 'quiet', f0: 0, hits: 0, e: -120, level: -120, cls: null, feat: null };
     }
     // Local noise floor: mean dB of neighbouring bins (centre excluded), via prefix sums.
@@ -237,8 +296,8 @@
       if (audible && best.hits >= 3) {
         if (!this.fp.length) this.onset = now;
         const fr = Object.assign({ t: now }, this.frameFeatures(best.f0));
-        this.fp.push(fr); if (this.cap) this.cap.push(fr);
-      }
+        this.fp.push(fr); if (this.cap) this.cap.push(fr); this.lastF = fr.f;
+      } else this.lastF = 0;
       while (this.fp.length && now - this.fp[0].t > FP_MS) this.fp.shift();
       let cls = null;
       if (f0 && st !== 'quiet') cls = this.classify(now, f0Med);
@@ -248,6 +307,8 @@
       Object.assign(this.out, { conf: Math.round(c), state: shown, f0, hits: Math.round(hMean), level: Math.round(level),
         e: f0 ? +this.avgEnergy(this.bandEnergy(f0)).toFixed(1) : (this.eh.length = 0, -120),
         cls, feat: cls ? cls.x : null });
+      const fOk = f0 && this.lastF && Math.abs(this.lastF - f0Med) / f0Med < 0.04;
+      this.out.flight = this.flight.update(now, fOk ? this.lastF : 0, this.out.e, shown === 'drone' || (shown === 'some' && this.flight.state !== ''));
       return this.out;
     }
   }
@@ -278,5 +339,5 @@
     return gn;
   }
 
-  g.RotorEar = { RotorDetector, makeAnalyser, syntheticDrone, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
+  g.RotorEar = { RotorDetector, FlightTracker, FLIGHT, makeAnalyser, syntheticDrone, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
 })(window);

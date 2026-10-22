@@ -25,7 +25,7 @@
       <div class="k" style="margin-top:8px">Share this link with the other phones:</div>
       <div class="share"><input id="shareUrl" readonly><button class="btn sm" id="copyBtn">Copy</button></div></div>
     <button class="big" id="beNode">🎙️ This phone is a listening node</button>
-    <button class="big alt" id="beMap">🗺️ Open the map</button>
+    <button class="big alt" id="beMap">🗺️ Open the map (watch post)</button>
     <a class="btn block" id="simLink">🧪 Demo: simulate 4 nodes + a moving drone</a>
   </section>
 
@@ -50,15 +50,6 @@
     <p class="note">Sends ~8×/sec: confidence, pitch (Hz) and harmonic band energy (dB). Never audio. Listen-only.</p>
   </section>
 
-  <!-- map view -->
-  <section id="map" hidden>
-    <div id="mBanner" class="banner off">WAITING FOR NODES<small>open the link on the listening phones</small></div>
-    <div class="status" id="mStatus">starting…</div>
-    <div class="field"><canvas id="mCanvas"></canvas><div class="hint">drag the pins to where the phones really are · grid = 1 m</div></div>
-    <div id="mNodes" class="nodes"></div>
-    <div class="status" id="mErr"></div>
-    <div class="share"><input id="mShare" readonly><button class="btn sm" id="mCopy">Copy node link</button></div>
-  </section>
 </div>
 <script src="peerjs.min.js"></script>
 <script src="../detector.js"></script>

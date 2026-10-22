@@ -19,11 +19,13 @@
   };
 
   // ---------------- what a node sends (numbers only) ----------------
-  const telemetry = (o, key, name, p, ev) => {
+  const telemetry = (o, key, name, p, ev, on) => {
     const m = { t: 's', k: key, n: name, c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state };
     if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; m.fr = +o.cls.raw.f0.toFixed(2); if (o.cls.learned) m.lr = 1; }
+    if (o.flight && o.flight.state) m.fs = o.flight.state;
     if (p) m.p = p;
     if (ev && ev.length) m.ev = ev.map(t => +t.toFixed(2));
+    if (on && on.length) m.on = on.map(([t, v]) => [+t.toFixed(2), +v.toFixed(1)]); // clap onsets: [time, peak dBFS]
     return m;
   };
 
@@ -37,14 +39,17 @@
     await workletLoaded.get(ctx);
     const HARM = 3, bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 600; bp.Q.value = 6;
     const w = new AudioWorkletNode(ctx, 'rotor-envelope', { processorOptions: { hold: 40, gap: 60, tau: 0.005 } }), sink = ctx.createGain(); sink.gain.value = 0;
-    src.connect(bp); bp.connect(w); w.connect(sink); sink.connect(ctx.destination);
-    let off = null, events = [];
+    const wo = new AudioWorkletNode(ctx, 'rotor-onset'); // raw input → clap onsets for calibration
+    src.connect(bp); bp.connect(w); w.connect(sink); src.connect(wo); wo.connect(sink); sink.connect(ctx.destination);
+    let off = null, events = [], onsets = [];
     const sync = () => { const ts = ctx.getOutputTimestamp && ctx.getOutputTimestamp(); off = ts && ts.contextTime > 0 ? ts.performanceTime - ts.contextTime * 1000 : performance.now() - ctx.currentTime * 1000; };
     sync(); setInterval(sync, 2000);
     w.port.onmessage = e => events.push(e.data.t * 1000 + off);
+    wo.port.onmessage = e => onsets.push([e.data.t * 1000 + off, e.data.v]);
     return {
       setF0(f) { if (f > 0) bp.frequency.setTargetAtTime(f * HARM, ctx.currentTime, 0.1); },
-      take() { const a = events; events = []; return a; }
+      take() { const a = events; events = []; return a; },
+      takeOnsets() { const a = onsets; onsets = []; return a; }
     };
   }
 
@@ -130,12 +135,12 @@
 
   // ---------------- MeshModel: everything the map knows and estimates ----------------
   class MeshModel {
-    constructor(saved) { this.saved = saved || {}; this.nodes = new Map(); this.truth = null; this.truthAt = 0; this.est = {}; this.trail = []; this.hold = 0; this.errs = { L: [], T: [], F: [] }; this.hErr = []; }
+    constructor(saved, cal) { this.saved = saved || {}; this.cal = cal || {}; this.calSpot = null; this.nodes = new Map(); this.truth = null; this.truthAt = 0; this.est = {}; this.trail = []; this.hold = 0; this.errs = { L: [], T: [], F: [] }; this.hErr = []; }
     node(key, d) {
       let n = this.nodes.get(key);
       if (!n) {
         const i = this.nodes.size;
-        n = { key, label: d && /^sim [A-P]$/.test(d.n || '') ? d.n.slice(4) : LABELS[i % 16], color: COLORS[i % 8], pos: this.saved[key] || (d && d.p ? d.p.slice() : DEFAULT_POS[i % 8].slice()), es: null, hist: [], ev: [], sync: [], off: null, rtt: null, c: 0, last: 0 };
+        n = { key, label: d && /^sim [A-P]$/.test(d.n || '') ? d.n.slice(4) : LABELS[i % 16], color: COLORS[i % 8], pos: this.saved[key] || (d && d.p ? d.p.slice() : DEFAULT_POS[i % 8].slice()), es: null, hist: [], ev: [], on: [], sync: [], off: null, rtt: null, c: 0, last: 0 };
         this.nodes.set(key, n);
       }
       return n;
@@ -151,12 +156,20 @@
       if (d.t !== 's' || !d.k) return null;
       const n = this.node(d.k, d);
       if (!this.saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
-      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, last: now });
-      if (d.f > 0 && d.e > -100) n.es = n.es == null ? d.e : n.es + 0.5 * (d.e - n.es); else n.es = null;
-      if (d.f > 0) n.hist.push([now, d.e, d.fr || d.f]); while (n.hist.length && now - n.hist[0][0] > 2500) n.hist.shift();
-      if (d.ev && n.off != null) d.ev.forEach(t => n.ev.push(t + n.off));
+      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, fs: d.fs || '', last: now });
+      // calibration (if any): this phone's input latency (ms) and mic gain (dB) relative to the others
+      const cal = this.cal[d.k] || { lat: 0, gain: 0 }, e = d.e - cal.gain;
+      if (d.f > 0 && d.e > -100) n.es = n.es == null ? e : n.es + 0.5 * (e - n.es); else n.es = null;
+      if (d.f > 0) n.hist.push([now, e, d.fr || d.f]); while (n.hist.length && now - n.hist[0][0] > 2500) n.hist.shift();
+      if (d.ev && n.off != null) d.ev.forEach(t => n.ev.push(t + n.off - cal.lat));
+      if (d.on && n.off != null) d.on.forEach(([t, v]) => n.on.push([t + n.off, v])); // raw (uncorrected) clap onsets, map clock
       while (n.ev.length && now - n.ev[0] > 5000) n.ev.shift();
+      while (n.on.length && now - n.on[0][0] > 15000) n.on.shift();
       return n;
+    }
+    setCal(cal) { // new calibration: forget data measured with the old one
+      this.cal = cal; this.errs = { L: [], T: [], F: [] }; this.hErr = [];
+      this.nodes.forEach(n => { n.ev = []; n.es = null; n.hist = []; });
     }
     // --- estimators -----------------------------------------------------------
     // Loudness: P_i = S / r_i²  → residual spread of (ln P_i + ln r_i²) at a candidate point.
@@ -233,14 +246,16 @@
           const lc = this.loudCost(A), tc = this.tdoaCost(P), pT = this.gridMin(A, tc);
           // Sanity gate: if arrival times put the drone far from where loudness does, the phones' timing is
           // probably off (uncalibrated mic latency), so fall back to loudness instead of trusting the lines.
-          this.tdoaOk = Math.hypot(pT[0] - pL[0], pT[1] - pL[1]) < 2.5;
+          // Phones calibrated with small residuals are trusted without this check.
+          this.calTrusted = A.every(n => this.cal[n.key] && (this.cal[n.key].resMs == null || this.cal[n.key].resMs < 3));
+          this.tdoaOk = this.calTrusted || Math.hypot(pT[0] - pL[0], pT[1] - pL[1]) < 2.5;
           sm('T', pT); sm('F', this.tdoaOk ? this.gridMin(A, (x, y) => tc(x, y) + lc(x, y) / 0.03) : pL);
         } else { sm('T', null); sm('F', null); this.tdoaOk = false; }
         const shown = E.F || E.L; this.trail.push(shown.slice()); if (this.trail.length > 60) this.trail.shift();
         hd = this.heading(A, shown);
       } else if (banner !== 'drone') { sm('L', null); sm('T', null); sm('F', null); if (this.trail.length) this.trail.shift(); }
       // solo / per-node trend arrows (approaching vs moving away) for every live node
-      live.forEach(n => { n.trendDB = slope(n.hist.map(h => [h[0], h[1]])); });
+      live.forEach(n => { n.trendDB = n.hist.length && n.hist[n.hist.length - 1][0] - n.hist[0][0] > 2000 ? slope(n.hist.map(h => [h[0], h[1]])) : 0; }); // needs 2 s of pitch: no fake "approaching" at onset
       const tr = this.truth && now - this.truthAt < 3000 ? this.truth : null;
       const errOf = (k, p) => { const L = this.errs[k]; if (p && tr) L.push([now, Math.hypot(p[0] - tr.x, p[1] - tr.y)]); while (L.length && now - L[0][0] > 10000) L.shift(); return L.length ? +(L.reduce((a, e) => a + e[1], 0) / L.length).toFixed(2) : null; };
       const err = { L: errOf('L', E.L), T: errOf('T', E.T), F: errOf('F', E.F) };
@@ -249,10 +264,10 @@
       while (this.hErr.length && now - this.hErr[0][0] > 10000) this.hErr.shift();
       const hm = k => this.hErr.length ? Math.round(this.hErr.reduce((a, e) => a + e[k], 0) / this.hErr.length) : null;
       return this.state = {
-        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp,
+        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs,
           age: now - n.last, trendDB: n.trendDB || 0, rtt: n.rtt, synced: n.off != null, evRate: n.ev.filter(t => t > now - 3000).length / 3 })),
-        agree: A.map(n => n.key), voters: voters.length, banner, label, learned: tn.some(n => n.lr), solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
-        est: E.F || E.L || null, estL: E.L, estT: E.T, estF: E.F, tdoaOk: !!(E.T && this.tdoaOk), trail: this.trail.slice(),
+        agree: A.map(n => n.key), voters: voters.length, banner, label, learned: tn.some(n => n.lr), flight: (() => { const c = {}; tn.forEach(n => { if (n.fs) c[n.fs] = (c[n.fs] || 0) + 1; }); return Object.keys(c).sort((a, b) => c[b] - c[a])[0] || ''; })(), solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
+        est: E.F || E.L || null, estL: E.L, estT: E.T, estF: E.F, tdoaOk: !!(E.T && this.tdoaOk), calTrusted: !!(E.T && this.calTrusted), calSpot: this.calSpot, trail: this.trail.slice(),
         pairs: P.map(q => ({ a: q.a.key, b: q.b.key, dt: +q.dt.toFixed(2), sd: +q.sd.toFixed(2), n: q.n })),
         heading: hd && Math.hypot(...hd.v) > 0.05 ? hd.v : null, truth: tr, err, headErr: { both: hm(1), loud: hm(2), doppler: hm(3) }
       };
@@ -300,7 +315,7 @@
         if (inb || outb) for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4, r0 = 90 * dpr, r1 = 54 * dpr, [s0, s1] = inb ? [r0, r1] : [r1, r0];
           arrow(x + s0 * Math.cos(a), y + s0 * Math.sin(a), x + s1 * Math.cos(a), y + s1 * Math.sin(a), inb ? '#ff3b5c' : '#90a4c8', 3 * dpr); }
         g.fillStyle = '#fff'; g.font = `bold ${14 * dpr}px system-ui`; g.textAlign = 'center';
-        g.fillText(hot ? (n.cl || 'DRONE') + (inb ? ' · approaching' : outb ? ' · moving away' : ' · steady') : n.st === 'hum' ? 'not a drone' : 'hum…', x, y - 104 * dpr);
+        g.fillText(hot ? (n.cl || 'DRONE') + (inb ? ' · approaching' : outb ? ' · moving away' : ' · same distance') : n.st === 'hum' ? 'not a drone' : 'hum…', x, y - 104 * dpr);
         g.font = `${11 * dpr}px system-ui`; g.fillStyle = '#9fb0d0'; g.fillText('one phone: no direction · add phones for a position', x, y + 120 * dpr); g.textAlign = 'left';
       }
     }
@@ -316,6 +331,7 @@
       for (let m = Math.ceil(wx0); m <= wx1; m++) { const [x] = W2P(m, 0); g.strokeStyle = m % 5 ? '#0e1424' : '#1a2238'; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); if (m % 2 === 0 && !S.solo) g.fillText(m + 'm', x + 2, H - 4 * dpr); }
       for (let m = Math.ceil(wy0); m <= wy1; m++) { const [, y] = W2P(0, m); g.strokeStyle = m % 5 ? '#0e1424' : '#1a2238'; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); if (m % 2 === 0 && !S.solo) g.fillText(m + 'm', 3 * dpr, y - 2); }
       (S.pairs || []).forEach(q => { const a = byKey(q.a), b = byKey(q.b); if (a && b) hyperbola(a, b, q.dt, a.color + 'aa', dpr); });
+      if (S.calSpot) { const [x, y] = W2P(S.calSpot[0], S.calSpot[1]), ph = 1 + 0.3 * Math.sin(performance.now() / 120); g.strokeStyle = '#ffd166'; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 24 * dpr * ph, 0, 7); g.stroke(); g.font = `${22 * dpr}px system-ui`; g.textAlign = 'center'; g.fillText('👏', x, y - 26 * dpr); g.textAlign = 'left'; }
       if (S.truth) { const [x, y] = W2P(S.truth.x, S.truth.y); g.strokeStyle = '#ffffffaa'; g.lineWidth = 2 * dpr; g.setLineDash([3 * dpr, 3 * dpr]); g.beginPath(); g.arc(x, y, 9 * dpr, 0, 7); g.stroke(); g.setLineDash([]); g.fillStyle = '#ffffffaa'; g.fillText('true', x - 10 * dpr, y + 22 * dpr); }
       const T = S.trail || []; for (let i = 1; i < T.length; i++) { const [a, b] = W2P(T[i - 1][0], T[i - 1][1]), [c, d] = W2P(T[i][0], T[i][1]); g.strokeStyle = `rgba(255,59,92,${i / T.length * 0.8})`; g.lineWidth = 3 * dpr * i / T.length; g.beginPath(); g.moveTo(a, b); g.lineTo(c, d); g.stroke(); }
       if (S.estL && S.estF && opts.showLoud !== false) { const [x, y] = W2P(S.estL[0], S.estL[1]); g.strokeStyle = '#ffb547aa'; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 6 * dpr, 0, 7); g.stroke(); }
@@ -358,9 +374,72 @@
   // are physical), at loudness ∝ 1/r², plus its own noise. Phone imperfections are simulated on the
   // reported numbers: a random clock offset (the map must remove it by clock sync), per-event timing
   // jitter, and an optional fixed per-phone latency bias.
+
+  // ---------------- Calibrator: clap next to the phones, solve per-phone latency + gain ----------------
+  // A clap at a known spot k (next to a phone pin) reaches phone i at  t_ik = T_k + r_ik/c + L_i  (map clock,
+  // after clock sync) and is heard at  dB_ik = S_k − 20·log10 r_ik + G_i.  Unknowns: clap times T_k and levels
+  // S_k, and each phone's input latency L_i and mic gain G_i (both relative: Σ L = Σ G = 0). With one clap
+  // the system is exactly determined (no residual); clapping next to every phone in turn over-determines it,
+  // so the per-phone residuals (ms, dB) show whether the pins and the solution are right.
+  const NEAR = 0.3; // m: "next to the phone"
+  function solveCal(meas, keys) {
+    const K = meas.length, fit = (val, use) => { // two-way additive fit: v_ik ≈ A_k + B_i, Σ B = 0
+      const A = new Array(K).fill(0), B = {}; keys.forEach(k => B[k] = 0);
+      for (let it = 0; it < 40; it++) {
+        meas.forEach((m, k) => { const r = keys.filter(i => use(m, i)); A[k] = r.reduce((a, i) => a + val(m, i) - B[i], 0) / (r.length || 1); });
+        keys.forEach(i => { const r = meas.map((m, k) => [m, k]).filter(([m]) => use(m, i)); B[i] = r.reduce((a, [m, k]) => a + val(m, i) - A[k], 0) / (r.length || 1); });
+        const mb = keys.reduce((a, i) => a + B[i], 0) / keys.length; keys.forEach(i => B[i] -= mb);
+      }
+      const res = {}; keys.forEach(i => { const r = meas.map((m, k) => [m, k]).filter(([m]) => use(m, i)); res[i] = K > 1 && r.length ? Math.sqrt(r.reduce((a, [m, k]) => a + (val(m, i) - A[k] - B[i]) ** 2, 0) / r.length) : null; });
+      return { B, res };
+    };
+    const r = (m, i) => m.spot.key === i ? NEAR : Math.max(NEAR, Math.hypot(m.pos[i][0] - m.spot.pos[0], m.pos[i][1] - m.spot.pos[1]));
+    const lat = fit((m, i) => m.obs[i][0] - r(m, i) / C_SOUND * 1000, (m, i) => !!m.obs[i]);
+    // gain: skip the clapped-at phone itself when there are other claps (a clap at 30 cm can clip the mic)
+    const gain = fit((m, i) => m.obs[i][1] + 20 * Math.log10(r(m, i)), (m, i) => !!m.obs[i] && (K === 1 || m.spot.key !== i));
+    const out = {}; keys.forEach(i => out[i] = { lat: +lat.B[i].toFixed(2), gain: +gain.B[i].toFixed(2), resMs: lat.res[i] == null ? null : +lat.res[i].toFixed(2), resDb: gain.res[i] == null ? null : +gain.res[i].toFixed(2), claps: K, t: Date.now() });
+    return out;
+  }
+  class Calibrator {
+    constructor(model, onDone) { this.m = model; this.onDone = onDone; this.active = false; this.msg = ''; }
+    start(mode, spotKey, now = performance.now()) {
+      const live = [...this.m.nodes.values()].filter(n => now - n.last < STALE_MS).sort((a, b) => a.label < b.label ? -1 : 1);
+      if (live.length < 2) { this.msg = 'Need at least 2 phones listening.'; return false; }
+      this.keys = live.map(n => n.key); this.spots = mode === 'quick' ? [spotKey || this.keys[0]] : this.keys.slice();
+      Object.assign(this, { mode, k: 0, meas: [], since: now, active: true }); this.prompt(); return true;
+    }
+    get spot() { return this.active ? this.spots[this.k] : null; }
+    label(k) { const n = this.m.nodes.get(k); return n ? n.label : '?'; }
+    prompt(extra) {
+      const n = this.m.nodes.get(this.spot); this.m.calSpot = n ? n.pos.slice() : null;
+      this.msg = (extra ? extra + ' ' : '') + `Clap once, sharply, right next to phone ${this.label(this.spot)}` + (this.spots.length > 1 ? ` (${this.k + 1} of ${this.spots.length})` : '') + '.';
+    }
+    cancel() { this.active = false; this.m.calSpot = null; this.msg = 'Calibration cancelled.'; }
+    poll(now = performance.now()) {
+      if (!this.active) return;
+      const per = {}; this.keys.forEach(k => { const n = this.m.nodes.get(k); per[k] = n ? n.on.filter(o => o[0] > this.since) : []; });
+      const all = [].concat(...Object.values(per)); if (!all.length) return;
+      const first = Math.min(...all.map(o => o[0]));
+      if (now - first < 900) return; // let every phone's report arrive
+      const obs = {}; this.keys.forEach(k => { const o = per[k].find(o => o[0] >= first - 20 && o[0] <= first + 300); if (o) obs[k] = o; });
+      const got = Object.keys(obs).length;
+      if (got < this.keys.length) { this.since = first + 20; this.prompt(`Only ${got} of ${this.keys.length} phones heard that.`); return; }
+      const pos = {}; this.keys.forEach(k => pos[k] = this.m.nodes.get(k).pos.slice());
+      this.meas.push({ spot: { key: this.spot, pos: pos[this.spot] }, pos, obs });
+      this.since = Math.max(...Object.values(obs).map(o => o[0])) + 400; this.k++;
+      if (this.k < this.spots.length) { this.prompt('✓ Got it.'); return; }
+      this.active = false; this.m.calSpot = null;
+      const cal = solveCal(this.meas, this.keys); this.m.setCal(cal); this.result = cal;
+      const worst = Math.max(...Object.values(cal).map(c => c.resMs || 0));
+      this.msg = this.spots.length > 1 ? `Calibrated ${this.keys.length} phones. Worst timing residual ${worst.toFixed(1)} ms` + (worst < 3 ? ' ✓ arrival times trusted.' : ' — re-check the pin positions and clap again.')
+        : `Calibrated ${this.keys.length} phones from one clap (no residual check: clap next to each phone for that).`;
+      this.onDone && this.onDone(cal);
+    }
+  }
+
   class SimEngine {
     constructor(ctx, o) {
-      this.o = Object.assign({ n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, clockOffMs: 400, jitterMs: 1, biasMs: 0 }, o);
+      this.o = Object.assign({ n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, clockOffMs: 400, jitterMs: 1, biasMs: 0, gainDb: 0 }, o);
       this.ctx = ctx; this.t = 0; this.drone = null;
       const s = this.o.side, POS = [[0, 0], [s, 0], [s, s], [0, s]].slice(0, this.o.n);
       const src = RotorEar.syntheticDrone(ctx, 205 + Math.random() * 20);
@@ -374,6 +453,8 @@
         const node = { i, p, an, bus, nz, det, dl, g, key: 'sim' + 'ABCD'[i] + randKey(3), off, bias, clock: () => performance.now() + off, ev: [], tap: null };
         TimingTap(ctx, bus).then(tp => node.tap = tp);
         node.eventsOut = () => node.tap ? node.tap.take().map(t => t + off + bias + gauss() * this.o.jitterMs) : [];
+        node.onsetsOut = () => node.tap ? node.tap.takeOnsets().map(([t, v]) => [t + off + bias + gauss() * this.o.jitterMs, v]) : [];
+        node.gainDb = gauss() * this.o.gainDb; bus.gain.value = Math.pow(10, node.gainDb / 20); // mic sensitivity spread
         return node;
       });
       this.src = src;
@@ -395,7 +476,18 @@
         const out = n.det.step(now); if (n.tap) n.tap.setF0(out.f0);
       });
     }
-    messages() { return this.nodes.map(n => telemetry(n.det.out, n.key, 'sim ' + 'ABCD'[n.i], n.p, n.eventsOut())); }
+    messages() { return this.nodes.map(n => telemetry(n.det.out, n.key, 'sim ' + 'ABCD'[n.i], n.p, n.eventsOut(), n.onsetsOut())); }
+    // a hand clap at (x, y): a 2 ms noise burst, physically delayed (r/c) and attenuated (1/r) to every phone
+    clap(x, y) {
+      const ctx = this.ctx, sr = ctx.sampleRate, b = ctx.createBuffer(1, Math.round(sr * 0.06), sr), d = b.getChannelData(0);
+      for (let i = 0; i < d.length; i++) { const t = i / sr; d[i] = (Math.random() * 2 - 1) * Math.min(1, t / 0.0005) * Math.exp(-t / 0.008); }
+      const t0 = ctx.currentTime + 0.05;
+      this.nodes.forEach(n => {
+        const r = Math.hypot(x - n.p[0], y - n.p[1]), s = ctx.createBufferSource(), dl = ctx.createDelay(1), g = ctx.createGain();
+        s.buffer = b; dl.delayTime.value = r / C_SOUND; g.gain.value = 1.5 / Math.max(0.3, r);
+        s.connect(dl); dl.connect(g); g.connect(n.bus); s.start(t0); s.onended = () => setTimeout(() => g.disconnect(), 1200);
+      });
+    }
     stop() { this.src.stop(); this.nodes.forEach(n => { n.nz.stop(); n.bus.disconnect(); }); }
   }
   // In-page loopback "link" for the watch post's sim mode: same messages, a simulated 5–40 ms network,
@@ -407,5 +499,5 @@
     ping(ts) { setTimeout(() => this.send({ t: 'pong', k: this.node.key, ts, tn: this.node.clock() }), this.net()); }
   }
 
-  window.RotorMesh = { PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
+  window.RotorMesh = { NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
 })();
