@@ -21,7 +21,8 @@
   // ---------------- what a node sends (numbers only) ----------------
   const telemetry = (o, key, name, p, ev, on) => {
     const m = { t: 's', k: key, n: name, c: o.conf, f: Math.round(o.f0 * 10) / 10, e: o.e, st: o.state };
-    if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; m.fr = +o.cls.raw.f0.toFixed(2); if (o.cls.learned) m.lr = 1; if (o.cls.why) m.wy = o.cls.why; }
+    if (o.cls) { m.cl = o.cls.label; m.cp = o.cls.conf; m.fr = +o.cls.raw.f0.toFixed(2); if (o.cls.learned) m.lr = 1; if (o.cls.why) m.wy = o.cls.why; m.fx = o.cls.x; }
+    else if (o.snd) { const n = o.snd; m.sn = [n.comb, n.jump, n.spread, n.mx, n.lo, n.lf, n.pk]; } // no fingerprint: what it sounded like (for the reason in words)
     if (o.flight && o.flight.state) m.fs = o.flight.state;
     const a = o.alt; // a second sound at another pitch (two drones at once): its own numbers
     if (a) { m.s2 = { c: a.conf, f: Math.round(a.f0 * 10) / 10, e: a.e, st: a.state }; if (a.cls) Object.assign(m.s2, { cl: a.cls.label, cp: a.cls.conf, fr: +a.cls.raw.f0.toFixed(2) }); if (a.flight && a.flight.state) m.s2.fs = a.flight.state; }
@@ -160,7 +161,7 @@
       if (d.t !== 's' || !d.k) return null;
       const n = this.node(d.k, d);
       if (!this.saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
-      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', geo: d.g || null, nf: d.nf == null ? null : d.nf, hr: d.hr || null, last: now });
+      Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', fx: d.fx || null, fr: d.fr || 0, sn: d.sn || null, geo: d.g || null, nf: d.nf == null ? null : d.nf, hr: d.hr || null, last: now });
       // calibration (if any): this phone's input latency (ms) and mic gain (dB) relative to the others
       const cal = this.cal[d.k] || { lat: 0, gain: 0 }, prev = n.srcs || [];
       // each sound this phone reports (the lead one, plus d.s2 when it hears two drones) keeps its own smoothed loudness and
@@ -269,6 +270,19 @@
         T.hd = this.heading(A, shown);
       } else if (now >= T.hold) { sm('L', null); sm('F', null); sm('T', null); if (T.trail.length) T.trail.shift(); }
     }
+    // Height: phones sit on the ground (z = 0), so a 3D fit over the last ~20 s of a track can find z. Every 0.5 s a snapshot
+    // keeps what the phones hear (loudness, arrival-time pairs, pitch); once a second each candidate height is scored over all
+    // snapshots: per snapshot the best spot (x, y) at that height (loudness ratios + arrival times), plus a source loudness
+    // that follows one straight line in time over the pass (a drone passing overhead gets louder by (d² + z²) / z²: that is what pins z down), plus Doppler: the
+    // pitch drop at each phone is sharper the closer the drone passes (rmin = speed × the drop's time scale).
+    height(T, now) {
+      const S = T.snap || (T.snap = []), A = T.A.filter(n => n.es != null), xy = T.est.F || T.est.L;
+      if (A.length >= 3 && xy && T.voters && now - (T.snapAt || 0) >= 500) { T.snapAt = now;
+        S.push({ t: now, xy: xy.slice(), ph: A.map(n => [n.pos[0], n.pos[1], n.es / 10 * Math.LN10, n.f, n.key]), P: T.tdoaOk ? T.P.map(q => [q.a.pos, q.b.pos, q.dt, q.sd]) : [] }); }
+      while (S.length && now - S[0].t > 20000) S.shift();
+      if (now - (T.hAt || 0) < 1000) return; T.hAt = now;
+      T.h = heightFit(S);
+    }
     update(now = performance.now()) {
       const live = [...this.nodes.values()].filter(n => now - n.last < STALE_MS);
       // every sound each phone reports, as a view of its node (position, clock, arrival times) carrying that sound's numbers
@@ -283,7 +297,7 @@
         T.A = take(v.f); this.tracks.push(T);
       }
       this.tracks = this.tracks.filter(T => T.A.length || now < T.hold || now - T.seen < 3000);
-      this.tracks.forEach(T => this.solve(T, now));
+      this.tracks.forEach(T => { this.solve(T, now); this.height(T, now); });
       // the lead track drives the single-drone fields: the oldest confirmed drone, else the sound the most sure phone hears
       const held = this.tracks.filter(T => now < T.hold).sort((a, b) => a.id - b.id);
       const L = held[0] || this.tracks.find(T => ents.length && T.A.includes(ents[0])) || null, A = L ? L.A : [], E = L ? L.est : {};
@@ -300,7 +314,7 @@
       const hm = k => this.hErr.length ? Math.round(this.hErr.reduce((a, e) => a + e[k], 0) / this.hErr.length) : null;
       const head = T => T.hd && Math.hypot(...T.hd.v) > 0.05 ? T.hd.v : null, P = L ? L.P : [];
       return this.state = {
-        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, fs: n.fs, wy: n.wy, geo: n.geo, nf: n.nf, hr: n.hr,
+        nodes: [...this.nodes.values()].map(n => ({ key: n.key, label: n.label, color: n.color, pos: n.pos, name: n.name, c: n.c, f: n.f, e: n.e, st: n.st, cl: n.cl, cp: n.cp, lr: n.lr, fs: n.fs, wy: n.wy, fx: n.fx, fr: n.fr, sn: n.sn, geo: n.geo, nf: n.nf, hr: n.hr,
           age: now - n.last, trendDB: n.trendDB || 0, rtt: n.rtt, synced: n.off != null, evRate: n.ev.filter(t => t > now - 3000).length / 3 })),
         agree: A.map(n => n.key), voters: L ? L.voters : 0, banner, label: L ? L.label : '', score: L ? L.score : 0, learned: L ? L.learned : 0, demo: live.some(n => /^sim /.test(n.name || '')), flight: L ? L.flight : '', solo: live.length === 1 ? live[0].key : null, f0: A.length ? A[0].f : 0,
         est: E.F || E.L || null, estL: E.L || null, estT: E.T || null, estF: E.F || null, tdoaOk: !!(E.T && L.tdoaOk), calTrusted: !!(E.T && L.calTrusted), calSpot: this.calSpot, trail: L ? L.trail.slice() : [],
@@ -308,9 +322,97 @@
         heading: L ? head(L) : null, truth: tr, err, headErr: { both: hm(1), loud: hm(2), doppler: hm(3) },
         // every drone track (two drones at once): its own class, confidence, phones agreeing, flight, position and colour slot
         lead: L ? L.id : 0, tracks: this.tracks.map(T => ({ id: T.id, slot: T.slot, f0: T.f, hot: now < T.hold, est: T.est.F || T.est.L || null, trail: T.trail.slice(), label: T.label, score: T.score, voters: T.voters, agree: T.A.map(n => n.key), flight: T.flight, heading: head(T), tdoaOk: !!(T.est.T && T.tdoaOk),
+          h: T.h || null, herr: T.h && T.h.ok && near(T.est.F || T.est.L || [0, 0]) && near(T.est.F || T.est.L || [0, 0]).z != null ? +(T.h.z - near(T.est.F || T.est.L).z).toFixed(1) : null,
           err: (T.est.F || T.est.L) && truths.length ? +Math.hypot((T.est.F || T.est.L)[0] - near(T.est.F || T.est.L).x, (T.est.F || T.est.L)[1] - near(T.est.F || T.est.L).y).toFixed(2) : null }))
       };
     }
+  }
+
+  // ---------------- height fit (see MeshModel.height) ----------------
+  // → { ok, z, lo, hi (m, a 1-sigma band), n (snapshots), dop (m, Doppler alone, or null), why (when not ok) }
+  const HZ = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 23, 26, 30, 35, 40, 50, 60];
+  const SW = 0.173, SB = 0.345; // loudness noise per phone (0.75 dB) and drift of the drone's own loudness over a pass (1.5 dB), ln units
+  function heightFit(S) {
+    if (S.length < 8) return { ok: false, why: 'measuring', n: S.length };
+    // phones in a line (or all in one spot) can't tell height from sideways distance: the same distances fit a whole circle
+    const pts = {}; S.forEach(s => s.ph.forEach(p => pts[p[4]] = p)); const P = Object.values(pts), mx = P.reduce((a, p) => a + p[0], 0) / P.length, my = P.reduce((a, p) => a + p[1], 0) / P.length;
+    const sxx = P.reduce((a, p) => a + (p[0] - mx) ** 2, 0) / P.length, syy = P.reduce((a, p) => a + (p[1] - my) ** 2, 0) / P.length, sxy = P.reduce((a, p) => a + (p[0] - mx) * (p[1] - my), 0) / P.length;
+    const lmin = (sxx + syy) / 2 - Math.sqrt(((sxx - syy) / 2) ** 2 + sxy * sxy);
+    if (Math.sqrt(Math.max(0, lmin)) < 0.8) return { ok: false, why: 'phones in a line', n: S.length };
+    const fitAt = z => { // → total cost at height z, and each snapshot's best spot. Two passes: the second pulls every snapshot towards
+      // the source loudness as a straight line in time (mm: a drone fading out or throttling up is not read as climbing), which also
+      // picks the right one of two mirror spots that fit the ratios equally well
+      const z2 = z * z, ts = S.map(s => (s.t - S[0].t) / 1000), tm = ts.reduce((a, b) => a + b, 0) / S.length, tv = ts.reduce((a, t) => a + (t - tm) ** 2, 0) || 1;
+      let tot = 0, ms = [], best = [], mm = null;
+      for (let pass = 0; pass < 2; pass++) {
+        tot = 0; ms = []; best = [];
+        S.forEach(s => {
+          const wB = 1 / (SB * SB + SW * SW / s.ph.length), mk = mm && mm(ts[best.length]);
+          const f = (x, y) => { let m = 0; const v = s.ph.map(p => { const r = p[2] + Math.log(Math.max(0.25, (x - p[0]) ** 2 + (y - p[1]) ** 2 + z2)); m += r; return r; }); m /= v.length;
+            let c = v.reduce((a, r) => a + (r - m) ** 2, 0) / (SW * SW) + (mk == null ? 0 : (m - mk) ** 2 * wB);
+            s.P.forEach(([a, b, dt, sd]) => { const ra = Math.sqrt((x - a[0]) ** 2 + (y - a[1]) ** 2 + z2), rb = Math.sqrt((x - b[0]) ** 2 + (y - b[1]) ** 2 + z2); c += ((dt - (rb - ra) / C_SOUND * 1000) / sd) ** 2; });
+            return [c, m]; };
+          let bx = s.xy[0], by = s.xy[1], bc = f(bx, by); // a 2 m grid ±14 m around the flat estimate, then a pattern search down to 2 cm
+          for (let x = s.xy[0] - 14; x <= s.xy[0] + 14; x += 2) for (let y = s.xy[1] - 14; y <= s.xy[1] + 14; y += 2) { const c = f(x, y); if (c[0] < bc[0]) { bc = c; bx = x; by = y; } }
+          for (let st = 1, it = 0; st > 0.02 && it < 60; it++) { let moved = false; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) { const c = f(bx + dx * st, by + dy * st); if (c[0] < bc[0]) { bc = c; bx += dx * st; by += dy * st; moved = true; break; } } if (!moved) st /= 2; }
+          tot += bc[0]; ms.push(bc[1]); best.push([bx, by]);
+        });
+        const mu = ms.reduce((a, b) => a + b, 0) / ms.length, sl = ms.reduce((a, m, i) => a + (m - mu) * (ts[i] - tm), 0) / tv;
+        mm = t => mu + sl * (t - tm);
+      }
+      return { c: tot, best };
+    };
+    const C = HZ.map(fitAt), cs = C.map(q => q.c), k = cs.indexOf(Math.min(...cs));
+    const dof = Math.max(1, S.reduce((a, s) => a + s.ph.length - 1 + s.P.length - 2, 0) + S.length - 2), sc = Math.max(1, cs[k] / dof);
+    let z = HZ[k]; // parabolic refine on the (uneven) grid
+    if (k > 0 && k < HZ.length - 1) { const [x0, x1, x2] = [HZ[k - 1], HZ[k], HZ[k + 1]], [y0, y1, y2] = [cs[k - 1], cs[k], cs[k + 1]], d = (x0 - x1) * (x0 - x2) * (x1 - x2);
+      const A2 = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / d, B2 = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)) / d; if (A2 > 0) z = clamp(-B2 / (2 * A2), x0, x2); }
+    // snapshots 0.5 s apart of a drone that barely moved are the same look again (smoothed loudness): count only looks ≥ 2 s and
+    // ≥ 1.5 m apart, and widen the range by how many repeats there were, so a hover doesn't fake a tight answer
+    let ne = 0, lt = -1e9, lp = null; S.forEach((s, i) => { const p = C[k].best[i]; if (s.t - lt >= 2000 && (!lp || Math.hypot(p[0] - lp[0], p[1] - lp[1]) >= 1.5)) { ne++; lt = s.t; lp = p; } });
+    const lim = cs[k] + sc * S.length / Math.max(1, ne), edge = (i, dir) => { while (i + dir >= 0 && i + dir < HZ.length && cs[i + dir] <= lim) i += dir; const j = i + dir; if (j < 0 || j >= HZ.length) return null; return HZ[i] + (HZ[j] - HZ[i]) * (lim - cs[i]) / (cs[j] - cs[i]); };
+    let lo = edge(k, -1), hi = edge(k, 1); if (lo == null) lo = 0; lo = Math.min(lo, z); if (hi != null) hi = Math.max(hi, z);
+    const dop = doppler(S, C[k].best);
+    if (dop && dop.ok) { // two independent looks at the same height: inverse-variance mix, band = the narrower one's width around it
+      const wl = hi == null ? 0 : 1 / Math.max(0.5, (hi - lo) / 2) ** 2, wd = 1 / Math.max(0.5, (dop.hi - dop.lo) / 2) ** 2, zz = (z * wl + dop.z * wd) / (wl + wd), half = 1 / Math.sqrt(wl + wd);
+      z = zz; lo = Math.max(0, zz - half); hi = zz + half;
+    }
+    // unobservable: the band runs off the top of the grid, or it is wider than 60 % of the height (and 4 m)
+    const ok = hi != null && hi - lo <= Math.max(4, 0.6 * z), m = 0.25 * z + 0.5;
+    // shown range: never tighter than ±(25 % + 0.5 m), the model error seen in simulated passes (smoothed loudness lags, noise floor)
+    if (ok) { lo = Math.max(0, Math.min(lo, z - m)); hi = Math.max(hi, z + m); }
+    const out = { z: +z.toFixed(1), lo: +lo.toFixed(1), hi: hi == null ? null : +hi.toFixed(1), n: S.length, dop: dop && dop.ok ? dop.z : null, ok };
+    if (!out.ok) out.why = 'too high or too far for these phones';
+    return out;
+  }
+  // Doppler: a straight pass at speed v; at each phone the pitch is F·(1 + vr/c) with vr = −v²(t − tc)/√(rmin² + v²(t − tc)²) and tc the
+  // moment of closest approach on the ground track. Only rmin and F are free → z = √(rmin² − dmin²). Needs v ≥ 3 m/s and a 3 Hz+ swing.
+  function doppler(S, xy) {
+    const t0 = S[0].t, T = S.map(s => (s.t - t0) / 1000), n = T.length, mt = T.reduce((a, b) => a + b, 0) / n;
+    const lin = k => { const m = xy.reduce((a, p) => a + p[k], 0) / n; let a = 0, b = 0; T.forEach((t, i) => { a += (t - mt) * (xy[i][k] - m); b += (t - mt) ** 2; }); return [a / b, m]; };
+    const [vx, x0] = lin(0), [vy, y0] = lin(1), v = Math.hypot(vx, vy);
+    const res = Math.sqrt(xy.reduce((a, p, i) => a + (p[0] - x0 - vx * (T[i] - mt)) ** 2 + (p[1] - y0 - vy * (T[i] - mt)) ** 2, 0) / n);
+    if (v < 3 || res > 3) return null; // hovering / turning: no clean pass
+    const zs = [];
+    const keys = [...new Set([].concat(...S.map(s => s.ph.map(p => p[4]))))];
+    keys.forEach(key => {
+      const obs = []; let pos = null; S.forEach((s, i) => { const p = s.ph.find(q => q[4] === key); if (p && p[3] > 0) { obs.push([T[i], p[3]]); pos = p; } });
+      if (obs.length < 10 || !pos) return;
+      const u = ((pos[0] - x0) * vx + (pos[1] - y0) * vy) / (v * v), tc = mt + u, dmin = Math.hypot(x0 + vx * u - pos[0], y0 + vy * u - pos[1]);
+      if (tc < obs[0][0] + 3 || tc > obs[obs.length - 1][0] - 3) return; // the closest approach must be well inside the window
+      const swing = Math.max(...obs.map(o => o[1])) - Math.min(...obs.map(o => o[1])); if (swing < 3) return;
+      let best = null; const prof = [];
+      for (let r = Math.max(0.5, dmin); r <= 80; r *= 1.06) {
+        const g = obs.map(([t]) => 1 - v * v * (t - tc) / Math.sqrt(r * r + v * v * (t - tc) ** 2) / C_SOUND), F = obs.reduce((a, o, i) => a + o[1] * g[i], 0) / g.reduce((a, x) => a + x * x, 0);
+        const e = obs.reduce((a, o, i) => a + (o[1] - F * g[i]) ** 2, 0); prof.push([r, e]); if (!best || e < best[1]) best = [r, e];
+      }
+      const s2 = Math.max(0.3, best[1] / Math.max(1, obs.length - 2)), band = prof.filter(q => q[1] <= best[1] + s2).map(q => q[0]);
+      const zz = r => Math.sqrt(Math.max(0, r * r - dmin * dmin));
+      zs.push([zz(best[0]), zz(Math.min(...band)), zz(Math.max(...band))]);
+    });
+    if (!zs.length) return null;
+    zs.sort((a, b) => a[0] - b[0]); const m = zs[zs.length >> 1];
+    return { ok: m[2] < 79 && m[2] - m[1] <= Math.max(6, m[0]), z: +m[0].toFixed(1), lo: m[1], hi: m[2], n: zs.length };
   }
 
   // ---------------- Geo: anchor the local metre frame to GPS ----------------
@@ -357,6 +459,7 @@
       const L = S.ui && S.ui.lost && S.ui.lost.pos, RP = S.ui && S.ui.replay;
       if (RP) RP.track.forEach(p => { xs.push(clamp(p[1], -30, 36)); ys.push(clamp(p[2], -30, 36)); });
       (S.tracks || []).forEach(t => { if (t.hot && t.est) { xs.push(clamp(t.est[0], -12, 18)); ys.push(clamp(t.est[1], -12, 18)); } });
+      (S.remote || []).forEach(r => { xs.push(clamp(r.x, -40, 46) - 5, clamp(r.x, -40, 46) + 5); ys.push(clamp(r.y, -40, 46) - 2); }); // linked posts' drones, with room for the label
       [S.est, L, S.ui && S.ui.workings && S.truth && [S.truth.x, S.truth.y]].forEach(p => { if (p) { xs.push(clamp(p[0], -12, 18)); ys.push(clamp(p[1], -12, 18)); } });
       const x0 = Math.min(...xs) - 3, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 3, y1 = Math.max(...ys) + 3, s = Math.max(x1 - x0, y1 - y0);
       view = { x0: (x0 + x1) / 2 - s / 2, y0: (y0 + y1) / 2 - s / 2, s };
@@ -442,6 +545,10 @@
         else { g.fillStyle = col; g.fill(); }
         const ct = U.chips && U.chips[t.id]; if (ct) chip(ct, x, y + rr + 18 * dpr, C, dpr);
       });
+      (S.remote || []).forEach(r => { // another linked post's drone: faded, with that post's name
+        const [x, y] = W2P(r.x, r.y); g.globalAlpha = 0.45; g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.setLineDash([4 * dpr, 4 * dpr]); g.beginPath(); g.arc(x, y, 18 * dpr, 0, 7); g.stroke(); g.setLineDash([]);
+        tri(x, y + 2 * dpr, 12 * dpr); g.fillStyle = C.ink2; g.fill(); g.globalAlpha = 0.8; text(r.label, x, y + 32 * dpr, C.ink2, 11 * dpr); g.globalAlpha = 1;
+      });
       if (ws === 'lost' && U.lost && U.lost.pos && !S.solo) {
         let [x, y] = W2P(U.lost.pos[0], U.lost.pos[1]); const near = 48 * dpr; // keep the marker off the phone pins
         list.forEach(n => { if (!n.pos) return; const [px, py] = W2P(n.pos[0], n.pos[1]), dx = x - px, dy = y - py, d = Math.hypot(dx, dy); if (d < near) { if (d < 1) y = py + near; else { x = px + dx / d * near; y = py + dy / d * near; } } });
@@ -476,6 +583,33 @@
     const end = () => { if (!drag) return; const n = S.nodes.find(m => m.key === drag); if (n) opts.onDrag(drag, n.pos, true); drag = null; };
     cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
     return { set(state) { S = state; } };
+  }
+
+  // Linked watch posts: every post's screen joins one link code. The first takes the well-known id and relays what each post sends
+  // to all the others; if it goes away, the next one to notice takes over. Only track numbers travel (see watch.js), never audio.
+  function linkPosts(code, me, cb) {
+    const hostId = PREFIX + 'link-' + code; let peer = null, host = true, up = null, conns = new Set(), stopped = false;
+    const make = () => {
+      if (stopped) return;
+      peer = new Peer(host ? hostId : hostId + '-' + me + '-' + randKey(3), { debug: 0 });
+      peer.on('open', () => { if (host) cb.status('linked · waiting for other posts'); else join(); });
+      peer.on('connection', c => {
+        c.on('open', () => conns.add(c)); c.on('close', () => conns.delete(c)); c.on('error', () => conns.delete(c));
+        c.on('data', d => { cb.data(d); conns.forEach(o => { if (o !== c && o.open) try { o.send(d); } catch (e) {} }); });
+      });
+      peer.on('error', err => {
+        if (err.type === 'unavailable-id' && host) { host = false; peer.destroy(); setTimeout(make, 300); }
+        else if (err.type === 'peer-unavailable' && !host) retake();
+        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) { cb.status('relay unreachable — retrying…'); peer.destroy(); setTimeout(make, 3000); }
+      });
+    };
+    const join = () => { up = peer.connect(hostId, { reliable: false, serialization: 'json' }); up.on('open', () => cb.status('linked')); up.on('data', d => cb.data(d)); up.on('close', retake); };
+    const retake = () => { if (stopped || host) return; up = null; host = true; peer.destroy(); setTimeout(make, 500 + Math.random() * 1500); };
+    make();
+    return {
+      send(d) { if (host) conns.forEach(c => { if (c.open) try { c.send(d); } catch (e) {} }); else if (up && up.open) try { up.send(d); } catch (e) {} },
+      stop() { stopped = true; if (peer) peer.destroy(); },
+    };
   }
 
   // ---------------- SimEngine: N virtual phones + a virtual drone, using the real detector ----------------
@@ -549,9 +683,9 @@
   const pp = u => { u = ((u % 2) + 2) % 2; return u < 1 ? u : 2 - u; }; // ping-pong 0→1→0
   class SimEngine {
     constructor(ctx, o) {
-      this.o = Object.assign({ n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, clockOffMs: 400, jitterMs: 1, biasMs: 0, gainDb: 0 }, o);
+      this.o = Object.assign({ n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, loud: 0, ox: 0, clockOffMs: 400, jitterMs: 1, biasMs: 0, gainDb: 0 }, o); // loud: dB louder drone (heard further); ox: where this post sits on the 'cross' line (m east)
       this.ctx = ctx; this.t = 0; this.drone = this.drone2 = null;
-      const s = this.o.side, POS = [[0, 0], [s, 0], [s, s], [0, s]].slice(0, this.o.n), base = 205 + Math.random() * 20;
+      const s = this.o.side, POS = [[0, 0], [s, 0], [s, s], [0, s]].slice(0, this.o.n), base = this.o.path === 'cross' ? 215 : 205 + Math.random() * 20; // 'cross': the same drone at every post
       const src = RotorEar.syntheticDrone(ctx, base);
       // path 'two': a second, higher-pitched drone (×1.4: its low harmonics sit between the first one's)
       const src2 = this.o.path === 'two' ? RotorEar.syntheticDrone(ctx, base * 1.4) : null;
@@ -583,7 +717,7 @@
       const K = [[12, [13, 13]], [20, [7.5, 7.5]], [26, [3.5, 4]], [45, [3.5, 4]], [55, [-13, -13]]];
       let P = K[0][1]; for (let i = 1; i < K.length; i++) if (t < K[i][0] || i === K.length - 1) { P = seg(K[i - 1][1], K[i][1], (t - K[i - 1][0]) / (K[i][0] - K[i - 1][0])); break; }
       const lev = t < 12 ? 0 : t < 14 ? (t - 12) / 2 : t < 47 ? 1 : Math.max(0, 1 - (t - 47) / 5);
-      return { P: [P[0] * s, P[1] * s], lev, pitch: t < 26 ? 1 : t < 30 ? 1 + 0.08 * (t - 26) / 4 : 1.08, fan: t >= 5 && t < 12 ? 1 : 0 };
+      return { P: [P[0] * s, P[1] * s], lev, pitch: t < 26 ? 1 : t < 30 ? 1 + 0.08 * (t - 26) / 4 : 1.08, fan: t >= 5 && t < 12 ? 1 : 0, alt: t < 26 ? 4 : t < 30 ? 4 + (t - 26) : 8 }; // flies in at 4 m, climbs to 8 m
     }
     get ended() { return this.o.path === 'demo' && this.t >= 55; }
     get length() { return this.o.path === 'demo' ? 60 : 0; } // s; 0 = runs until stopped
@@ -592,7 +726,9 @@
       const w = 2 * Math.PI / 40, s = this.o.side / 6, k = this.o.path;
       const P = k === 'circle' ? [3 + 3 * Math.cos(w * t), 3 + 3 * Math.sin(w * t)] : k === 'eight' ? [3 + 5 * Math.sin(w * t), 3 + 3 * Math.sin(2 * w * t)]
         : k === 'line' ? (() => { const u = (t / 20) % 2, v = u < 1 ? u : 2 - u; return [-3 + 12 * v, 2]; })()
-        : k === 'two' ? (() => { const v = pp(t / 24); return [-1 + 8 * v, -1 + 8 * v]; })() : [4.5, 1.5];
+        : k === 'two' ? (() => { const v = pp(t / 24); return [-1 + 8 * v, -1 + 8 * v]; })()
+        : k === 'pass' ? [-16 + 38 * pp(t * 4 / 38), 2] // 'pass': straight over the phones at 4 m/s, back and forth
+        : k === 'cross' ? [-12 + 72 * pp((Date.now() / 1000 + t - this.t) * 3 / 72) - this.o.ox, 3] : [4.5, 1.5]; // 'cross': east and back along a line at 3 m/s on the wall clock, so posts at different ox see one drone go from one to the next
       return [P[0] * s, P[1] * s];
     }
     pathAt2(t) { const v = pp(t / 24 + 0.3), s = this.o.side / 6; return [(-1 + 8 * v) * s, (7 - 8 * v) * s]; } // 'two': the other diagonal, so the tracks cross
@@ -600,17 +736,17 @@
     step(now) {
       const dt = this.last ? (now - this.last) / 1000 : 0; this.last = now; this.t += dt * this.o.speed;
       const demo = this.o.path === 'demo', sc = demo ? this.script(this.t) : null, at = t => demo ? this.script(t).P : this.pathAt(t);
-      const d = at(this.t), d2 = at(this.t + 0.05), sp = this.o.speed / 0.05, lev = demo ? sc.lev : 1;
-      this.drone = lev > 0 ? { x: d[0], y: d[1], vx: (d2[0] - d[0]) * sp, vy: (d2[1] - d[1]) * sp } : null;
+      const d = at(this.t), d2 = at(this.t + 0.05), sp = this.o.speed / 0.05, lev = demo ? sc.lev : 1, z = demo ? sc.alt : this.o.alt;
+      this.drone = lev > 0 ? { x: d[0], y: d[1], z, vx: (d2[0] - d[0]) * sp, vy: (d2[1] - d[1]) * sp } : null;
       const e = this.src2 ? this.pathAt2(this.t) : null, e2 = e && this.pathAt2(this.t + 0.05);
       const lv2 = e ? this.lev2(this.t) : 0;
-      this.drone2 = lv2 > 0 ? { x: e[0], y: e[1], vx: (e2[0] - e[0]) * sp, vy: (e2[1] - e[1]) * sp } : null;
+      this.drone2 = lv2 > 0 ? { x: e[0], y: e[1], z: this.o.alt, vx: (e2[0] - e[0]) * sp, vy: (e2[1] - e[1]) * sp } : null;
       if (demo && sc.pitch !== this.pitch) { this.pitch = sc.pitch; this.src.setPitch(sc.pitch, 0.3); }
       this.nodes.forEach(n => {
-        const r = Math.hypot(d[0] - n.p[0], d[1] - n.p[1], this.o.alt); n.r = r;
+        const r = Math.hypot(d[0] - n.p[0], d[1] - n.p[1], z); n.r = r;
         n.dl.delayTime.setTargetAtTime(r / C_SOUND, this.ctx.currentTime, 0.03);
-        n.g.gain.setTargetAtTime(lev * 0.6 / Math.max(1, r), this.ctx.currentTime, 0.05);
-        if (e) { const r2 = Math.hypot(e[0] - n.p[0], e[1] - n.p[1], this.o.alt); n.dl2.delayTime.setTargetAtTime(r2 / C_SOUND, this.ctx.currentTime, 0.03); n.g2.gain.setTargetAtTime(lv2 * 0.6 / Math.max(1, r2), this.ctx.currentTime, 0.05); }
+        const k = 0.6 * Math.pow(10, this.o.loud / 20); n.g.gain.setTargetAtTime(lev * k / Math.max(1, r), this.ctx.currentTime, 0.05);
+        if (e) { const r2 = Math.hypot(e[0] - n.p[0], e[1] - n.p[1], this.o.alt); n.dl2.delayTime.setTargetAtTime(r2 / C_SOUND, this.ctx.currentTime, 0.03); n.g2.gain.setTargetAtTime(lv2 * k / Math.max(1, r2), this.ctx.currentTime, 0.05); }
         if (n.fg) n.fg.gain.setTargetAtTime(sc.fan * 0.5 / Math.max(1, Math.hypot(this.fanPos[0] - n.p[0], this.fanPos[1] - n.p[1])), this.ctx.currentTime, 0.2);
         const out = n.det.step(now); if (n.tap) n.tap.setF0(out.f0);
       });
@@ -627,7 +763,7 @@
         s.connect(dl); dl.connect(g); g.connect(n.bus); s.start(t0); s.onended = () => setTimeout(() => g.disconnect(), 1200);
       });
     }
-    truth() { const r = o => ({ x: +o.x.toFixed(2), y: +o.y.toFixed(2), vx: +o.vx.toFixed(2), vy: +o.vy.toFixed(2) }), d = this.drone; // for the error readout
+    truth() { const r = o => ({ x: +o.x.toFixed(2), y: +o.y.toFixed(2), z: +o.z.toFixed(2), vx: +o.vx.toFixed(2), vy: +o.vy.toFixed(2) }), d = this.drone; // for the error readout
       return d ? Object.assign({ t: 'truth' }, r(d), this.drone2 ? { d2: r(this.drone2) } : null) : null; }
     stop() { if (this.src2) this.src2.stop(); this.src.stop(); if (this.fan) this.fan.stop(); this.nodes.forEach(n => { n.nz.stop(); n.bus.disconnect(); }); }
   }
@@ -644,5 +780,5 @@
   const PAL = [];
   (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
     for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, g1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (g1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
-  window.RotorMesh = { Geo, PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
+  window.RotorMesh = { linkPosts, heightFit, Geo, PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
 })();

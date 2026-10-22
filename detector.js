@@ -32,6 +32,60 @@
     { id: 'voice', label: 'Voice', group: 'Not a drone' }, { id: 'notdrone', label: 'Not a drone', group: 'Not a drone' }, { id: 'other', label: 'Other', group: 'Not a drone' }
   ];
 
+  // ---- "why (not) a drone": plain words from the six fingerprint numbers and the class match ----
+  // RANGE: where real drones sit on each feature (the drone profiles ± a margin), drawn as the shaded band behind each bar.
+  // Everything here is a function of numbers only, so a screen can rebuild an ear's reason from what the ear sends.
+  const RANGE = [
+    { k: 'pitch', name: 'Pitch', lo: -0.9, hi: 1.6, min: -1.5, max: 1.8, show: v => Math.round(200 * Math.pow(2, v)) + ' Hz' },
+    { k: 'split', name: 'Rotors (split peaks)', lo: 0, hi: 1.5, min: 0, max: 1.5, show: v => v < 0.25 ? 'one' : v < 0.9 ? 'a few' : 'many' },
+    { k: 'beat', name: 'Beat (rotors drifting)', lo: 0.1, hi: 1.5, min: 0, max: 1.5, show: v => v < 0.1 ? 'none' : v < 0.6 ? 'some' : 'strong' },
+    { k: 'steady', name: 'Pitch steadiness', lo: 0, hi: 1.1, min: 0, max: 2, show: v => v > 1.1 ? 'locked' : v > 0.4 ? 'smooth' : 'wobbly' },
+    { k: 'sub', name: 'Energy between harmonics', lo: 0, hi: 0.5, min: 0, max: 1.5, show: v => v > 0.5 ? 'high' : 'low' },
+    { k: 'mains', name: 'Locked to 50/60 Hz', lo: 0, hi: 0.5, min: 0, max: 1, show: v => v >= 0.5 ? 'yes' : 'no' },
+  ];
+  const bar = (r, v) => ({ k: r.k, name: r.name, v, at: clamp((v - r.min) / (r.max - r.min), 0, 1), lo: (r.lo - r.min) / (r.max - r.min), hi: (r.hi - r.min) / (r.max - r.min), in: v >= r.lo && v <= r.hi, show: r.show(v) });
+  // c: a classification ({ label, drone, learned, x: six features, raw: { f0 } }) → { id, text, bars, drone }
+  function explain(c) {
+    const x = c.x, [pitch, split, beat, steady, sub, mains] = x, f0 = c.raw && c.raw.f0 || 200 * Math.pow(2, pitch);
+    const bars = RANGE.map((r, i) => bar(r, x[i])), off = bars.filter(b => !b.in).map(b => b.name.toLowerCase().replace(/ \(.*\)/, ''));
+    const fb = sub >= 0.6 ? f0 / 2 : f0, hz = Math.abs(fb - 50 * Math.round(fb / 50)) <= Math.abs(fb - 60 * Math.round(fb / 60)) ? 50 : 60; // energy between harmonics: the true pitch is half
+    let id, text;
+    if (c.drone) {
+      if (c.label === 'Fixed-wing') { id = 'fixed'; text = 'One propeller: a low, smooth pitch with little beat, like a fixed-wing'; }
+      else if (c.label === 'Micro drone') { id = 'micro'; text = 'High, whiny pitch from small rotors with fast-fading harmonics, like a micro drone'; }
+      else { id = 'quad'; text = 'Several rotors at slightly different speeds (split peaks) beating against each other, like a multirotor'; }
+      if (c.learned) text = 'Close to your taught samples. ' + text;
+    } else if (c.learned) { id = 'taught'; text = 'Close to sounds you taught as not a drone' + (off.length ? ' (' + off.join(', ') + ' outside the drone range)' : ''); }
+    else if (mains >= 0.5 || (steady >= 0.6 && sub >= 0.6)) { id = 'mains'; text = `Pitch too steady and locked to ${hz} Hz mains, like a transformer or mains hum`; }
+    else if (sub >= 0.6) { id = 'engine'; text = 'Energy between the harmonics: the real firing rate is lower and irregular, like an engine'; }
+    else if (steady > 1.1) { id = 'fan'; text = 'Pitch too steady: one motor at a fixed speed' + (beat < 0.1 ? ' with no rotor beat' : '') + ', looks like a fan / AC'; }
+    else { id = 'notdrone'; text = 'Does not match a rotor profile' + (off.length ? ': ' + off.join(', ') + ' outside the drone range' : ''); }
+    return { id, text, bars, drone: !!c.drone };
+  }
+  // n: a sound() summary (no fingerprint formed: no steady comb for 2 s) → { id, text, bars } or null when nothing was heard
+  const SND = [
+    { k: 'comb', name: 'Harmonic comb present', lo: 0.8, hi: 1, min: 0, max: 1, show: v => Math.round(v * 100) + '%' },
+    { k: 'jump', name: 'Pitch jumps frame to frame', lo: 0, hi: 0.4, min: 0, max: 3, show: v => v.toFixed(1) + '%' },
+    { k: 'spread', name: 'Pitch range', lo: 0, hi: 6, min: 0, max: 60, show: v => Math.round(v) + '%' },
+  ];
+  function soundWhy(n) {
+    if (!n) return null;
+    let id, text;
+    if (n.mx >= 40 && n.comb < 0.2) { id = 'tone'; text = 'A single pure tone with no harmonic series, like a beep, whistle or alarm'; }
+    else if (n.comb >= 0.15 && n.spread > 15) { id = 'voice'; text = 'Harmonics come and go and the pitch jumps around, more like a voice or bird'; }
+    else if (n.lo >= 15 || (n.comb >= 0.4 && n.comb < 0.9 && n.jump > 0.5)) { // (a steady comb, ≥ 0.9, is a rotor still forming its fingerprint)
+      id = 'engine'; const fire = n.lo >= 15 ? ` (firing ~${n.lf} Hz, below the rotor range)` : '';
+      text = n.comb >= 0.3 && n.jump > 0.5 ? 'Pitch sweeping up and down like a motorbike engine' + fire : 'Low, irregular firing like an engine or generator' + fire; }
+    else if (n.comb >= 0.8) { id = 'forming'; text = 'A steady harmonic comb: checking its fingerprint'; }
+    else if (n.pk <= 1 && n.mx < 15) { id = 'noise'; text = 'No harmonics, just broadband noise, like wind, rain or traffic'; }
+    else { id = 'weak'; text = 'Harmonics too weak or too brief to fingerprint'; }
+    return { id, text, bars: SND.map(r => bar(r, n[r.k])), drone: false };
+  }
+
+  // the same reason rebuilt from what an ear sends (telemetry numbers: cl, lr, fr, fx = the six features, sn = sound summary)
+  const whyFrom = n => n.fx ? explain({ label: n.cl, drone: !!n.cl && n.cl !== GROUPS[3], learned: n.lr, x: n.fx, raw: { f0: n.fr } })
+    : n.sn ? soundWhy({ comb: n.sn[0], jump: n.sn[1], spread: n.sn[2], mx: n.sn[3], lo: n.sn[4], lf: n.sn[5], pk: n.sn[6] }) : null;
+
   function makeAnalyser(ctx) {
     const a = ctx.createAnalyser();
     a.fftSize = 8192; a.smoothingTimeConstant = 0.5;
@@ -353,6 +407,7 @@
       // fundamental + low harmonics (so the odd partials of one hum, e.g. 150 Hz left over from 50 Hz mains, are not a second sound)
       const c1 = this.scan(), cs = [];
       if (audible && c1.hits >= 3) { c1.fr = this.frameFeatures(c1.f0); cs.push(c1); if (this.cap) this.cap.push(Object.assign({ t: now }, c1.fr)); }
+      this.hear(now, c1, audible);
       if (cs.length) {
         this.mask(c1.fr.f); this.use(true); const c2 = this.scan(c1.fr.f); this.use(false);
         if (c2.hits >= 3 && c2.low >= 3) {
@@ -376,7 +431,30 @@
       this.outs = [o, alt].filter(x => x.state !== 'quiet');
       o.alt = alt.state !== 'quiet' ? alt : null; alt.alt = null;
       o.nf = this.noise; o.hr = this.noise == null ? null : Math.round(hearingRadius(this.noise));
+      // the reason in words: from the fingerprint once there is one, else from what the last ~3 s sounded like
+      o.snd = this.snd = o.cls ? null : this.sound(); o.why = o.cls ? explain(o.cls) : soundWhy(this.snd); if (alt.cls) alt.why = explain(alt.cls);
       return o;
+    }
+    // What this phone heard over the last ~3 s, comb or not (for "why not a drone" when no fingerprint forms):
+    // the best comb's pitch and harmonic count each frame, plus how many separate peaks stand out and how tall the tallest is.
+    hear(now, c, audible) {
+      const H = this.heard || (this.heard = []);
+      if (audible) {
+        let pk = 0, mx = 0; const a = Math.round(F0_MIN / this.binHz), b = Math.min(this.bins - 1, Math.round(4000 / this.binHz));
+        for (let i = a; i < b; i++) { const e = this.db[i] - this.fl[i]; if (e > mx) mx = e; if (e > HIT_DB + 3 && this.db[i] > this.db[i - 1] && this.db[i] >= this.db[i + 1]) pk++; }
+        let lo = 0, lf = 0; for (let i = Math.round(25 / this.binHz); i < a; i++) { const e = this.db[i] - this.fl[i]; if (e > lo) { lo = e; lf = i * this.binHz; } } // a peak below the rotor range (an engine's firing rate)
+        H.push({ t: now, f: c.fr ? c.fr.f : c.f0, hits: c.hits, pk, mx, lo, lf });
+      }
+      while (H.length && now - H[0].t > 3000) H.shift();
+    }
+    // a summary of hear(): null until ~1 s of sound. comb: share of frames with a harmonic comb (3+ harmonics); jump / spread:
+    // mean frame-to-frame pitch change and the 10–90 % pitch range of those frames (%); pk: separate peaks; mx: tallest peak (dB over floor)
+    sound() {
+      const H = this.heard || []; if (H.length < 20) return null;
+      const C = H.filter(h => h.hits >= 3), lf = C.map(h => Math.log(h.f) * 100), q = a => a.slice().sort((x, y) => x - y);
+      const d = lf.slice(1).map((v, i) => Math.abs(v - lf[i])), jump = C.length > 4 ? d.reduce((a, v) => a + v, 0) / d.length : 0, sl = q(lf);
+      return { n: H.length, comb: +(C.length / H.length).toFixed(2), jump: +jump.toFixed(2), spread: sl.length > 4 ? +(sl[Math.floor(sl.length * 0.9)] - sl[Math.floor(sl.length * 0.1)]).toFixed(1) : 0,
+        pk: median(H.map(h => h.pk)), mx: Math.round(median(H.map(h => h.mx))), lo: Math.round(median(H.map(h => h.lo))), lf: Math.round(median(H.map(h => h.lf))), hits: median(H.map(h => h.hits)), f: Math.round(median((C.length ? C : H).map(h => h.f))) };
     }
     // drone-band noise floor (dB per bin): the median local floor 150 Hz–2 kHz, then the 20th percentile over ~3 s;
     // refreshed every 2 s. Background only: frames where this phone hears no harmonic sound (a nearby drone would
@@ -480,5 +558,5 @@
     return gn;
   }
 
-  g.RotorEar = { RotorDetector, COVER, hearingRadius, FlightTracker, FLIGHT, WatchState, WATCH, likelihood, STATES, makeAnalyser, syntheticDrone, syntheticFan, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
+  g.RotorEar = { explain, soundWhy, whyFrom, RANGE, RotorDetector, COVER, hearingRadius, FlightTracker, FLIGHT, WatchState, WATCH, likelihood, STATES, makeAnalyser, syntheticDrone, syntheticFan, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
 })(window);
