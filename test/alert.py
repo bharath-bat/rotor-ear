@@ -23,7 +23,7 @@ def burst(name, on_s, off_s):  # the quadcopter recording for on_s seconds, then
 
 def page(p, wav):
     b = p.chromium.launch(args=['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', f'--use-file-for-fake-audio-capture={WAV}/{wav}.wav', '--autoplay-policy=no-user-gesture-required'])
-    pg = b.new_page(viewport={'width': 390, 'height': 844}); pg.goto(f'http://127.0.0.1:{PORT}/'); pg.evaluate('localStorage.clear()'); pg.reload(); return b, pg
+    pg = b.new_page(viewport={'width': 390, 'height': 844}); pg.goto(f'http://127.0.0.1:{PORT}/#screen'); pg.evaluate('localStorage.clear()'); pg.reload(); return b, pg
 W = lambda pg: pg.evaluate('({s: __watch.s, k: __watch.holdK, c: __alert.count, b: __alert.beeps, t: __alert.tones.join(), g: __alert.gated, f: __alert.flashing, m: __alert.muted, pill: document.getElementById("pill").textContent, anim: getComputedStyle(document.getElementById("status")).animationIterationCount, fl: (__rotor.flight || {}).state})')
 def until(pg, cond, secs, step=0.1):
     t0 = time.time(); seen = []

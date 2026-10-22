@@ -4,7 +4,21 @@ Passive, listen-only drone rotor-sound detector prototype. It uses the microphon
 
 Open the GitHub Pages site on a phone: [https://bharath-bat.github.io/rotor-ear/](https://bharath-bat.github.io/rotor-ear/).
 
-## Watch post (the main page)
+## One app, three modes
+
+The link opens a start screen with three choices. Switching modes doesn't reload the page. Use ‹ Modes, ••• → Switch mode, or Back.
+
+- **Be the screen** (`#screen`): the watch post below. It hosts a room (Phones → Create a room) that other phones join.
+- **Be an ear** (`#ear`): this phone listens and sends numbers to a screen. Its join link is `?room=CODE`, which lands here. Without a code it asks for one.
+- **Watch a demo** (`#demo`): the scripted 60 s demo on the screen. `#demo&room=CODE` instead runs simulated phones that report to that room's screen over the relay (the old simulator).
+
+Old links and QR codes still work:
+
+- `mesh/#room=R&role=node`, `mesh/#room=R` and `?room=R` open `#ear&room=R`.
+- `role=map` and the old `#room=R` open `#screen&room=R`.
+- `mesh/sim.html` opens `#demo`, keeping its settings.
+
+## Watch post (Be the screen)
 
 One mobile screen, top to bottom:
 
@@ -24,7 +38,7 @@ One mobile screen, top to bottom:
 
 ## Demo
 
-**Try the demo** (or ••• → Demo) plays a scripted 60 s scene on 4 simulated phones: 5 s of quiet, a fan near phone B that is ignored, a drone that approaches, climbs, hovers and leaves, then "Drone lost" and an end card. A permanent hatched **DEMO** stripe stays on the status block, the word reads **DEMO · DRONE**, the map is tagged and the marker hatched, the beep is a different, lower tone, and timeline rows are tagged DEMO. Phones from `mesh/sim.html` (named `sim …`) also count as demo.
+**Try the demo** (or ••• → Demo) plays a scripted 60 s scene on 4 simulated phones: 5 s of quiet, a fan near phone B that is ignored, a drone that approaches, climbs, hovers and leaves, then "Drone lost" and an end card. A permanent hatched **DEMO** stripe stays on the status block, the word reads **DEMO · DRONE**, the map is tagged and the marker hatched, the beep is a different, lower tone, and timeline rows are tagged DEMO. Simulated phones from `#demo&room=…` (named `sim …`) also count as demo.
 
 ## Alerts and stay-awake
 
@@ -90,8 +104,8 @@ That is numbers only, never audio. The map then works as follows:
 
 Pages:
 
-- The watch post is the map (`/#room=…`). `mesh/` has the node and room pages; `mesh/#role=map` redirects to the watch post.
-- `mesh/sim.html` simulates phones over the real relay. You can set the clock offset (±400 ms / ±3 s), timing jitter and mic-latency spread.
+- The screen is the map (`#screen&room=…`). Phones join as ears (`?room=…`).
+- `#demo&room=…` simulates phones over the real relay. You can set the clock offset (±400 ms / ±3 s), timing jitter and mic-latency spread.
 
 **Honest accuracy.** Sound travels 34 cm per millisecond, and with phones 6 m apart the largest time difference is about 17 ms. Arrival times only help if each phone's timing is known to about 1 ms:
 
@@ -115,16 +129,20 @@ Corrections are stored per room in `localStorage` and applied to event times and
 
 The code is plain JS:
 
-- `detector.js`: detector and classifier, shared by all pages.
-- `watch.js` / `watch.css`: the watch post.
+- `app.js`: the start screen router (`#screen` / `#ear` / `#demo`) and old-link rewriting.
+- `detector.js`: detector and classifier, shared by every mode.
+- `watch.js`: the screen (watch post) and the scripted demo.
+- `ear.js`: ear mode and the relay demo phones.
+- `watch.css`: all styles (Night and Sun).
 - `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, MapView, SimEngine.
 - `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
 - `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
-- `mesh/mesh.js`: the standalone mesh pages.
+- `mesh/index.html` and `mesh/sim.html`: redirects only, for old links.
 
 Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && playwright install chromium`, then:
 
 - `python3 test/gen.py`: synthetic WAVs.
+- `python3 test/routes.py`: every mode and old URL lands in the right mode, with no console errors, and switching modes doesn't reload the page.
 - `python3 test/run.py`: confusion table. `SAMPLES=test/wav/taught-samples.json` imports taught samples first.
 - `python3 test/teach.py`: wrong before teaching, right after.
 - `python3 test/flight.py`: flight-state table for hover / climb / descend / load / fly-by / maneuver WAVs.
