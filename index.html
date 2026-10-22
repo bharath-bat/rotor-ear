@@ -33,9 +33,11 @@
       <div class="lhead"><b>Look this way</b><small id="lookCls"></small></div>
       <div class="lbody"><div id="lookArrow" aria-hidden="true">↑</div><div><div id="lookWords"></div><button class="btn" id="lookCompass" hidden>Use compass</button></div></div>
       <button class="btn big" id="lookRec">Record 10 s with the rear camera</button>
-      <small class="note">Video only, no sound. Saved on this phone only, never uploaded. The screen just learns "clip saved".</small>
+      <small class="note">Video only, no sound. Saved on this phone only, never uploaded. This phone checks the clip for bird or drone; the screen just learns "clip saved" and the verdict.</small>
     </div>
-    <div id="rec" hidden><video id="recVid" playsinline muted autoplay></video><div class="recbar"><b id="recT">REC 0:10</b><button class="btn" id="recStop">Stop</button></div></div>
+    <div id="rec" hidden><video id="recVid" playsinline muted autoplay></video><canvas id="recBox"></canvas><div id="recBob">Bird or Bot · looking for the moving thing…</div><div class="recbar"><b id="recT">REC 0:10</b><button class="btn" id="recStop">Stop</button></div></div>
+    <!-- Bird or Bot: this phone's verdict on the clip (motion + sound + optional image check); only the numbers go to the screen -->
+    <div id="bob" class="card" hidden></div>
     <div id="nBanner" class="banner ready"><b class="w">⊖ READY</b><small>tap Start listening</small></div>
     <div class="nstatus" id="nStatus">not connected</div>
     <div class="stats3">
@@ -108,6 +110,7 @@
     <div id="stCls">Not listening · tap Listen to start</div>
     <div id="stWhere"></div>
     <div id="stSub"></div>
+    <div id="stBob" hidden></div>
     <div id="stDrones"></div>
     <div class="srow2"><button id="pill" hidden>Sound: ON</button><div id="stProg" hidden><i></i></div><span id="stNote"></span></div>
   </header>
@@ -273,6 +276,7 @@
 <script src="mesh/core.js"></script>
 <script src="log.js"></script>
 <script src="samples.js"></script>
+<script src="bird.js"></script>
 <script src="watch.js"></script>
 <script src="ear.js"></script>
 </body>

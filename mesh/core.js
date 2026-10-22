@@ -322,7 +322,7 @@
         heading: L ? head(L) : null, truth: tr, err, headErr: { both: hm(1), loud: hm(2), doppler: hm(3) },
         // every drone track (two drones at once): its own class, confidence, phones agreeing, flight, position and colour slot
         lead: L ? L.id : 0, tracks: this.tracks.map(T => ({ id: T.id, slot: T.slot, f0: T.f, hot: now < T.hold, est: T.est.F || T.est.L || null, trail: T.trail.slice(), label: T.label, score: T.score, voters: T.voters, agree: T.A.map(n => n.key), flight: T.flight, heading: head(T), tdoaOk: !!(T.est.T && T.tdoaOk),
-          h: T.h || null, herr: T.h && T.h.ok && near(T.est.F || T.est.L || [0, 0]) && near(T.est.F || T.est.L || [0, 0]).z != null ? +(T.h.z - near(T.est.F || T.est.L).z).toFixed(1) : null,
+          h: T.h || null, herr: T.h && T.h.ok && (T.est.F || T.est.L) && near(T.est.F || T.est.L) && near(T.est.F || T.est.L).z != null ? +(T.h.z - near(T.est.F || T.est.L).z).toFixed(1) : null,
           err: (T.est.F || T.est.L) && truths.length ? +Math.hypot((T.est.F || T.est.L)[0] - near(T.est.F || T.est.L).x, (T.est.F || T.est.L)[1] - near(T.est.F || T.est.L).y).toFixed(2) : null }))
       };
     }

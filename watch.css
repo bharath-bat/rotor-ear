@@ -247,3 +247,18 @@ html:not(.sun) #geomap .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) br
 .lkf label{flex:1;display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--ink-2);min-width:0}
 .lkf input{width:100%}
 #handoff{position:absolute;left:50%;transform:translateX(-50%);bottom:30px;z-index:2;background:var(--surface);color:var(--ink);border:2px solid var(--ink);border-radius:12px;padding:6px 12px;font-size:13px;font-weight:700;white-space:nowrap}
+/* Bird or Bot: live line + box over the recording, the verdict card, chips on the screen and in the logs */
+#recBox{position:absolute;left:0;top:0;pointer-events:none}
+#recBob{position:absolute;left:0;right:0;top:0;padding:8px 10px;background:#000a;color:#fff;font-size:15px;font-weight:700}
+#bob{margin-bottom:10px;padding:14px;border-radius:16px}
+.bobhead{display:flex;align-items:center;gap:10px}.bobhead i{font-style:normal;font-size:34px}.bobhead b{font-size:30px;font-weight:800}
+.bobhead span{flex:1;font-size:15px;color:var(--ink-2)}.bobhead .btn{flex:none;width:44px;min-height:44px;padding:0}
+.bobhead.bird b{color:#2fbf71}.bobhead.bot b{color:var(--alert)}html.sun .bobhead.bird b{color:#0f7a3f}
+.bobwhy{font-size:17px;font-weight:700;margin:8px 0}
+.bobrows div{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}.bobrows span{color:var(--ink-2)}.bobrows b{text-align:right}
+.bobline{margin:4px 0 6px;font-size:13px}.bobline b{white-space:nowrap}
+.bob{display:inline-block;margin-top:6px;padding:3px 10px;border-radius:999px;font-size:14px;font-weight:800;background:#fff;color:#0B0D12}
+.bob.bird{background:#2fbf71;color:#04210f}.bob.bot{background:#fff;color:#7a2200}
+#stBob small{display:block;font-size:13px;margin-top:3px;opacity:.92}#app.sheet-open #stBob{display:none}
+#status.birdy{background:var(--panel2);border-color:var(--alert);color:var(--ink)}#status.birdy #pill{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
+#status.birdy #stWord{font-size:30px!important;white-space:normal!important}

@@ -214,6 +214,18 @@ When the screen confirms a drone, it asks the ear nearest the estimate (that ear
 - **Record 10 s** opens the rear camera (video only, no sound) and saves the clip in that phone's IndexedDB, tagged with the incident id. Only a "clip saved" count goes to the screen, where the log shows 🎥.
 - Clips can be played, downloaded or deleted in that phone's log. They never leave the phone unless you download them.
 
+## Bird or Bot
+
+While the 10 s clip records, the ear phone also checks whether the thing in the sky is a bird or a drone. Everything runs in that phone's browser and the video never leaves it.
+
+- **Find it**: each frame is shrunk to 160×120. The hand shake is measured from the background's edges and cancelled. Pixels that differ from a slowly learned sky are grouped into blobs, and the biggest one is followed (yellow box on the live picture).
+- **How it moves**: wing beats make the blob's size and shape pulse at 2–20 Hz (an FFT of its area, height and height/width). Birds also glide in curves. Drones keep a steady size and hover or fly straight, because rotors are a blur at camera rate. With a shaky camera, a beat under 3 Hz doesn't count, since the hand makes thin shapes flicker at that pace.
+- **What it looks like (optional)**: COCO-SSD (TensorFlow.js from jsDelivr, fetched when the phone is asked to look) gives a "bird" score on the blob crops. COCO has no drone class, so this only ever counts toward bird. If it can't load within 8 s, the card says "unavailable — motion only".
+- **What the ear heard**: the share of the recording when this phone's detector said drone. Rotor hum counts toward Bot. Moving like a bird while a rotor hums gives "Can't tell".
+- **Result**: **Bird**, **Bot** or **Can't tell**, with a confidence and a reason in plain words, for example "Wings beating ~6 times a second and no rotor hum — bird". The ear shows a card with the evidence row by row: wing beat, path, size, sound and image check.
+- **The screen** gets only `{v, c, r, f, h, a}`: verdict, confidence, reason code, beats per second, hum yes/no/unknown and image score. It rebuilds the words itself. It shows a 🐦/🤖 chip on the drone status (and on each row when there are two drones), in the log and in the report. A confident bird (≥ 70%) changes the alert to **LIKELY A BIRD**, in calmer colours, and stops the repeat beeps. Nothing is dismissed: the drone stays on the map until you decide.
+- **Saved clips**: **Re-analyse** (or **Bird or Bot?** on older clips) in the ear's log plays the clip off-screen and checks it again, using the sound result saved with it.
+
 ## Code
 
 The code is plain JS:
@@ -224,6 +236,7 @@ The code is plain JS:
 - `ear.js`: ear mode (with the look prompt, camera clip and the ear's log) and the relay demo phones.
 - `samples.js`: taught / labelled samples (Teach and the ear's Label), their clips and the Teach JSON format.
 - `log.js`: the incident log, JSON export, printable report, and clip storage (IndexedDB).
+- `bird.js`: Bird or Bot (blob tracker, motion features, the optional COCO-SSD check, the fusion and its words).
 - `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
 - `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, the height fit (`heightFit`), the GPS frame (`Geo`), the post link (`linkPosts`), MapView, SimEngine.
@@ -242,6 +255,7 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/log.py`: an episode is saved with every field, the Log sheet lists it, tap replays, JSON export, the report prints to one A4 page, Clear all asks first.
 - `python3 test/geo.py`: GPS frame math (round trips, rotation recovery, bearings, noisy GPS, one phone), then three ears sharing GPS: pins land on their GPS spots on the street map, and failing tiles or no GPS fall back to the plain map. Tiles are a local stub; `OSM=1` uses real OpenStreetMap tiles.
 - `python3 test/camera.py`: with a fake camera, the nearest ear is asked to look, records a ~10 s clip into IndexedDB, the screen gets only the flag, and the ears' mesh messages stay small (no media).
+- `python3 test/gen_video.py` then `python3 test/bird.py`: Bird or Bot. The first renders synthetic sky clips (`.y4m`, fed to Chromium as the fake camera): a flapping bird with hand shake, a gliding bird circling, a hovering quadcopter with shake and a tree line, a drifting quadcopter, and empty sky with clouds. The second checks each verdict with the image check blocked and with it allowed, plus the sound fusion cases, and prints a confusion table. It also re-analyses a clip from the log. Then, over the relay, a bird clip gives LIKELY A BIRD on the screen with no repeat beeps and no dismissal, and a drone clip gives a Bot chip with the alert unchanged. Log and report are checked, and the ears' messages stay small.
 - `python3 test/two.py`: two drones on one phone (`two.wav`: two sources with their own ids, pitch, class, flight, alert and incident) and the two-drone demo (two tracks near the two true drones, two colours, two alerts, two incidents). `run.py` fails if any single-sound file shows a second drone.
 - `python3 test/coverage.py`: the radius math (+6 dB halves it, clamps), then three ears over the relay: the noisy one has the smallest circle, ranges listed in the Phones sheet, a phone that gets noisy shrinks its circle within seconds, circles on the street map too.
 - `python3 test/fieldkit.py`: two ears label hexa / box-fan recordings (notes, Other text, a kept clip), the screen's library gets numbers + label only, ear export → import, and the held-out recordings go from wrong to right after the library is added to Teach.

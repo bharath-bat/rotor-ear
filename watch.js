@@ -252,7 +252,7 @@
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
     Lib.load();
-    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); if (d && d.t === 'label') return Lib.add(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
+    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); if (d && d.t === 'bob') return bobFlag(d); if (d && d.t === 'label') return Lib.add(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
   }
   $('pCreate').onclick = () => joinRoom(R.randKey(4));
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
@@ -515,6 +515,14 @@
     const e = Log.get(d.id), n = model.nodes.get(d.k); if (!e || !n) return;
     e.clips = e.clips || []; if (!e.clips.some(c => c.phone === n.label)) { e.clips.push({ phone: n.label, n: d.n || 1 }); Log.save(true); logKey = tlKey = ''; }
   }
+  // Bird or Bot: that ear's verdict on its clip (numbers and codes only). A confident bird turns the alert into "likely a bird"
+  // and stops the repeat beeps, but nothing is dismissed: the person still decides.
+  function bobFlag(d) {
+    const e = Log.get(d.id), n = model.nodes.get(d.k); if (!e || !n || !RotorBird.WORD[d.v]) return;
+    const b = { v: d.v, c: Math.max(0, Math.min(100, Math.round(+d.c || 0))), r: String(d.r || '').slice(0, 10), f: Math.round(+d.f || 0), h: [1, 0, -1].includes(d.h) ? d.h : -1, a: Number.isFinite(+d.a) ? Math.round(+d.a) : -1, phone: n.label };
+    if (JSON.stringify(e.bob) !== JSON.stringify(b)) { e.bob = b; Log.save(true); logKey = tlKey = ''; }
+  }
+  const birdy = e => !!(e && e.bob && e.bob.v === 'bird' && e.bob.c >= 70);
 
   // ---------- street map (Leaflet + OpenStreetMap) under the plan, anchored by GPS ----------
   let geoMe = null, geoWatch = null, geoF = null, lmap = null, tiles = { ok: 0, bad: 0 }, geoOn = localStorage.getItem('rotorear-geomap') === '1', geoFit = 0, geoMsg = '';
@@ -593,7 +601,7 @@
       if (!D.drones.length) D.drones = [{ key: 'lead', slot: 0, f0: D.hz || 0, cls: D.cls || 'Drone', score: D.score, nAgree: st.voters || 1, agree: D.agree, flight: D.flight, dir: D.dir, est: st.est, lead: true }];
     }
     if (ws.ev === 'back') nextBeep = now + REPEAT_MS; // back within 60 s: no new alert sound
-    if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted()) tone(demo ? 'demo' : 'alert', 1); }
+    if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted() && !birdy(inc)) tone(demo ? 'demo' : 'alert', 1); } // the camera says bird: no repeat beeps
     if (ws.ev === 'lost') { if (!muted()) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
     if (ws.ev === 'gone') { inc = null; known = []; Log.save(true); }
     if (hot) {
@@ -668,10 +676,10 @@
       case 'notdrone': cls = D.hum + ' · ignored'; prog = 1 - (now - ws.since) / WATCH.notMs; note = `back to Watching in ${Math.max(0, Math.ceil((WATCH.notMs - (now - ws.since)) / 1000))} s`;
         peekT = 'Why not ˄'; peekS = D.why ? D.why.text : D.humWhy || 'not a rotor signature'; break;
       case 'drone': case 'tracking':
-        word = demo ? 'DEMO · DRONE' : 'DRONE'; cls = (D.cls || 'Drone') + (D.word ? ' · ' + D.word : '');
+        word = (demo ? 'DEMO · ' : '') + (birdy(inc) ? 'LIKELY A BIRD' : 'DRONE'); cls = (D.cls || 'Drone') + (D.word ? ' · ' + D.word : '');
         where = D.rough ? (D.where ? D.where + ' · rough, calibrate ›' : 'Position is rough. Clap to calibrate ›') : D.mesh ? [D.where, D.trend].filter(Boolean).join(' · ') : D.trend + ' · one phone: no direction';
         sub = [D.agree, 'seen ' + mmss(now - ws.first)].filter(Boolean).join(' · ');
-        pill = s === 'tracking' ? '✓ Acknowledged ' + clock(Date.now() - (now - ws.ackAt)) + ' · silent' : mt || (demo ? 'Demo tone · beeping' : 'Sound ON · beeping');
+        pill = s === 'tracking' ? '✓ Acknowledged ' + clock(Date.now() - (now - ws.ackAt)) + ' · silent' : mt || (birdy(inc) ? 'Camera says bird · beeps paused' : demo ? 'Demo tone · beeping' : 'Sound ON · beeping');
         peekT = 'Why we think so ˄'; peekS = 'rotor hum ~' + Math.round(D.hz || 0) + ' Hz' + (D.learned ? ' · ' + D.learned.replace(/^Matched your taught samples \((\d+) .*\)$/, 'matches $1 of your samples') : D.flight ? ' · ' + shortFl(D.flight).toLowerCase() : '');
         acts = s === 'drone' ? [demo ? ['replay', 'Replay demo', 'from 0:00'] : muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'banner keeps flashing'], ['ack', 'Got it', 'stops flash + beeps', 1]]
           : [muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'also silences Lost tone'], ['details', 'Details', 'where · how sure · flight']];
@@ -686,9 +694,12 @@
     }
     const b = $('status'); b.classList.remove('ready', 'watching', 'checking', 'notdrone', 'drone', 'tracking', 'lost'); b.classList.add(s);
     // two drones at once: one line each, in its map colour
-    const many = hot && D.drones.length > 1, dl = many ? D.drones.map(d => `<div class="drow"><i class="dot d${d.slot + 1}"></i><b>${esc(d.cls)}${d.word ? ' · ' + d.word : ''}</b><small>${[d.where, d.agree].filter(Boolean).map(esc).join(' · ')}</small></div>`).join('') : '';
+    const many = hot && D.drones.length > 1, dl = many ? D.drones.map(d => `<div class="drow"><i class="dot d${d.slot + 1}"></i><b>${esc(d.cls)}${d.word ? ' · ' + d.word : ''}${d.inc && d.inc.bob ? ' · ' + RotorBird.chip(d.inc.bob) : ''}</b><small>${[d.where, d.agree].filter(Boolean).map(esc).join(' · ')}</small></div>`).join('') : '';
     if ($('stDrones').dataset.k !== dl) { $('stDrones').dataset.k = dl; $('stDrones').innerHTML = dl; }
     if (many) { word = (demo ? 'DEMO · ' : '') + D.drones.length + ' DRONES'; cls = where = ''; sub = 'seen ' + mmss(now - ws.first); }
+    b.classList.toggle('birdy', hot && !many && birdy(inc)); // downgraded, not dismissed: calmer colours, the drone stays on the map
+    const bb = hot && !many && inc && inc.bob, bk = bb ? JSON.stringify(bb) : ''; // the camera's Bird / Bot chip, with its reason
+    if ($('stBob').dataset.k !== bk) { $('stBob').dataset.k = bk; $('stBob').hidden = !bb; $('stBob').innerHTML = bb ? `<span class="bob ${bb.v}">${RotorBird.chip(bb)}</span> <small>phone ${esc(bb.phone)}: ${esc(RotorBird.text(bb))}</small>` : ''; }
     setText('stIcon', icon); setText('stWord', word); $('stWord').classList.toggle('long', word.length > 13); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
     $('pill').hidden = !pill; if (pill) { setText('pill', pill); $('pill').classList.toggle('muted', !!mt); }
     $('stProg').hidden = prog == null; if (prog != null) $('stProg').firstChild.style.width = Math.round(Math.max(0, Math.min(1, prog)) * 100) + '%'; setText('stNote', note);
