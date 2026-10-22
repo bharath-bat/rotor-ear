@@ -1,5 +1,5 @@
 # Feeds each synthetic WAV into Rotor Ear through Chromium's fake microphone and prints a confusion table.
-# 'synth' = the page's own Test sound.
+# 'synth' = the page's own Test sound. Every file here holds one sound, so a second drone source is always a FAIL.
 # usage: [SAMPLES=samples.json] python test/run.py [case ...]      (needs: pip install playwright && playwright install chromium)
 import sys, os, time, json, threading, functools, http.server, socketserver
 from multiprocessing import Pool
@@ -23,29 +23,31 @@ def case(name):
         if os.environ.get('SAMPLES'): pg.set_input_files('#tImportFile', os.environ['SAMPLES'])  # taught samples (Teach → Import)
         pg.click('#start')
         if name == 'synth': pg.click('#tabTeach'); pg.click('#test'); pg.click('[data-close]')  # built-in Test sound (in the Teach sheet)
-        votes, drone_seen, feats = {c: 0 for c in COLS}, False, None
+        votes, drone_seen, feats, two = {c: 0 for c in COLS}, False, None, 0
         for i in range(22):
             time.sleep(0.5); s = pg.evaluate('window.__rotor')
             if s['state'] == 'drone': drone_seen = True
+            if sum(q['state'] == 'drone' for q in s['srcs']) > 1: two += 1
             if i < 8: continue  # let the 2 s fingerprint window fill
             if s['state'] == 'quiet' or not s['cls']: votes['QUIET'] += 1
             else: votes[s['cls']['label']] += 1; feats = s['cls']['raw']
         b.close()
-    return name, votes, drone_seen, feats
+    return name, votes, drone_seen, feats, two
 
 if __name__ == '__main__':
     srv = socketserver.ThreadingTCPServer(('127.0.0.1', 0), functools.partial(Quiet, directory=ROOT))
     PORT = srv.server_address[1]; threading.Thread(target=srv.serve_forever, daemon=True).start()
     names = sys.argv[1:] or list(EXPECT)
     with Pool(4) as pool: res = pool.map(case, names)
-    print(f"{'true \\ predicted':16s}" + ''.join(f'{c:>13s}' for c in COLS) + '   DRONE banner   result')
+    print(f"{'true \\ predicted':16s}" + ''.join(f'{c:>13s}' for c in COLS) + '   DRONE banner   2nd drone   result')
     ok_all = True
-    for name, votes, drone_seen, feats in res:
+    for name, votes, drone_seen, feats, two in res:
         n = sum(votes.values()) or 1; top = max(votes, key=votes.get); exp = EXPECT[name]
         ok = (top == exp) if exp != 'neg' else (top in ('Not a drone', 'QUIET') and not drone_seen)
         # the *_test cases are only expected right after teaching (see test/teach.py); untaught they show the "before"
         before = name.endswith('_test') and not os.environ.get('SAMPLES')
+        if two: ok = False; ok_all = False
         if not before: ok_all &= ok
-        print(f'{name:16s}' + ''.join(f'{100 * votes[c] / n:12.0f}%' for c in COLS) + f'   {"yes" if drone_seen else "no ":>12s}   {("wrong, as expected before teaching" if not ok else "right even untaught") if before else "PASS" if ok else "FAIL"}')
+        print(f'{name:16s}' + ''.join(f'{100 * votes[c] / n:12.0f}%' for c in COLS) + f'   {"yes" if drone_seen else "no ":>12s}   {two:9d}   {("wrong, as expected before teaching" if not ok else "right even untaught") if before else "PASS" if ok else "FAIL"}')
         if '-v' in os.environ.get('RUN_FLAGS', '') and feats: print('    ', json.dumps({k: round(v, 4) for k, v in feats.items()}))
     print('ALL PASS' if ok_all else 'SOME FAILED')

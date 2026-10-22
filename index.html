@@ -44,6 +44,17 @@
       <div class="card"><div class="k">Band energy</div><div class="v"><span id="nE">—</span><u>dB</u></div></div>
     </div>
     <div class="specbox"><canvas id="nSpec"></canvas></div>
+    <div class="nstatus" id="nRange"></div>
+    <!-- field kit: label what was just heard; the fingerprint numbers + label feed Teach here and the room's library -->
+    <div id="label" class="card" hidden>
+      <div class="lbhead"><b>Label this sound</b><small id="lbWhen"></small></div>
+      <div class="chips" id="lbChips"><button data-t="quad">Quadcopter</button><button data-t="fixed">Fixed-wing</button><button data-t="micro">Micro drone</button><button data-t="notdrone">Not a drone</button><button data-t="other">Other…</button></div>
+      <input id="lbText" maxlength="60" placeholder="Other: what was it? (counts as not a drone)" hidden>
+      <input id="lbNote" maxlength="200" placeholder="Notes (optional, stay on this phone)">
+      <label class="chk"><input type="checkbox" id="lbKeep"><span>also keep 5 s of sound on this phone (never sent)</span></label>
+      <button class="btn big" id="lbSave" disabled>Save label</button>
+      <div class="msg" id="lbMsg"></div>
+    </div>
     <button class="btn big" id="nStart">Start listening</button>
     <div id="nErr" class="err"></div>
     <div class="card">
@@ -54,7 +65,12 @@
     <div class="trow"><span class="k">Name</span><input id="nName" maxlength="10" placeholder="e.g. Gate"></div>
     <label class="chk"><input type="checkbox" id="nGeo"><span><b>Share GPS</b> position with the screen (latitude/longitude numbers only)</span></label>
     <div class="nstatus" id="nGeoS"></div>
-    <p class="note">Sends ~8×/sec: rotor score, pitch (Hz), band energy (dB) and envelope-peak times. Never audio. Listen-only.</p>
+    <p class="note">Sends ~8×/sec: rotor score, pitch (Hz), band energy (dB), background noise and envelope-peak times. Never audio. Listen-only.</p>
+    <div class="k">Labelled sounds on this phone <span id="lbN"></span></div>
+    <div class="list" id="lbList"></div>
+    <div class="tbtns"><button class="btn" id="lbExport">Export</button><button class="btn" id="lbImport">Import</button><input type="file" id="lbImportFile" accept="application/json,.json" hidden></div>
+    <div class="msg" id="lbLMsg"></div>
+    <p class="note">Labels tune this phone's fingerprint (same as Teach). The screen gets the six numbers and the label only: never the sound, never your notes. Export / import uses the Teach file format (your own export keeps your notes).</p>
   </div>
   <div id="earLog">
     <div class="k">This phone's log</div>
@@ -69,7 +85,7 @@
   <p class="note">Virtual phones in this page hear a synthetic drone through a real sound delay (distance ÷ 343 m/s), at loudness ∝ 1/distance², plus noise. Each runs the real detector and reports to the room's screen over the relay, like a phone.</p>
   <div class="card">
     <div class="simrow"><span>phones</span><select id="sN"><option>3</option><option selected>4</option></select>
-      <span>path</span><select id="sPath"><option value="circle">circle</option><option value="eight">figure-8</option><option value="line">fly-by line</option><option value="hover">hover</option></select></div>
+      <span>path</span><select id="sPath"><option value="circle">circle</option><option value="eight">figure-8</option><option value="line">fly-by line</option><option value="hover">hover</option><option value="two">two drones crossing</option></select></div>
     <div class="simrow"><span>speed</span><input type="range" id="sSpeed" min="0.2" max="3" step="0.1" value="1"><span>height</span><input type="range" id="sAlt" min="0" max="10" step="0.5" value="1.5"><b id="sAltV">1.5 m</b></div>
     <div class="simrow"><span>clocks off by</span><select id="sOff"><option value="0">0 ms</option><option value="400" selected>±400 ms</option><option value="3000">±3 s</option></select></div>
     <div class="simrow"><span>timing jitter</span><input type="range" id="sJit" min="0" max="20" step="0.5" value="1"><b id="sJitV">1 ms</b></div>
@@ -92,6 +108,7 @@
     <div id="stCls">Not listening · tap Listen to start</div>
     <div id="stWhere"></div>
     <div id="stSub"></div>
+    <div id="stDrones"></div>
     <div class="srow2"><button id="pill" hidden>Sound: ON</button><div id="stProg" hidden><i></i></div><span id="stNote"></span></div>
   </header>
 
@@ -149,6 +166,10 @@
     </div>
     <label class="chk"><input type="checkbox" id="toSpk" checked> play test sound / file through the speaker</label>
     <label class="chk"><input type="checkbox" id="toAna" checked> feed test sound / file straight into the detector</label>
+    <div class="k">Session library · labels from ears <span id="libN"></span></div>
+    <div class="list" id="libList"></div>
+    <div class="tbtns"><button class="btn" id="libAdd">Add all to Teach</button><button class="btn" id="libExport">Export</button></div>
+    <p class="note">Ears in this room send the six fingerprint numbers and the label of each sound they label. Never audio, never notes. Kept on this screen per room.</p>
     <p class="note">Only the six fingerprint numbers are saved, on this device. Clips (if kept) stay in this browser and are never uploaded or exported.</p>
     <button class="done" data-close>Done</button>
   </section>
@@ -194,6 +215,9 @@
       <button class="primary bigbtn" id="cStart"><b>Clap now</b><small>3 · 2 · 1 countdown, then clap once</small></button>
       <div class="tbtns"><button class="btn" id="cClick">Click from this phone</button><button class="btn" id="cSim" hidden>Simulate clap</button><button class="btn" id="cClear">Clear</button></div>
     </div>
+    <div class="k">Coverage</div>
+    <label class="chk toggle"><span>Coverage circles: how far each phone can hear a drone</span><input type="checkbox" id="covOn"></label>
+    <p class="note" id="covNote"></p>
     <div class="k">Street map</div>
     <label class="chk toggle"><span>Street map under the plan (OpenStreetMap)</span><input type="checkbox" id="geoMap"></label>
     <label class="chk toggle"><span>Share this phone's GPS position</span><input type="checkbox" id="geoMe"></label>
@@ -222,7 +246,7 @@
     <div class="k">Sound</div>
     <div class="tbtns"><button class="btn" id="mMute">Mute 5 min</button><button class="btn" id="mTest">Test alert</button></div>
     <div class="k">Demo</div>
-    <button class="btn wide" id="mDemo">Try a 60-second demo</button>
+    <div class="tbtns"><button class="btn" id="mDemo">60-second demo</button><button class="btn" id="mDemo2">Two drones crossing</button></div>
     <div class="k">Log</div>
     <button class="btn wide" id="mLog">Incident log</button>
     <div class="k">Mode</div>
@@ -238,6 +262,7 @@
 <script src="mesh/peerjs.min.js"></script>
 <script src="mesh/core.js"></script>
 <script src="log.js"></script>
+<script src="samples.js"></script>
 <script src="watch.js"></script>
 <script src="ear.js"></script>
 </body>

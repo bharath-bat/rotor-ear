@@ -29,7 +29,7 @@
     { id: 'quad', label: 'Quadcopter', group: 'Quadcopter' }, { id: 'fixed', label: 'Fixed-wing', group: 'Fixed-wing' },
     { id: 'micro', label: 'Micro drone', group: 'Micro drone' }, { id: 'fan', label: 'Fan / AC', group: 'Not a drone' },
     { id: 'engine', label: 'Engine / bike', group: 'Not a drone' }, { id: 'bird', label: 'Bird', group: 'Not a drone' },
-    { id: 'voice', label: 'Voice', group: 'Not a drone' }, { id: 'other', label: 'Other', group: 'Not a drone' }
+    { id: 'voice', label: 'Voice', group: 'Not a drone' }, { id: 'notdrone', label: 'Not a drone', group: 'Not a drone' }, { id: 'other', label: 'Other', group: 'Not a drone' }
   ];
 
   function makeAnalyser(ctx) {
@@ -97,6 +97,87 @@
     }
   }
 
+  // Hearing radius from this phone's noise floor in the drone band (inverse square, free field, no wind).
+  // Assumption: a reference small quadcopter whose strongest rotor harmonics are ~75 dB SPL at 1 m, heard by a typical
+  // phone mic (−26 dBFS at 94 dB SPL, so −45 dBFS), reads COVER.refDb in this analyser's per-bin dB at 1 m (a full-scale
+  // sine reads about −20 dB here, measured). The detector needs those harmonics COVER.needDb above the local floor
+  // (HIT_DB + 3 dB margin), and the level falls 6 dB per doubling of distance (20·log10 r).
+  const COVER = { refDb: -65, needDb: 12, minM: 2, maxM: 300, f0: 150, f1: 2000, text: 'Assumes a small quadcopter (~75 dB at 1 m), open ground, no wind: sound falls 6 dB per doubling of distance and must stay 12 dB above this phone\'s background noise. Real range varies a lot.' };
+  const hearingRadius = floorDb => clamp(Math.pow(10, (COVER.refDb - floorDb - COVER.needDb) / 20), COVER.minM, COVER.maxM);
+
+  // One sound the detector follows: its own pitch history, confidence, state, fingerprint and flight state.
+  // The detector runs two of these, so two drones at once (two harmonic combs with distinct pitches) stay apart.
+  class Source {
+    constructor(det, id) {
+      Object.assign(this, { det, id, hist: [], eh: [], fp: [], onset: 0, probs: null, lprobs: null, conf: 0, state: 'quiet', since: 0, seen: 0, lastF: 0, ref: 0 });
+      this.flight = new FlightTracker(); this.flight.blades = det.blades;
+      this.out = { id, conf: 0, state: 'quiet', f0: 0, hits: 0, e: -120, level: -120, cls: null, feat: null, flight: null };
+    }
+    idle(now) { return this.state === 'quiet' && now - this.seen > HIST_MS; }
+    // ~0.6 s power average: rotors beat against each other, so single frames jump by several dB.
+    avgEnergy(eDb) {
+      this.eh.push(Math.pow(10, eDb / 10)); if (this.eh.length > 12) this.eh.shift();
+      return 10 * Math.log10(this.eh.reduce((a, b) => a + b, 0) / this.eh.length);
+    }
+    classify(f0Med) {
+      // skip the first 0.4 s after the sound appears: the onset ramp would read as amplitude modulation
+      const det = this.det, ag = det.aggregate(this.fp.filter(x => x.t > this.onset + 400 && Math.abs(x.f - f0Med) / f0Med < 0.05));
+      if (!ag) return null;
+      const m = det.match(ag.x);
+      this.probs = this.probs ? this.probs.map((v, i) => v + 0.15 * (m.p[i] - v)) : m.p;
+      this.lprobs = this.lprobs ? this.lprobs.map((v, i) => v + 0.15 * (m.lp[i] - v)) : m.lp;
+      const bi = this.probs.indexOf(Math.max(...this.probs)), gn = GROUPS[bi];
+      const inGroup = m.all.filter(k => k.group === gn).sort((a, b) => b.s - a.s)[0];
+      const nearest = m.hand.slice().sort((a, b) => a.d - b.d)[0];
+      return { label: gn, drone: bi < 3, conf: Math.round(100 * this.probs[bi]),
+        learned: this.lprobs[bi] > this.probs[bi] / 2, // most of the winning class came from taught samples
+        why: bi === 3 ? (inGroup.why || 'not a rotor signature') : '',
+        x: ag.x, raw: ag.raw, probs: this.probs.slice(), nearest: nearest.id };
+    }
+    // c: this frame's comb for this source ({ f0, s, hits, fr: frame features }) or null
+    step(now, c, audible, level) {
+      const det = this.det, hist = this.hist;
+      hist.push(c && audible ? { t: now, f0: c.f0, s: c.s, hits: c.hits } : { t: now, f0: 0, s: 0, hits: 0 });
+      while (hist.length && now - hist[0].t > HIST_MS) hist.shift();
+      // stability: fraction of recent frames that agree on the same pitch and are harmonic-rich
+      const good = hist.filter(h => h.hits >= 3);
+      let stab = 0, f0Med = 0, sMean = 0, hMean = 0;
+      if (good.length >= 3) {
+        f0Med = median(good.map(h => h.f0));
+        const agree = good.filter(h => Math.abs(h.f0 - f0Med) / f0Med < 0.04);
+        stab = agree.length / hist.length;
+        sMean = agree.reduce((a, h) => a + h.s, 0) / Math.max(1, agree.length);
+        hMean = agree.reduce((a, h) => a + h.hits, 0) / Math.max(1, agree.length);
+      }
+      this.ref = f0Med || (c ? c.f0 : this.ref);
+      const harmonicity = clamp((sMean - 5) / 8, 0, 1) * clamp((hMean - 2) / 4, 0, 1);
+      const stability = clamp((stab - 0.3) / 0.45, 0, 1);
+      const raw = 100 * harmonicity * stability;
+      this.conf += (raw > this.conf ? 0.08 : 0.05) * (raw - this.conf);
+      // hysteresis + minimum dwell to stop flicker
+      const cf = this.conf, dwell = now - this.since; let st = this.state;
+      if (st === 'quiet') { if (cf > 60) st = 'drone'; else if (cf > 30) st = 'some'; }
+      else if (st === 'some') { if (cf > 60) st = 'drone'; else if (cf < 18 && dwell > 1000) st = 'quiet'; }
+      else if (st === 'drone') { if (cf < 42 && dwell > 1500) st = cf < 18 ? 'quiet' : 'some'; }
+      if (st !== this.state) { this.state = st; this.since = now; }
+      const f0 = stab > 0.3 ? f0Med : 0;
+      // fingerprint: collect features while this comb is present, classify over ~2 s
+      if (c && audible) { if (!this.fp.length) this.onset = now; this.fp.push(Object.assign({ t: now }, c.fr)); this.lastF = c.fr.f; this.seen = now; } else this.lastF = 0;
+      while (this.fp.length && now - this.fp[0].t > FP_MS) this.fp.shift();
+      let cls = null;
+      if (f0 && st !== 'quiet') cls = this.classify(f0Med);
+      else if (st === 'quiet') this.probs = this.lprobs = null;
+      // DRONE NEARBY needs a drone fingerprint; a "not a drone" fingerprint turns it into NOT A DRONE (hum)
+      const shown = st === 'quiet' ? 'quiet' : !cls ? (st === 'drone' ? 'some' : st) : cls.drone ? st : 'hum';
+      Object.assign(this.out, { conf: Math.round(cf), state: shown, f0, hits: Math.round(hMean), level: Math.round(level),
+        e: f0 ? +this.avgEnergy(det.bandEnergy(f0)).toFixed(1) : (this.eh.length = 0, -120),
+        cls, feat: cls ? cls.x : null });
+      const fOk = f0 && this.lastF && Math.abs(this.lastF - f0Med) / f0Med < 0.04;
+      this.out.flight = this.flight.update(now, fOk ? this.lastF : 0, this.out.e, shown === 'drone' || (shown === 'some' && this.flight.state !== ''));
+    }
+  }
+  const RANK = { quiet: 0, hum: 1, some: 2, drone: 3 };
+
   class RotorDetector {
     constructor(analyser) {
       this.an = analyser;
@@ -104,12 +185,17 @@
       this.bins = Math.min(analyser.frequencyBinCount, Math.ceil(FMAX / this.binHz) + 2);
       this.db = new Float32Array(analyser.frequencyBinCount);
       this.fl = new Float32Array(analyser.frequencyBinCount);
+      this.db0 = this.db; this.fl0 = this.fl; this.dbm = new Float32Array(analyser.frequencyBinCount); this.flm = new Float32Array(analyser.frequencyBinCount); // + with the strongest comb masked out
       this.pre = new Float64Array(this.bins + 1);
-      this.hist = []; this.eh = []; this.fp = []; this.onset = 0; this.probs = null; this.lprobs = null; this.cap = null; this.conf = 0; this.state = 'quiet'; this.since = 0;
+      this.cap = null; this.nid = 0; this.b = 2; this.nfh = []; this.noise = null;
       this.learned = []; this.useLearned = true; // taught samples: [{tag, x}]
-      this.flight = new FlightTracker();
-      this.out = { conf: 0, state: 'quiet', f0: 0, hits: 0, e: -120, level: -120, cls: null, feat: null };
+      this.src = [new Source(this, 0), new Source(this, 0)]; this.li = 0;
+      this.out = this.src[0].out; this.outs = [];
     }
+    get blades() { return this.b; }
+    set blades(v) { this.b = v; this.src.forEach(s => s.flight.blades = v); }
+    get flight() { return this.src[this.li].flight; }
+    forget() { this.src.forEach(s => s.probs = s.lprobs = null); } // taught samples changed: re-learn class shares
     // Local noise floor: mean dB of neighbouring bins (centre excluded), via prefix sums.
     floor() {
       const n = this.bins, Wd = 24, pre = this.pre, db = this.db;
@@ -140,7 +226,22 @@
       // a real rotor comb has its fundamental and most low harmonics present
       if (e1 < HIT_DB) { s *= 0.3; hits = Math.min(hits, 2); }
       else if (low < 3) { s *= 0.5; hits = Math.min(hits, 3); }
-      return { s, hits };
+      return { s, hits, low };
+    }
+    // the best harmonic comb in the current spectrum (octave guard: prefer the lowest candidate scoring close to the best)
+    scan(away) { // the best comb; away: a second comb, so skip pitches within 8% of the first (what is left of it after masking)
+      let best = { f0: 0, s: 0, hits: 0, low: 0 }; const cand = [];
+      for (let f0 = F0_MIN; f0 <= F0_MAX; f0 += 1) {
+        if (away && Math.abs(f0 - away) / away < 0.08) continue;
+        const r = this.score(f0); cand.push(f0, r.s, r.hits, r.low);
+        if (r.s > best.s) best = { f0, s: r.s, hits: r.hits, low: r.low };
+      }
+      // (a second comb only looks at true sub-octaves, best/2 and best/3: anything lower would be leftovers of the first)
+      const sub = f => !away || [2, 3].some(k => Math.abs(f * k - best.f0) / best.f0 < 0.03);
+      for (let k = 0; k < cand.length; k += 4) {
+        if (cand[k + 1] >= best.s * 0.85 && cand[k + 2] >= best.hits - 1 && sub(cand[k])) { best = { f0: cand[k], s: cand[k + 1], hits: cand[k + 2], low: cand[k + 3] }; break; }
+      }
+      return best;
     }
     sumPow(f, tolScale) {
       const tol = Math.max(1, Math.round(this.tolBins(f) * (tolScale || 1))), c = Math.round(f / this.binHz); let p = 0;
@@ -153,12 +254,6 @@
       for (let h = 1; h <= NH; h++) { const f = f0 * h; if (f + f0 / 2 > FMAX) break; ps += this.sumPow(f); pn += this.sumPow(f + f0 / 2); }
       return 10 * Math.log10(Math.max(ps - pn, ps * 1e-3) + 1e-14);
     }
-    // ~0.6 s power average: rotors beat against each other, so single frames jump by several dB.
-    avgEnergy(eDb) {
-      this.eh.push(Math.pow(10, eDb / 10)); if (this.eh.length > 12) this.eh.shift();
-      return 10 * Math.log10(this.eh.reduce((a, b) => a + b, 0) / this.eh.length);
-    }
-
     // ---- per-frame fingerprint measurements around a comb at f0 ----
     frameFeatures(f0) {
       const db = this.db, fl = this.fl, bh = this.binHz;
@@ -228,21 +323,6 @@
       const lp = GROUPS.map(gn => learned.reduce((a, k) => a + (k.group === gn ? k.s / tot : 0), 0));
       return { p, lp, all, hand };
     }
-    classify(now, f0Med) {
-      // skip the first 0.4 s after the sound appears: the onset ramp would read as amplitude modulation
-      const ag = this.aggregate(this.fp.filter(x => x.t > this.onset + 400 && Math.abs(x.f - f0Med) / f0Med < 0.05));
-      if (!ag) return null;
-      const m = this.match(ag.x);
-      this.probs = this.probs ? this.probs.map((v, i) => v + 0.15 * (m.p[i] - v)) : m.p;
-      this.lprobs = this.lprobs ? this.lprobs.map((v, i) => v + 0.15 * (m.lp[i] - v)) : m.lp;
-      const bi = this.probs.indexOf(Math.max(...this.probs)), gn = GROUPS[bi];
-      const inGroup = m.all.filter(k => k.group === gn).sort((a, b) => b.s - a.s)[0];
-      const nearest = m.hand.slice().sort((a, b) => a.d - b.d)[0];
-      return { label: gn, drone: bi < 3, conf: Math.round(100 * this.probs[bi]),
-        learned: this.lprobs[bi] > this.probs[bi] / 2, // most of the winning class came from taught samples
-        why: bi === 3 ? (inGroup.why || 'not a rotor signature') : '',
-        x: ag.x, raw: ag.raw, probs: this.probs.slice(), nearest: nearest.id };
-    }
     // Teach mode: collect comb frames for a clip, then return its fingerprint (or null if no steady hum).
     startCapture() { this.cap = []; }
     stopCapture() {
@@ -252,65 +332,61 @@
       return this.aggregate(cap.filter(x => Math.abs(x.f - fm) / fm < 0.05));
     }
 
+    // Swap in the spectrum with the strongest comb's harmonics flattened to the floor, so a second comb can be scored on its own.
+    // the spectrum with the strongest comb's harmonics flattened onto the floor (this.dbm / this.flm), so a second comb can be scored on its own
+    mask(f0) {
+      const db = this.dbm, hit = []; db.set(this.db);
+      for (let h = 1; f0 * h < FMAX; h++) { const tol = Math.round(f0 * h * 0.045 / this.binHz) + 1, c = Math.round(f0 * h / this.binHz); // ±4.5% + 1 bin: all rotors of one drone + window leakage
+        for (let i = Math.max(0, c - tol); i <= c + tol && i < this.bins; i++) { db[i] = Math.min(db[i], this.fl[i]); hit.push(i); } }
+      const keep = [this.db, this.fl]; this.db = db; this.fl = this.flm; this.floor(); // the floor without that comb is lower, so flatten the masked bins onto it too
+      hit.forEach(i => { db[i] = Math.min(db[i], this.fl[i]); }); [this.db, this.fl] = keep;
+    }
+    use(masked) { if (masked) { this.db = this.dbm; this.fl = this.flm; } else { this.db = this.db0; this.fl = this.fl0; } }
     step(now) {
       const db = this.db, n = this.bins;
       this.an.getFloatFrequencyData(db);
       let tot = 0;
       for (let i = 0; i < n; i++) { if (!isFinite(db[i])) db[i] = -160; tot += Math.pow(10, db[i] / 10); }
-      const level = 10 * Math.log10(tot + 1e-20);
-      this.floor();
-      let best = { f0: 0, s: 0, hits: 0 }; const cand = [];
-      for (let f0 = F0_MIN; f0 <= F0_MAX; f0 += 1) {
-        const r = this.score(f0); cand.push(f0, r.s, r.hits);
-        if (r.s > best.s) best = { f0, s: r.s, hits: r.hits };
+      const level = 10 * Math.log10(tot + 1e-20), audible = level > -75;
+      this.floor(); this.measureNoise(now);
+      // up to two combs: the strongest, then the strongest one left once its harmonics are masked: pitch > 8% apart and its own
+      // fundamental + low harmonics (so the odd partials of one hum, e.g. 150 Hz left over from 50 Hz mains, are not a second sound)
+      const c1 = this.scan(), cs = [];
+      if (audible && c1.hits >= 3) { c1.fr = this.frameFeatures(c1.f0); cs.push(c1); if (this.cap) this.cap.push(Object.assign({ t: now }, c1.fr)); }
+      if (cs.length) {
+        this.mask(c1.fr.f); this.use(true); const c2 = this.scan(c1.fr.f); this.use(false);
+        if (c2.hits >= 3 && c2.low >= 3) {
+          // its pitch comes from the real spectrum (±5%), like the strongest comb's, so a drone reads the same pitch whichever comb it is
+          for (let f = Math.round(c2.f0 * 0.95), b = -1; f <= c2.f0 * 1.05; f++) { if (Math.abs(f - c1.fr.f) / c1.fr.f < 0.08) continue; const r = this.score(f); if (r.s > b) { b = r.s; c2.pf = f; } }
+          c2.f0 = c2.pf; this.use(true); c2.fr = this.frameFeatures(c2.f0); c2.masked = true; this.use(false); cs.push(c2);
+        }
       }
-      // octave guard: prefer the lowest candidate scoring close to the best
-      for (let k = 0; k < cand.length; k += 3) {
-        if (cand[k + 1] >= best.s * 0.85 && cand[k + 2] >= best.hits - 1) { best = { f0: cand[k], s: cand[k + 1], hits: cand[k + 2] }; break; }
-      }
-      const audible = level > -75, hist = this.hist;
-      hist.push({ t: now, f0: best.f0, s: audible ? best.s : 0, hits: audible ? best.hits : 0 });
-      while (hist.length && now - hist[0].t > HIST_MS) hist.shift();
-      // stability: fraction of recent frames that agree on the same pitch and are harmonic-rich
-      const good = hist.filter(h => h.hits >= 3);
-      let stab = 0, f0Med = 0, sMean = 0, hMean = 0;
-      if (good.length >= 3) {
-        f0Med = median(good.map(h => h.f0));
-        const agree = good.filter(h => Math.abs(h.f0 - f0Med) / f0Med < 0.04);
-        stab = agree.length / hist.length;
-        sMean = agree.reduce((a, h) => a + h.s, 0) / Math.max(1, agree.length);
-        hMean = agree.reduce((a, h) => a + h.hits, 0) / Math.max(1, agree.length);
-      }
-      const harmonicity = clamp((sMean - 5) / 8, 0, 1) * clamp((hMean - 2) / 4, 0, 1);
-      const stability = clamp((stab - 0.3) / 0.45, 0, 1);
-      const raw = 100 * harmonicity * stability;
-      this.conf += (raw > this.conf ? 0.08 : 0.05) * (raw - this.conf);
-      // hysteresis + minimum dwell to stop flicker
-      const c = this.conf, dwell = now - this.since; let st = this.state;
-      if (st === 'quiet') { if (c > 60) st = 'drone'; else if (c > 30) st = 'some'; }
-      else if (st === 'some') { if (c > 60) st = 'drone'; else if (c < 18 && dwell > 1000) st = 'quiet'; }
-      else if (st === 'drone') { if (c < 42 && dwell > 1500) st = c < 18 ? 'quiet' : 'some'; }
-      if (st !== this.state) { this.state = st; this.since = now; }
-      const f0 = stab > 0.3 ? f0Med : 0;
-
-      // fingerprint: collect features while a comb is present, classify over ~2 s
-      if (audible && best.hits >= 3) {
-        if (!this.fp.length) this.onset = now;
-        const fr = Object.assign({ t: now }, this.frameFeatures(best.f0));
-        this.fp.push(fr); if (this.cap) this.cap.push(fr); this.lastF = fr.f;
-      } else this.lastF = 0;
-      while (this.fp.length && now - this.fp[0].t > FP_MS) this.fp.shift();
-      let cls = null;
-      if (f0 && st !== 'quiet') cls = this.classify(now, f0Med);
-      else if (st === 'quiet') this.probs = this.lprobs = null;
-      // DRONE NEARBY needs a drone fingerprint; a "not a drone" fingerprint turns it into NOT A DRONE (hum)
-      const shown = st === 'quiet' ? 'quiet' : !cls ? (st === 'drone' ? 'some' : st) : cls.drone ? st : 'hum';
-      Object.assign(this.out, { conf: Math.round(c), state: shown, f0, hits: Math.round(hMean), level: Math.round(level),
-        e: f0 ? +this.avgEnergy(this.bandEnergy(f0)).toFixed(1) : (this.eh.length = 0, -120),
-        cls, feat: cls ? cls.x : null });
-      const fOk = f0 && this.lastF && Math.abs(this.lastF - f0Med) / f0Med < 0.04;
-      this.out.flight = this.flight.update(now, fOk ? this.lastF : 0, this.out.e, shown === 'drone' || (shown === 'some' && this.flight.state !== ''));
-      return this.out;
+      // each comb goes to the source already following that pitch (closest first, within 12%), else to an idle source (a new id)
+      const got = new Map(), pairs = [];
+      cs.forEach(c => this.src.forEach((q, i) => { const d = q.ref && !q.idle(now) ? Math.abs(c.f0 - q.ref) / q.ref : 1; if (d < 0.12) pairs.push([d, c, i]); }));
+      pairs.sort((x, y) => x[0] - y[0]).forEach(([, c, i]) => { if (!got.has(i) && ![...got.values()].includes(c)) got.set(i, c); });
+      cs.filter(c => ![...got.values()].includes(c)).forEach(c => { const i = [0, 1].find(k => !got.has(k) && this.src[k].idle(now)); if (i != null) { this.src[i] = new Source(this, ++this.nid); got.set(i, c); } });
+      // the masked spectrum serves the second comb's source; everything else reads the real one
+      const isM = i => got.has(i) && got.get(i).masked;
+      [0, 1].forEach(i => { this.use(isM(i)); this.src[i].step(now, got.get(i), audible, level); }); this.use(false);
+      // lead = the source the single-drone UI follows; it moves only to a source in a stronger state
+      const L = this.src[this.li], O = this.src[1 - this.li];
+      if (RANK[O.out.state] > RANK[L.out.state] || (L.out.state === 'quiet' && O.out.state === 'quiet' && O.conf > L.conf)) this.li = 1 - this.li;
+      const o = this.out = this.src[this.li].out, alt = this.src[1 - this.li].out;
+      this.outs = [o, alt].filter(x => x.state !== 'quiet');
+      o.alt = alt.state !== 'quiet' ? alt : null; alt.alt = null;
+      o.nf = this.noise; o.hr = this.noise == null ? null : Math.round(hearingRadius(this.noise));
+      return o;
+    }
+    // drone-band noise floor (dB per bin): the median local floor 150 Hz–2 kHz, then the 20th percentile over ~3 s;
+    // refreshed every 2 s. Background only: frames where this phone hears no harmonic sound (a nearby drone would
+    // otherwise shrink the circle it is in), unless it has heard one for 30 s straight (a fan that never stops).
+    measureNoise(now) {
+      if (this.src.every(q => q.state === 'quiet')) this.calm = now; else if (now - (this.calm || 0) < 30000 && this.noise != null) return;
+      const a = Math.max(1, Math.round(COVER.f0 / this.binHz)), b = Math.min(this.bins - 1, Math.round(COVER.f1 / this.binHz));
+      const v = Array.from(this.fl.subarray(a, b)).sort((x, y) => x - y);
+      this.nfh.push([now, v[v.length >> 1]]); while (now - this.nfh[0][0] > 3000) this.nfh.shift();
+      if (!this.nfAt || now - this.nfAt > 2000) { this.nfAt = now; const v = this.nfh.map(x => x[1]).sort((x, y) => x - y); this.noise = Math.round(v[Math.floor(v.length * 0.2)] * 10) / 10; }
     }
   }
 
@@ -358,6 +434,7 @@
       }
       return this;
     }
+    again() { if (this.s === 'tracking') { this.s = 'drone'; this.ack = false; } } // another drone joined: alert again, un-acknowledged
     acknowledge(now) { if (this.s === 'drone') { this.ack = true; this.ackAt = now; this.s = 'tracking'; } }
     dismiss(now) { if (this.s === 'lost' || this.s === 'notdrone') { this.s = 'watching'; this.since = now; this.ack = false; this.ev = 'gone'; } }
   }
@@ -403,5 +480,5 @@
     return gn;
   }
 
-  g.RotorEar = { RotorDetector, FlightTracker, FLIGHT, WatchState, WATCH, likelihood, STATES, makeAnalyser, syntheticDrone, syntheticFan, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
+  g.RotorEar = { RotorDetector, COVER, hearingRadius, FlightTracker, FLIGHT, WatchState, WATCH, likelihood, STATES, makeAnalyser, syntheticDrone, syntheticFan, ambientNoise, NH, FEATS, CLASSES, GROUPS, TAGS };
 })(window);
