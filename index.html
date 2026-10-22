@@ -118,6 +118,8 @@
     <div id="replayBar" hidden><span id="replayT"></span><button id="replayX" aria-label="Stop replay">✕</button></div>
     <div id="mapTag">MAP · this phone only until others join</div>
     <div id="mapInfo"></div>
+    <div id="handoff" hidden></div>
+    <div id="side" hidden><canvas></canvas><span id="sideT"></span></div>
     <button id="addPhones" hidden><b>+ Add phones for a position</b><small>opens the Phones sheet</small></button>
     <div id="endCard" hidden><b>That was the demo.</b><span>4 phones · no audio leaves the phones</span>
       <button id="endPhones">Try it with your friends' phones →</button><button id="endReplay">Replay demo</button></div>
@@ -178,7 +180,9 @@
   <section class="sheet" id="details" hidden>
     <div class="grab"></div>
     <div class="shead"><h2>Details</h2></div>
-    <div class="k">Why we think so</div>
+    <div class="k" id="dWhyK">Why we think so</div>
+    <p id="dReason"></p>
+    <div id="dBars"></div>
     <ul id="dWhy"></ul>
     <div class="score"><span><b>Match score</b><small id="dScoreS">how close to a class template · not accuracy</small></span><em id="dScore">—</em></div>
     <div class="k">Flight</div>
@@ -222,6 +226,12 @@
     <label class="chk toggle"><span>Street map under the plan (OpenStreetMap)</span><input type="checkbox" id="geoMap"></label>
     <label class="chk toggle"><span>Share this phone's GPS position</span><input type="checkbox" id="geoMe"></label>
     <p class="note" id="geoMsg">Ears can share their GPS too (an opt-in on each phone). Only latitude and longitude numbers go to this screen. GPS only anchors and turns the plan: the pins keep their metre positions.</p>
+    <div class="k">Linked watch posts <span id="lkState"></span></div>
+    <p class="note">Link this screen with other posts' screens by one code. Posts share only track numbers: drone id, position, class, pitch, time. Never audio, never phone data.</p>
+    <div class="trow"><input id="lkCode" placeholder="link code" maxlength="12" autocapitalize="off"><input id="lkName" placeholder="this post's name" maxlength="16"><button class="btn" id="lkGo">Link</button></div>
+    <div class="k">Where this post sits, when there's no GPS · metres and degrees in a plan all posts agree on</div>
+    <div class="trow lkf"><label>East m<input id="lkE" type="number" step="1" value="0"></label><label>North m<input id="lkN" type="number" step="1" value="0"></label><label>Turn °<input id="lkR" type="number" step="5" value="0"></label></div>
+    <p class="note" id="lkMsg"></p>
     <div class="tbtns"><button class="btn" id="pShare">Share join link</button><button class="btn done2" data-close>Done</button></div>
     <button class="btn" id="pLeave" hidden>Leave room</button>
   </section>

@@ -5,7 +5,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const { RotorDetector, makeAnalyser, syntheticDrone, FEATS, CLASSES, TAGS, NH, WatchState, WATCH, likelihood, STATES } = window.RotorEar;
+  const { RotorDetector, whyFrom, makeAnalyser, syntheticDrone, FEATS, CLASSES, TAGS, NH, WatchState, WATCH, likelihood, STATES } = window.RotorEar;
   const R = window.RotorMesh, ME = 'me';
   let ctx, analyser, bus, det, tap, micStream, micSrc, testNodes = null, fileSrc = null, spk, ana, errMsg = '', listenStart = 0;
   const S = window.__rotor = { conf: 0, state: 'off', f0: 0, hits: 0, cls: null };
@@ -15,6 +15,7 @@
   const clock = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
   const esc = t => String(t).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
   const setText = (id, t) => { const e = $(id); if (e.textContent !== t) e.textContent = t; };
+  const setHTML = (id, t) => { const e = $(id); if (e._h !== t) { e._h = t; e.innerHTML = t; } };
 
   // ---------- theme: Night (default) or Sun (outdoors) ----------
   let theme = localStorage.getItem('rotorear-theme') || 'dark', cols = null;
@@ -259,12 +260,79 @@
   $('pShare').onclick = () => { if (!hub) joinRoom(R.randKey(4)); const url = $('pLink').value; navigator.share ? navigator.share({ title: 'Rotor Ear listening phone', url }).catch(() => {}) : $('pCopy').onclick(); };
   $('pLeave').onclick = () => { location.hash = 'screen'; location.reload(); };
 
+  // Linked watch posts: screens that joined one link code swap only track numbers, twice a second: drone id (shared across
+  // posts), position in a shared frame, class, pitch, time. The frame is GPS (lat/lon) when both posts have it, else each
+  // post's manual East/North offset and turn. Other posts' drones are drawn faded; a drone that leaves one post and turns up
+  // at another (pitch within 8 %, seen there in the last 20 s, position plausible) keeps its id: a hand-off, one incident id.
+  const Link = (() => {
+    const K = 'rotorear-link', me = R.randKey(5), cfg = Object.assign({ code: '', name: '', e: 0, n: 0, rot: 0 }, (() => { try { return JSON.parse(localStorage.getItem(K) || '{}'); } catch (e) { return {}; } })());
+    let net = null, status = '', sentAt = 0, note = null; const posts = {}, seen = {}, told = {}; // seen[gid]: last sighting at another post, in our frame
+    const ang = () => cfg.rot * Math.PI / 180;
+    const toShared = (x, y) => { const c = Math.cos(ang()), s = Math.sin(ang()); return [+(c * x - s * y + cfg.e).toFixed(2), +(s * x + c * y + cfg.n).toFixed(2)]; };
+    const fromShared = (x, y) => { const c = Math.cos(ang()), s = Math.sin(ang()); x -= cfg.e; y -= cfg.n; return [c * x + s * y, -s * x + c * y]; };
+    const short = g => '#' + String(g).slice(-4);
+    const fill = () => { $('lkCode').value = cfg.code; $('lkName').value = cfg.name; $('lkE').value = cfg.e; $('lkN').value = cfg.n; $('lkR').value = cfg.rot; $('lkGo').textContent = net ? 'Unlink' : 'Link'; };
+    const save = () => localStorage.setItem(K, JSON.stringify(cfg));
+    function data(d) {
+      if (!d || d.t !== 'post' || d.p === me) return;
+      const P = posts[d.p] = { name: String(d.name || 'post').slice(0, 16), at: Date.now(), demo: !!d.demo, tr: [] };
+      (d.tr || []).slice(0, 8).forEach(q => {
+        const xy = q.ll && geoF ? geoF.fromLatLng(q.ll[0], q.ll[1]) : isFinite(q.sx) && isFinite(q.sy) ? fromShared(q.sx, q.sy) : null; if (!xy) return;
+        const r = { g: String(q.g), x: xy[0], y: xy[1], cls: String(q.cls || 'Drone'), f0: +q.f0 || 0, z: q.z == null ? null : +q.z, post: d.p, name: P.name, at: P.at };
+        P.tr.push(r); seen[r.g] = r;
+      });
+    }
+    function start() {
+      cfg.code = $('lkCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12); cfg.name = $('lkName').value.trim().slice(0, 16) || 'Post ' + me.slice(0, 2).toUpperCase();
+      if (!cfg.code) { setText('lkMsg', 'Type a link code first (the same on every post).'); return; }
+      save(); net = R.linkPosts(cfg.code, me, { status: s => status = s, data }); fill();
+    }
+    $('lkGo').onclick = () => { if (net) { net.stop(); net = null; status = ''; cfg.code = ''; save(); fill(); } else start(); };
+    ['lkE', 'lkN', 'lkR'].forEach(id => $(id).onchange = () => { cfg.e = +$('lkE').value || 0; cfg.n = +$('lkN').value || 0; cfg.rot = +$('lkR').value || 0; save(); });
+    fill(); if (cfg.code) start();
+    return {
+      get on() { return !!net; },
+      get name() { return cfg.name; },
+      live: () => Object.values(posts).filter(p => Date.now() - p.at < 5000),
+      // twice a second: our drones (those with a position) in the shared frame
+      tick(drones, demo) {
+        const t = Date.now(); if (!net || t - sentAt < 500) return; sentAt = t;
+        net.send({ t: 'post', p: me, name: cfg.name, at: t, demo, tr: drones.filter(d => d.est && d.inc).map(d => Object.assign({ g: d.inc.gid, sx: toShared(d.est[0], d.est[1])[0], sy: toShared(d.est[0], d.est[1])[1], cls: d.cls, f0: Math.round(d.f0), z: d.h && d.h.ok ? d.h.z : null },
+          geoF ? { ll: geoF.toLatLng(d.est[0], d.est[1]).map(v => +v.toFixed(7)) } : {})) });
+      },
+      // a new drone here: the same one another post had in the last 20 s? → its id and that post's name
+      match(d) {
+        const t = Date.now(); let best = null, bs = 1e9;
+        Object.values(seen).forEach(r => { const age = (t - r.at) / 1000, df = Math.abs(r.f0 - d.f0) / (d.f0 || 1); if (age > 20 || df > 0.08) return;
+          if (d.est && Math.hypot(d.est[0] - r.x, d.est[1] - r.y) > 15 + 25 * age) return; // faster than 25 m/s: not the same drone
+          const sc = df / 0.08 + age / 20; if (sc < bs) { bs = sc; best = r; } });
+        return best;
+      },
+      say(text) { note = { text, until: performance.now() + 8000 }; },
+      // other posts' drones to draw (not the ones we have ourselves) · "handed off to …" once per drone of ours that went there
+      remote(mine) {
+        const out = [], ids = mine.map(d => d.inc && d.inc.gid);
+        this.live().forEach(p => p.tr.forEach(r => {
+          if (!ids.includes(r.g)) out.push({ x: r.x, y: r.y, label: p.name + ' ' + short(r.g) + (p.demo && !sim ? ' · demo' : ''), g: r.g, name: p.name });
+          const e = Log.list.find(x => x.gid === r.g && x.type === 'drone');
+          if (e && !ids.includes(r.g) && !told[r.g] && e.from !== p.name) { told[r.g] = 1; e.to = p.name; Log.save(true); this.say(`⇄ Drone ${short(r.g)} handed off to ${p.name}`); }
+        }));
+        return out;
+      },
+      get note() { return note && performance.now() < note.until ? note.text : ''; },
+      get state() { const n = this.live().length; return net ? `· ${esc(cfg.name)} · ${n ? 'linked with ' + this.live().map(p => esc(p.name)).join(', ') : esc(status || 'connecting…')}` : ''; },
+      short,
+    };
+  })();
+  window.__link = Link;
+
   // Demo: 4 simulated phones + a scripted drone on this screen (real sound delays, clock offsets, jitter, network
   // delay). Marked DEMO the whole time: stripe, "DEMO · DRONE", hatched marker, demo tone, DEMO timeline rows.
   function startDemo(hp) {
     if (sim) return;
     ensureCtx(); openSheet(null);
-    const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1) });
+    const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1),
+      alt: +(hp.get('alt') || 1.5), side: +(hp.get('side') || 6), loud: +(hp.get('loud') || 0), ox: +(hp.get('ox') || 0) }); // alt: the drone's height (m) on the non-scripted paths; side: the phones' square (m); loud: dB louder drone; ox: this post's place on the 'cross' line
     const m = new R.MeshModel({}), links = eng.nodes.map(n => new R.LoopLink(m, n));
     eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.blades = blades; });
     sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null;
@@ -322,6 +390,7 @@
     setText('cNext', c.active && c.spot ? 'Next: clap next to phone ' + c.label(c.spot) : $('cMode').value === 'quick' ? 'Calibrate: one clap next to one phone' : 'Calibrate: clap next to each phone in turn');
     setText('cMsg', c.msg || (live.length < 2 ? 'Calibration needs 2+ phones listening.' : ''));
     setText('cState', ncal ? `· ${ncal}/${live.length} calibrated` : '');
+    setHTML('lkState', Link.state);
     setText('pStatus', sim ? 'DEMO · ' + live.length + ' simulated phones' : hub ? 'Room ' + room.toUpperCase() + ' · ' + live.length + ' connected' + (hubStatus && !live.length ? ' · ' + hubStatus : '') : 'this phone only');
     const rows = [...live].sort((a, b) => a.label < b.label ? -1 : 1).map(n => { const k = cal[n.key], [w, f] = resWord(k), sync = n.key === ME ? 'this phone' : n.rtt != null ? 'sync ±' + Math.round(n.rtt / 2) + ' ms' : 'syncing…';
       return `<div class="prow"><span class="pin">${n.label}</span><span class="nm"><b>${n.key === ME ? 'This phone' : esc(n.name || 'Phone ' + n.label)}</b><small>hears ${rangeOf(n)} · ${sync}${k ? ` · latency ${k.lat >= 0 ? '+' : ''}${k.lat.toFixed(1)} ms · gain ${k.gain >= 0 ? '+' : ''}${k.gain.toFixed(1)} dB` : ''}</small>` +
@@ -343,11 +412,16 @@
   const soloSlot = {};
   function dronesOf(st, live, D) {
     if (D.mesh) return st.tracks.filter(t => t.hot).map(t => Object.assign({ key: 't' + t.id, slot: t.slot, f0: t.f0, cls: t.label || 'Drone', score: t.score, nAgree: t.voters, agree: `${t.voters} of ${live.length} phones agree`,
-      flight: t.flight, rpm: t.f0 * 60 / blades, est: t.est, lead: t.id === st.lead }, t.est ? whereOf(t.est, live) : { dir: '', where: '' }));
+      flight: t.flight, rpm: t.f0 * 60 / blades, est: t.est, h: t.h, tz: t.herr != null ? t.h.z - t.herr : null, lead: t.id === st.lead, why: whyOf(t.agree, live) }, t.est ? whereOf(t.est, live) : { dir: '', where: '' }));
     const os = det && listening() ? det.outs.filter(o => o.state === 'drone') : [];
     Object.keys(soloSlot).forEach(k => { if (!os.some(o => 's' + o.id === k)) delete soloSlot[k]; });
     return os.map(o => { const key = 's' + o.id; if (soloSlot[key] == null) soloSlot[key] = Object.values(soloSlot).includes(0) ? 1 : 0;
-      return { key, slot: soloSlot[key], f0: o.f0, cls: o.cls ? o.cls.label : 'Drone', score: o.cls ? o.cls.conf : 0, nAgree: 1, agree: 'this phone only', flight: o.flight && o.flight.state, rpm: o.flight ? o.flight.rpm : 0, est: null, dir: '', where: '', lead: o === det.out }; });
+      return { key, slot: soloSlot[key], f0: o.f0, cls: o.cls ? o.cls.label : 'Drone', score: o.cls ? o.cls.conf : 0, nAgree: 1, agree: 'this phone only', flight: o.flight && o.flight.state, rpm: o.flight ? o.flight.rpm : 0, est: null, dir: '', where: '', lead: o === det.out, why: o.why }; });
+  }
+  // the reason in words for what these phones hear: the surest phone that sent a fingerprint (else a sound summary)
+  function whyOf(keys, live) {
+    const c = live.filter(n => (!keys || keys.includes(n.key)) && (n.fx || n.sn)).sort((a, b) => !!b.fx - !!a.fx || b.c * (b.cp || 1) - a.c * (a.cp || 1))[0];
+    return c ? whyFrom(c) : null;
   }
   function describe(st, live) {
     const mesh = !!sim || live.some(n => n.key !== ME), o = det && det.out, c = o && o.cls, D = { mesh, n: live.length };
@@ -358,6 +432,7 @@
       const hear = live.filter(n => n.c >= 30 && n.st !== 'hum').map(n => n.label);
       D.hear = hear.length === 1 ? `Phone ${hear[0]} hears a harmonic hum` : hear.length ? `Phones ${hear.join(', ')} hear a harmonic hum` : 'A phone hears a harmonic hum';
       const hum = live.filter(n => n.st === 'hum').sort((a, b) => b.e - a.e)[0]; /* loudest = nearest */ D.hum = hum ? `${humWord(hum.wy)} near phone ${hum.label}` : 'Steady hum'; D.humWhy = hum ? hum.wy : ''; D.humAt = hum ? hum.label : '';
+      D.why = D.raw === 'drone' ? whyOf(st.agree, live) : hum ? whyFrom(hum) : whyOf(null, live);
       if (st.est) {
         Object.assign(D, whereOf(st.est, live));
         const A = live.filter(n => st.agree.includes(n.key)), tr = A.length ? A.reduce((a, n) => a + n.trendDB, 0) / A.length : 0;
@@ -369,7 +444,7 @@
       D.raw = o && listening() ? o.state : 'off'; D.cls = c ? c.label : ''; D.score = c ? c.conf : 0; D.hz = o ? o.f0 : 0;
       D.agree = 'this phone only';
       D.learned = c && c.learned ? `Matched your taught samples (${Teach.count(c.label)} ${c.label})` : '';
-      D.hear = 'This phone hears a harmonic hum'; D.hum = c && !c.drone ? humWord(c.why) : 'Steady hum'; D.humWhy = c ? c.why : '';
+      D.hear = 'This phone hears a harmonic hum'; D.hum = c && !c.drone ? humWord(c.why) : 'Steady hum'; D.humWhy = c ? c.why : ''; D.why = o && listening() ? o.why : null;
       const me = live.find(n => n.key === ME), tr = me ? me.trendDB : 0;
       D.trend = tr > 1.5 ? 'getting closer' : tr < -1.5 ? 'moving away' : 'same distance';
       D.flight = o && o.flight && o.flight.state; D.rpm = o && o.flight ? o.flight.rpm : 0;
@@ -397,12 +472,15 @@
       const gone = x => !list.some(y => y.key === x.key);
       let k = known.find(x => x.key === d.key) || known.find(x => gone(x) && Math.abs(x.f0 - d.f0) / x.f0 < 0.08 && now - x.last < 60000)
         || known.find(x => gone(x) && now - x.last < 3000); // one sound swapped for another within 3 s: the same drone changing pitch
-      if (!k) { k = { inc: newIncident(d, live, demo) }; known.push(k); fresh++; }
+      if (!k) { k = { inc: newIncident(d, live, demo) }; known.push(k); fresh++;
+        const r = Link.on && Link.match(d); k.inc.gid = r ? r.g : k.inc.id; // one id for one drone across linked posts
+        if (r) { k.inc.from = r.name; Link.say(`⇄ Hand-off from ${r.name}: drone ${Link.short(r.g)}`); } }
       Object.assign(k, { key: d.key, f0: d.f0, last: now }); d.inc = k.inc;
-      const e = k.inc; e.t1 = Date.now(); e.slot = d.slot; if (d.dir) e.dir = d.dir; if (d.cls !== 'Drone' || !e.cls) e.cls = d.cls; e.peak = Math.max(e.peak, d.score || 0);
+      const e = k.inc; e.t1 = Date.now(); e.slot = d.slot; if (d.dir) e.dir = d.dir; if (d.why && d.why.drone) e.why = { id: d.why.id, text: d.why.text }; if (d.cls !== 'Drone' || !e.cls) e.cls = d.cls; e.peak = Math.max(e.peak, d.score || 0);
       if ((d.nAgree || 1) > e.nAgree) { e.nAgree = d.nAgree; e.agree = d.agree; }
       const f = shortFl(d.flight); if (f && !e.flights.includes(f)) e.flights.push(f);
-      if (d.est) Log.point(e, d.est[0], d.est[1]);
+      const h = d.h && d.h.ok ? d.h : null; if (h) e.h = { z: h.z, lo: h.lo, hi: h.hi };
+      if (d.est) Log.point(e, d.est[0], d.est[1], h && h.z);
     });
     const L = list.find(d => d.lead) || list[0]; if (L) inc = L.inc;
     return fresh;
@@ -523,8 +601,9 @@
       if (trackDrones(D.drones, live, now, demo) && ws.ev !== 'alert') { ws.again(); raiseAlert(now, demo); }
       if (inc) askLook(st, live, now); Log.save();
     }
+    Link.tick(hot ? D.drones : [], demo); // after trackDrones: each drone has its incident (and shared id) now
     if (s === 'notdrone' && prevS !== 'notdrone') hum = Log.add({ id: Log.newId(), type: 'hum', t0: Date.now(), t1: Date.now(), cls: 'Not a drone' + (D.hum ? ' · ' + humWord(D.humWhy) : ''), dir: D.humAt ? 'phone ' + D.humAt : '', demo, room, track: [], flights: [] });
-    if (hum && D.raw === 'hum') { hum.t1 = Date.now(); Log.save(); } else hum = null;
+    if (hum && D.raw === 'hum') { hum.t1 = Date.now(); if (D.why && !D.why.drone) hum.why = { id: D.why.id, text: D.why.text, x: D.why.bars.map(b => b.v) }; Log.save(); } else hum = null;
     prevS = s;
 
     $('app').classList.toggle('ready', s === 'ready'); $('app').classList.toggle('demo', demo);
@@ -543,13 +622,17 @@
     }
     $('replayBar').hidden = !replay;
     if (!st.label && !D.mesh) st.label = D.cls; // solo marker text
+    st.remote = Link.on ? Link.remote(hot ? D.drones : []) : [];
+    $('handoff').hidden = !Link.note; setText('handoff', Link.note);
     geoTick(st, live);
     if (!st.nodes.length && !sim && !hub) Object.assign(st, { solo: ME, nodes: [{ key: ME, label: 'A', pos: [0, 0], age: 0, c: 0, f: 0, st: 'quiet', trendDB: 0 }] }); // not listening yet: show this phone
     view.set(st);
     const cal = renderCal(st, live);
-    $('mapTag').innerHTML = replay && !live.length ? 'MAP · replay of a logged track' : demo ? '<span>DEMO · simulated phones</span>' : D.mesh ? `MAP · ${live.length} phones${st.calTrusted ? ' · calibrated' : ''}${!$('geomap').hidden ? ' · street map' : ''}` : 'MAP · this phone only until others join';
+    const lk = Link.on ? ' · ' + esc(Link.name) + (Link.live().length ? ' ⇄ ' + Link.live().map(p => esc(p.name)).join(', ') : '') : '';
+    $('mapTag').innerHTML = replay && !live.length ? 'MAP · replay of a logged track' : demo ? `<span>DEMO · simulated phones${lk}</span>` : D.mesh ? `MAP · ${live.length} phones${st.calTrusted ? ' · calibrated' : ''}${!$('geomap').hidden ? ' · street map' : ''}${lk}` : 'MAP · this phone only until others join' + lk;
     $('addPhones').hidden = !!sim || !!hub || !!replay || !(s === 'ready' || s === 'watching');
     $('endCard').hidden = !(sim && sim.eng.ended);
+    drawSide(hot && D.mesh && (D.drones.find(d => d.lead) || D.drones[0]), st.nodes);
     let info = '';
     if (workings && st.truth && st.err.L != null) info = `error vs true drone (10 s avg): loudness <b>${f1(st.err.L)} m</b> · arrival times <b>${f1(st.err.T)} m</b> · both <b>${f1(st.err.F)} m</b>` + (st.headErr.both != null ? ` · heading ±${st.headErr.both}°` : '') + '<br>lines = arrival-time differences · small ring = loudness-only fit · dashed = true drone';
     else if (workings && st.pairs.length) info = `${st.pairs.length} arrival-time lines · they cross where the drone is`;
@@ -568,7 +651,7 @@
     if (sheet === 'details') renderDetails(D, st);
     if (sheet === 'logS') drawTimeline();
     S.watch = s;
-    Object.assign(window.__map = window.__map || {}, { drones: D.drones.map(d => ({ key: d.key, slot: d.slot, f0: Math.round(d.f0), cls: d.cls, est: d.est, inc: d.inc && d.inc.id })), tracks: st.tracks, alerts: A.count, cover: st.ui.cover ? st.nodes.filter(n => n.hr && n.age < R.STALE_MS).map(n => ({ label: n.label, hr: n.hr, nf: n.nf })) : null, mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
+    Object.assign(window.__map = window.__map || {}, { remote: (st.remote || []).map(r => ({ g: r.g, x: +r.x.toFixed(1), y: +r.y.toFixed(1), name: r.name })), why: D.why && { id: D.why.id, text: D.why.text }, drones: D.drones.map(d => ({ key: d.key, slot: d.slot, f0: Math.round(d.f0), cls: d.cls, est: d.est, inc: d.inc && d.inc.id })), tracks: st.tracks, alerts: A.count, cover: st.ui.cover ? st.nodes.filter(n => n.hr && n.age < R.STALE_MS).map(n => ({ label: n.label, hr: n.hr, nf: n.nf })) : null, mode: sim ? 'sim' : D.mesh ? 'mesh' : 'solo', watch: s, banner: st.banner, label: st.label, score: st.score, est: st.est, estL: st.estL, estT: st.estT, estF: st.estF, errL: st.err.L, errT: st.err.T, errF: st.err.F, headErr: st.headErr, pairs: st.pairs.length, nodes: live.length, learned: st.learned, tdoaOk: st.tdoaOk, calTrusted: st.calTrusted, truth: st.truth && [st.truth.x, st.truth.y], sync: st.nodes.map(n => n.rtt), demo });
   }
   setInterval(frame, 100);
 
@@ -579,10 +662,11 @@
     switch (s) {
       case 'ready': cls = errMsg || (hub ? 'Ready · waiting for phones' : 'Not listening · tap Listen to start'); sub = lastDrone(); break;
       case 'watching': cls = (D.n > 1 ? D.n + ' phones' : 'This phone') + ' · quiet ' + (quiet < 60000 ? Math.round(quiet / 1000) + ' s' : Math.round(quiet / 60000) + ' min');
-        sub = D.raw === 'hum' ? 'Ignoring: ' + D.hum : lastDrone(); pill = mt || 'Sound: ON'; break;
+        sub = D.raw === 'hum' ? 'Ignoring: ' + D.hum : lastDrone(); pill = mt || 'Sound: ON';
+        if (ignored(D.why)) { peekT = 'Why ignored ˄'; peekS = D.why.text; } break;
       case 'checking': cls = D.hear; peekS = 'live: pitch ~' + Math.round(D.hz || 0) + ' Hz · fingerprint forming'; if (ws.holdK > 0) { prog = ws.holdK; note = `hold ${(ws.holdK * WATCH.hold / 1000).toFixed(1)} / ${WATCH.hold / 1000} s`; } break;
       case 'notdrone': cls = D.hum + ' · ignored'; prog = 1 - (now - ws.since) / WATCH.notMs; note = `back to Watching in ${Math.max(0, Math.ceil((WATCH.notMs - (now - ws.since)) / 1000))} s`;
-        peekT = 'Why not ˄'; peekS = D.humWhy || 'not a rotor signature'; break;
+        peekT = 'Why not ˄'; peekS = D.why ? D.why.text : D.humWhy || 'not a rotor signature'; break;
       case 'drone': case 'tracking':
         word = demo ? 'DEMO · DRONE' : 'DRONE'; cls = (D.cls || 'Drone') + (D.word ? ' · ' + D.word : '');
         where = D.rough ? (D.where ? D.where + ' · rough, calibrate ›' : 'Position is rough. Clap to calibrate ›') : D.mesh ? [D.where, D.trend].filter(Boolean).join(' · ') : D.trend + ' · one phone: no direction';
@@ -623,6 +707,7 @@
   };
   window.__watch = { get s() { return ws.s; }, get holdK() { return ws.holdK; }, ack: () => $('act2').dataset.a === 'ack' && $('act2').click() };
 
+  const ignored = w => !!w && !w.drone && !['noise', 'weak', 'forming'].includes(w.id); // a sound worth saying why we ignored it
   function renderDetails(D, st) {
     const s = ws.s, hot = s === 'drone' || s === 'tracking', why = [];
     if (hot || s === 'checking' || s === 'lost') {
@@ -630,9 +715,16 @@
       why.push(D.mesh ? (st.voters ? `${st.voters} of ${D.n} phones hear it and agree` : 'No phone is sure yet') : 'Heard by this phone only (one phone can\'t tell direction)');
       if (D.learned) why.push(D.learned);
       if (D.rough) why.push('Arrival times disagree with loudness, so the position uses loudness only. Calibrate the phones (Phones sheet) to fix this.');
-    } else if (s === 'notdrone' || D.raw === 'hum') why.push(`${D.hum}: ${D.humWhy || 'not a rotor signature'}`, 'Ignored: a steady hum like this fools simple detectors');
+    } else if (s === 'notdrone' || D.raw === 'hum') why.push(D.hum, 'Ignored: no alert. A steady hum like this fools simple detectors');
+    else if (ignored(D.why)) why.push('Ignored: no alert');
     else why.push('Nothing heard right now.');
     const wk = why.join('|'); if ($('dWhy').dataset.k !== wk) { $('dWhy').dataset.k = wk; $('dWhy').innerHTML = why.map(w => '<li>' + esc(w) + '</li>').join(''); }
+    // the reason in plain words + one bar per feature: the shaded band is where drones sit
+    const y = D.why && D.why.id !== 'forming' && (D.why.drone ? hot : !hot) ? D.why : null;
+    setText('dWhyK', hot ? 'Why we think so' : y && !y.drone ? 'Why not a drone' : 'Why we think so');
+    setText('dReason', y ? y.text : '');
+    const bh = y ? y.bars.map(b => `<div class="fb${b.in ? '' : ' off'}"><span>${esc(b.name)}</span><i><u style="left:${(b.lo * 100).toFixed(1)}%;width:${((b.hi - b.lo) * 100).toFixed(1)}%"></u><em style="left:${(b.at * 100).toFixed(1)}%"></em></i><b>${esc(b.show)}</b></div>`).join('') + '<small>shaded = the drone range · ✕ = outside it</small>' : '';
+    if ($('dBars').dataset.k !== bh) { $('dBars').dataset.k = bh; $('dBars').innerHTML = bh; }
     setText('dScore', D.cls && s !== 'watching' && s !== 'ready' ? String(Math.round(D.score)) : '—');
     setText('dScoreS', D.cls ? `how close to the ${D.cls} template · not accuracy` : 'how close to a class template · not accuracy');
     setText('flState', D.flight && (hot || s === 'checking') ? shortFl(D.flight) + (D.rpm ? ' · ' + kRpm(D.rpm) : '') : 'no flight data');
@@ -696,13 +788,36 @@
     sg.strokeStyle = cols.ink; sg.lineWidth = 2 * dpr; sg.beginPath(); pts.forEach((p, i) => sg[i ? 'lineTo' : 'moveTo'](X(p[0]), Y(p[1]))); sg.stroke();
   }
 
+  // side view of the lead drone: ground, the phones along it, the drone at its height with the likely range
+  const sideC = $('side').firstElementChild, sideG = sideC.getContext('2d');
+  function drawSide(d, nodes) {
+    const h = d && d.est && d.h; $('side').hidden = !h || replay;
+    if (!h || replay) return;
+    setHTML('sideT', h.ok ? `~${h.z} m up <small>likely ${h.lo}–${h.hi} m</small>` : h.why === 'measuring' ? 'Height <small>measuring…</small>' : `Height unknown <small>${esc(h.why)}</small>`);
+    const dpr = Math.min(2, devicePixelRatio || 1), W = Math.round(sideC.clientWidth * dpr), H = Math.round(sideC.clientHeight * dpr);
+    if (!W || !H) return; if (sideC.width !== W || sideC.height !== H) { sideC.width = W; sideC.height = H; }
+    const xs = nodes.map(n => n.pos[0]).concat(d.est[0]), x0 = Math.min(...xs) - 2, xr = Math.max(...xs) + 2 - x0, top = Math.max(10, (h.ok ? h.hi : 0) * 1.25, d.tz || 0);
+    const gy = H - 9 * dpr, X = x => 8 * dpr + (x - x0) / xr * (W - 16 * dpr), Y = z => gy - z / top * (gy - 30 * dpr);
+    sideG.clearRect(0, 0, W, H);
+    sideG.strokeStyle = cols.line; sideG.lineWidth = dpr; sideG.beginPath(); sideG.moveTo(0, gy); sideG.lineTo(W, gy); sideG.stroke();
+    sideG.fillStyle = cols.ink2; sideG.font = `${9 * dpr}px system-ui`; sideG.textAlign = 'right'; sideG.fillText(Math.round(top) + ' m', W - 4 * dpr, Y(top) + 3 * dpr); sideG.fillText('ground', W - 4 * dpr, gy - 3 * dpr);
+    sideG.strokeStyle = cols.line; sideG.setLineDash([2 * dpr, 3 * dpr]); sideG.beginPath(); sideG.moveTo(0, Y(top)); sideG.lineTo(W - 30 * dpr, Y(top)); sideG.stroke(); sideG.setLineDash([]);
+    sideG.fillStyle = cols.pin; nodes.forEach(n => { sideG.beginPath(); sideG.arc(X(n.pos[0]), gy, 3 * dpr, 0, 7); sideG.fill(); });
+    const c = d.slot ? cols.alert2 : cols.alert, x = X(d.est[0]);
+    if (d.tz != null) { sideG.strokeStyle = cols.ink2; sideG.setLineDash([2 * dpr, 2 * dpr]); sideG.beginPath(); sideG.moveTo(x - 8 * dpr, Y(d.tz)); sideG.lineTo(x + 8 * dpr, Y(d.tz)); sideG.stroke(); sideG.setLineDash([]); } // demo: the true height
+    if (!h.ok) { sideG.fillStyle = cols.ink2; sideG.font = `700 ${12 * dpr}px system-ui`; sideG.textAlign = 'center'; sideG.fillText('?', x, Y(top * 0.45)); return; }
+    sideG.globalAlpha = 0.3; sideG.fillStyle = c; sideG.fillRect(x - 4 * dpr, Y(h.hi), 8 * dpr, Y(h.lo) - Y(h.hi)); sideG.globalAlpha = 1;
+    sideG.strokeStyle = c; sideG.setLineDash([2 * dpr, 3 * dpr]); sideG.beginPath(); sideG.moveTo(x, gy); sideG.lineTo(x, Y(h.z)); sideG.stroke(); sideG.setLineDash([]);
+    sideG.fillStyle = c; sideG.beginPath(); sideG.arc(x, Y(h.z), 4 * dpr, 0, 7); sideG.fill();
+  }
+
   let lastDetect = 0;
   function loop(t) {
     if (t - lastDetect > 45) {
       lastDetect = t;
       const o = performance.now() < gateUntil ? det.out : det.step(t), c = o.cls; if (tap) tap.setF0(o.f0);
-      Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw } ,
-        srcs: det.src.map(q => ({ id: q.id, state: q.out.state, conf: q.out.conf, f0: Math.round(q.out.f0), cls: q.out.cls && q.out.cls.label, fl: q.out.flight && q.out.flight.state })), lead: det.li, nf: o.nf, hr: o.hr });
+      Object.assign(S, { conf: o.conf, state: o.state, f0: o.f0, hits: o.hits, flight: o.flight && { state: o.flight.state, f: +o.flight.f.toFixed(2), rpm: Math.round(o.flight.rpm), rate: +o.flight.rate.toFixed(2), dbRate: +o.flight.dbRate.toFixed(2), base: o.flight.base }, cls: c && { label: c.label, conf: c.conf, drone: c.drone, learned: c.learned, nearest: c.nearest, raw: c.raw, x: c.x },
+        srcs: det.src.map(q => ({ id: q.id, state: q.out.state, conf: q.out.conf, f0: Math.round(q.out.f0), cls: q.out.cls && q.out.cls.label, fl: q.out.flight && q.out.flight.state })), lead: det.li, nf: o.nf, hr: o.hr, snd: det.snd, why: o.why && { id: o.why.id, text: o.why.text } });
       if (sheet === 'details') { const p = primary(); drawFingerprint(p.out.cls, p.out.state); drawFlight(p.out.flight); }
     }
     const p = primary(); if (p.db) { drawColumn(specs[0], p, p.out); drawColumn(specs[1], p, p.out); } // Details keeps drawing while closed, so it opens with history

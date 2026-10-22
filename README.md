@@ -51,6 +51,41 @@ The detector looks for up to two separate harmonic combs. The strongest comb is 
 - **Log:** each drone is its own incident; the second has a blue edge in the log and a blue track in the report.
 - Limits: two drones within 8 % of each other in pitch read as one; a much quieter second drone is only heard by the phones near it.
 
+## Why (not) a drone
+
+Every decision comes with a short reason in plain words, built from the six fingerprint numbers (pitch, split, beat, steadiness, sub-harmonic, mains lock) and the nearest class:
+
+- **Drone:** "Several rotors at slightly different speeds (split peaks) beating against each other, like a multirotor", "One propeller: a low, smooth pitch with little beat, like a fixed-wing", "High, whiny pitch from small rotors …, like a micro drone".
+- **Not a drone:** "Pitch too steady and locked to 50 Hz mains, like a transformer or mains hum", "Pitch too steady: one motor at a fixed speed with no rotor beat, looks like a fan / AC", "Pitch sweeping up and down like a motorbike engine", "Low, irregular firing like an engine or generator", "Harmonics come and go and the pitch jumps around, more like a voice or bird", "A single pure tone …", "No harmonics, just broadband noise …", and "Close to sounds you taught as not a drone" when a taught sample matched.
+- When no fingerprint forms, the reason comes from what the sound did over the last 3 s: how comb-like it is, how far the pitch jumps, low firing peaks (25–90 Hz) and peak spread.
+- **Details** shows the reason with one small bar per feature: the shaded band is the drone range, the mark is this sound, a ✕ row is outside the range. A watching screen with an ignored hum shows **Why ignored** on the peek card.
+- On a mesh the screen rebuilds the reason from the numbers an ear sends: its fingerprint, or a 7-number sound summary when it has none. Still no audio.
+- The reason is saved with the incident (drone and not-a-drone) and printed in the report's What column.
+
+## Height
+
+During a pass the screen estimates how high the drone is from the phones on the ground (all at z = 0):
+
+- Every 0.5 s it keeps a snapshot: each phone's loudness and, when trusted, the arrival-time differences. Each second it refits the last 20 s.
+- For each candidate height 0–60 m, every snapshot gets its own best ground spot. Loudness ratios between phones and arrival times must fit within the snapshot. Across snapshots the source loudness must follow one straight line in time, so a fade isn't read as a climb. The height with the lowest total misfit wins.
+- When the pass is fast enough (≥ 3 m/s, ≥ 3 Hz pitch swing, closest approach inside the window), a Doppler closest-approach fit per phone is mixed in by its own uncertainty.
+- **Range:** the heights that fit about as well, widened by how many snapshots were really new looks (≥ 2 s and ≥ 1.5 m apart, so a hover doesn't fake a tight answer). It is never narrower than ±(25 % + 0.5 m), the model error seen in simulated passes.
+- **Height unknown** instead of a number when the phones are in a line (they can't tell up from sideways), or when the range runs off the top or is wider than 60 % of the height (too high or too far for these phones).
+- **Screen:** a small side-view strip (top right of the map) shows the ground, the phones, the drone at its height and its range, and "~N m up · likely lo–hi m" or "Height unknown · why". In the demo a dashed tick marks the true height.
+- **Log:** track points carry z when it is known (`[s, x, y, z]`), the incident keeps the last known `h: {z, lo, hi}`, and the report has a Height column ("unknown" when it never was).
+- The demo flies in at 4 m and climbs to 8 m at 26–30 s. `#demo&path=pass&alt=15&loud=20` flies straight passes at any height.
+- Simulated results (6 m square of 4 phones, see `test/height.py`): 5 m is good, 15 m is often "unknown" and otherwise a few metres out, and 30 m is mostly "unknown". This needs real-world checks. Wind, reflections, rotor directivity and uneven mic gains all bend the loudness model.
+
+## Linked watch posts
+
+Two or more screens, each with its own room of ears, can link: Phones sheet → **Linked watch posts**, the same link code on each, and a name per post ("North", "Gate").
+
+- Posts share only track numbers, twice a second: drone id, position, class, pitch, height if known, time. Never audio, never phone data. The first screen holds the link id on the PeerJS relay and passes messages on; if it leaves, another takes over.
+- **Shared frame:** GPS (lat/lon) when both posts have a street-map frame. Otherwise each post types where it sits in a plan all posts agree on: **East m, North m, Turn °**.
+- Each screen draws the other posts' drones faded, labelled with the post's name and drone id. The map tag shows who is linked ("North ⇄ South").
+- **Hand-off:** when a new drone turns up at one post and another post had a drone in the last 20 s at a pitch within 8 %, at a place it could have flown from (≤ 15 m + 25 m/s × time), it keeps that drone's id. Both screens say so ("⇄ Hand-off from North: drone #mt3s" / "⇄ Drone #mt3s handed off to South"), and both incidents keep the one id (`gid`) with `from` / `to`, shown in the log and the report.
+- `#demo&path=cross&ox=30` simulates a post 30 m east on a shared line: one drone (same pitch at every post) flies east and back at 3 m/s on the wall clock.
+
 ## Coverage map
 
 Each phone measures its background noise in the drone band (the median local floor from 150 Hz to 2 kHz, 20th percentile over 3 s, refreshed every 2 s, only while it hears no harmonic sound unless one has gone on for 30 s) and turns it into a **hearing radius**: r = 10^((ref − noise − 12 dB) / 20), clamped to 2–300 m. The assumption, stated in the Phones sheet: a small quadcopter whose strongest harmonics are about 75 dB SPL at 1 m (−45 dBFS on a typical phone mic, −65 dB per bin in this analyser, where a full-scale sine reads about −20 dB), open ground and no wind (6 dB per doubling of distance), and the harmonics must stay 12 dB above the noise (the detector's 9 dB plus a margin). It is a rough guide, not a measured range.
@@ -154,7 +189,7 @@ Corrections are stored per room in `localStorage` and applied to event times and
 
 ## Incident log
 
-Every episode the screen sees is saved on that device (`localStorage`, newest 100): start and end time, class, peak match, phones agreeing, flight states seen and the track (one point every 0.5 s, in the phones' metre frame). "Not a drone" episodes are logged too.
+Every episode the screen sees is saved on that device (`localStorage`, newest 100): start and end time, class, the reason in words, peak match, phones agreeing, flight states seen, the track (one point every 0.5 s, in the phones' metre frame, with height when known) and the linked-post id and hand-off. "Not a drone" episodes are logged too.
 
 - **Log sheet** (••• → Incident log, or Details → All incidents): one row per incident. Tap a row to replay its track on the map (sped up to about 12 s); ✕ stops it.
 - **Export JSON** downloads the whole log. **Printable report** opens a one-page A4 summary (table with a small track drawing per incident) that prints cleanly to PDF.
@@ -191,7 +226,7 @@ The code is plain JS:
 - `log.js`: the incident log, JSON export, printable report, and clip storage (IndexedDB).
 - `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
-- `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, the GPS frame (`Geo`), MapView, SimEngine.
+- `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, the height fit (`heightFit`), the GPS frame (`Geo`), the post link (`linkPosts`), MapView, SimEngine.
 - `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
 - `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
 - `mesh/index.html` and `mesh/sim.html`: redirects only, for old links.
@@ -210,6 +245,9 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/two.py`: two drones on one phone (`two.wav`: two sources with their own ids, pitch, class, flight, alert and incident) and the two-drone demo (two tracks near the two true drones, two colours, two alerts, two incidents). `run.py` fails if any single-sound file shows a second drone.
 - `python3 test/coverage.py`: the radius math (+6 dB halves it, clamps), then three ears over the relay: the noisy one has the smallest circle, ranges listed in the Phones sheet, a phone that gets noisy shrinks its circle within seconds, circles on the street map too.
 - `python3 test/fieldkit.py`: two ears label hexa / box-fan recordings (notes, Other text, a kept clip), the screen's library gets numbers + label only, ear export → import, and the held-out recordings go from wrong to right after the library is added to Teach.
+- `python3 test/why.py`: every synthetic sound gets the expected reason (fan → steady/50 Hz, moto → motorbike, speech → voice …), Details shows the bars, the reason is logged, and the screen rebuilds the same reason from an ear's numbers.
+- `python3 test/height.py`: the height fit alone on noisy synthetic passes at 5/15/30 m (with and without arrival times), phones in a line → "unknown", whole-app passes at 5/15/30 m, and the demo: side strip, z in the log track, Height in the report. Prints its errors as they are.
+- `python3 test/linked.py`: two screens linked over the relay, each with 4 simulated phones 30 m apart. Checks each draws the other's drone in its own frame, and a hand-off keeps one drone id across both.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.
