@@ -42,7 +42,7 @@
       if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); }
       if (d.t === 'look') look.show(d);
     });
-    const look = Look(link, key, room), lab = Label(link, key, () => ({ ctx, bus, on: !!(mic || sim) }));
+    const look = Look(link, key, room, () => det && (mic || sim) ? det.out.state : null), lab = Label(link, key, () => ({ ctx, bus, on: !!(mic || sim) }));
     const useSamples = () => { if (det) { det.learned = Smp.list; det.useLearned = Smp.use; det.forget(); } }; // labels tune this phone like Teach
     Smp.onChange(useSamples);
     // GPS (opt-in): latitude/longitude numbers only, so the screen can lay a street map under the plan
@@ -103,7 +103,7 @@
       } else if (sim) { sim.d.stop(); sim.nz.stop(); simGain.disconnect(); sim = null; }
     };
     window.__node = { get out() { return det && det.out; }, key, look, lab, get geo() { return geo; } };
-    return { room, stop() { if (mic) $('nStart').onclick(); if (sim) { $('nSim').checked = false; $('nSim').onchange(); } } };
+    return { room, link, key, stop() { if (mic) $('nStart').onclick(); if (sim) { $('nSim').checked = false; $('nSim').onchange(); } } };
   }
 
 
@@ -169,8 +169,24 @@
   // The screen sends {t:'look', id, cls, b: bearing° from north (only with GPS), w: words} to the ear nearest the
   // drone. This phone shows an arrow (compass where available) and can record ~10 s of rear-camera video,
   // no sound. The clip stays in this phone's IndexedDB; the screen only gets {t:'clip', id, n}.
-  const Log = window.RotorLog, Clips = window.RotorClips;
-  function Look(link, key, room) {
+  // Bird or Bot: while it records, this phone watches the frames (bird.js) and listens (was the rotor hum there?), then
+  // shows a verdict card and sends the screen {t:'bob', id, v, c, r, f, h, a}: numbers and codes, never a picture.
+  const Log = window.RotorLog, Clips = window.RotorClips, Bird = window.RotorBird;
+  const sendBob = (link, key, id, b) => [0, 1000, 2500].forEach(ms => setTimeout(() => link.send({ t: 'bob', k: key, id, v: b.v, c: b.c, r: b.r, f: b.f, h: b.h, a: b.a }), ms));
+  const pack = v => ({ v: v.v, c: v.c, r: v.r, f: v.f, h: v.h, a: v.a });
+  // the verdict card: the word, the reason, and the evidence row by row
+  function showBob(b, F, model, snd) {
+    const pct = x => Math.round(x * 100) + '%', has = F && F.n >= 20;
+    const path = !has ? '—' : (F.hover ? 'hovering' : F.glide ? 'curving glide' : F.straight != null && F.straight >= 0.92 ? 'straight line' : 'wandering') + ` · ${F.speed} body lengths/s`;
+    const rows = [['Wing beat', !has ? '—' : F.flap ? `~${b.f} per second` : 'none seen'], ['Path', path], ['Size', !has || F.sizeCv == null ? '—' : (F.steady ? 'steady' : 'changing') + ' (±' + pct(F.sizeCv) + ')'],
+      ['Sound', snd == null ? 'microphone off' : b.h === 1 ? 'rotor hum heard (' + pct(snd) + ' of the clip)' : b.h === 0 ? 'no rotor hum' : 'some hum, unclear (' + pct(snd) + ')'],
+      ['Image check', b.a >= 0 ? 'bird score ' + b.a + '%' : model === 'off' ? 'unavailable — motion only' : 'not run (nothing to look at)']];
+    $('bob').innerHTML = `<div class="bobhead ${b.v}"><i>${Bird.ICON[b.v]}</i><b>${Bird.WORD[b.v]}</b><span>${b.v !== 'none' ? b.c + '% sure' : ''}</span><button class="btn" id="bobX" aria-label="close">✕</button></div>
+      <p class="bobwhy">${esc(Bird.text(b))}</p><div class="bobrows">${rows.map(r => `<div><span>${r[0]}</span><b>${esc(r[1])}</b></div>`).join('')}</div>
+      <small class="note">Worked out on this phone; the video never leaves it. The screen gets only the verdict, how sure, and a reason code.</small>`;
+    $('bob').hidden = false; $('bobX').onclick = () => { $('bob').hidden = true; };
+  }
+  function Look(link, key, room, hearing) {
     let cur = null, seen = 0, heading = null, rec = null, done = 0;
     const onOri = e => { const h = e.webkitCompassHeading != null ? e.webkitCompassHeading : e.absolute && e.alpha != null ? 360 - e.alpha : null; if (h != null) heading = h; };
     const listen = () => { window.addEventListener('deviceorientationabsolute', onOri); window.addEventListener('deviceorientation', onOri); };
@@ -186,6 +202,7 @@
       $('lookCompass').hidden = !(needPerm && b != null && heading == null);
       $('lookWords').textContent = (b == null ? 'Look ' : heading != null ? 'Follow the arrow, ' : `Bearing ${b}° (arrow: top of the phone = north), `) + cur.w;
       $('lookCls').textContent = (cur.demo ? 'DEMO · ' : '') + (cur.cls || 'Drone') + ' · the screen asks this phone';
+      if (rec) { const h = hearing(); if (h != null) { rec.snd.n++; if (h === 'drone') rec.snd.d++; } } // was the rotor hum there while filming?
       $('lookRec').disabled = !!done; $('lookRec').textContent = done ? 'Clip saved ✓ on this phone' : 'Record 10 s with the rear camera';
     }
     setInterval(draw, 200);
@@ -197,22 +214,36 @@
       catch (e) { $('lookWords').textContent = 'Camera unavailable: ' + (e.message || e.name); return; }
       const type = ['video/webm;codecs=vp9', 'video/webm', 'video/mp4'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
       const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined), chunks = [], t0 = performance.now();
-      rec = { mr, stream }; $('recVid').srcObject = stream; draw();
+      rec = { mr, stream, snd: { n: 0, d: 0 } }; $('recVid').srcObject = stream; $('bob').hidden = true; draw();
+      const share = () => rec.snd.n ? rec.snd.d / rec.snd.n : null; let said = 0;
+      const job = Bird.analyse($('recVid'), share, (b, w) => { box(b); if (performance.now() - said < 300) return; said = performance.now(); const F = job && job.live;
+        $('recBob').textContent = 'Bird or Bot · ' + (!F || F.n < 20 ? 'looking for the moving thing…' : F.flap ? `wing beat ~${Math.round(F.flapHz)}/s` : F.hover ? 'hovering, no wing beat' : F.glide ? 'gliding in curves' : 'tracking · no wing beat yet')
+          + (Bird.Check.state === 'loading' ? ' · image check loading' : ''); });
       mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
       const tick = setInterval(() => { $('recT').textContent = 'REC ' + Log.mmss(Math.max(0, 10000 - (performance.now() - t0))); }, 200);
       mr.onstop = async () => {
-        clearInterval(tick); stream.getTracks().forEach(t => t.stop()); $('recVid').srcObject = null;
-        const blob = new Blob(chunks, { type: mr.mimeType || type || 'video/webm' });
-        await Clips.put({ id: 'c' + Date.now().toString(36), inc: id, t: Date.now(), type: blob.type, blob, secs: +((performance.now() - t0) / 1000).toFixed(1) });
+        clearInterval(tick); $('recBob').textContent = 'Bird or Bot · deciding…'; const snd = share(), v = await job.stop(); box(null);
+        stream.getTracks().forEach(t => t.stop()); $('recVid').srcObject = null;
+        const blob = new Blob(chunks, { type: mr.mimeType || type || 'video/webm' }), bob = pack(v);
+        await Clips.put({ id: 'c' + Date.now().toString(36), inc: id, t: Date.now(), type: blob.type, blob, secs: +((performance.now() - t0) / 1000).toFixed(1), bob, F: v.F, snd, model: v.model });
         const n = (await Clips.all()).filter(c => c.inc === id).length;
         [0, 1000, 2500].forEach(ms => setTimeout(() => link.send({ t: 'clip', k: key, id, n }), ms)); // a flag, never the video
-        rec = null; done = performance.now(); seen = 0; drawLog();
+        sendBob(link, key, id, bob); Log.upsert({ id, bob });
+        rec = null; done = performance.now(); seen = 0; showBob(bob, v.F, v.model, snd); drawLog();
       };
       mr.start(500); setTimeout(() => mr.state === 'recording' && mr.stop(), 10000);
     };
     $('recStop').onclick = () => { if (rec && rec.mr.state === 'recording') rec.mr.stop(); };
-    return { show(d) { if (!cur || cur.id !== d.id) { cur = d; done = 0; Log.upsert({ id: d.id, type: 'drone', t0: d.t0, cls: d.cls, demo: !!d.demo, room }); drawLog(); } else Object.assign(cur, d); seen = performance.now(); },
-      get state() { return { shown: !$('look').hidden, rec: !!rec, done: !!done, heading, cur } } };
+    // the moving thing's box over the live picture (the video is shown object-fit: cover)
+    function box(b) {
+      const c = $('recBox'), v = $('recVid'), W = c.width = v.clientWidth, H = c.height = v.clientHeight, g = c.getContext('2d'); g.clearRect(0, 0, W, H);
+      if (!b || !v.videoWidth) return; const s = Math.max(W / v.videoWidth, H / v.videoHeight), ox = (W - v.videoWidth * s) / 2, oy = (H - v.videoHeight * s) / 2;
+      const [x0, y0, x1, y1] = b.box.map((u, i) => i % 2 ? oy + u * v.videoHeight * s : ox + u * v.videoWidth * s);
+      g.strokeStyle = '#ffd400'; g.lineWidth = 3; g.strokeRect(x0 - 6, y0 - 6, x1 - x0 + 12, y1 - y0 + 12);
+    }
+    // asked to look: fetch the image check now, so loading it doesn't stall the frames while recording
+    return { show(d) { if (!cur || cur.id !== d.id) { cur = d; done = 0; Bird.loadModel(); Log.upsert({ id: d.id, type: 'drone', t0: d.t0, cls: d.cls, demo: !!d.demo, room }); drawLog(); } else Object.assign(cur, d); seen = performance.now(); },
+      get state() { return { shown: !$('look').hidden, rec: !!rec, done: !!done, heading, cur, bob: !$('bob').hidden } } };
   }
   // this phone's log: incidents it was asked about + its clips (play / download / delete)
   const urls = {};
@@ -224,8 +255,19 @@
   }
   const clipHtml = c => { const u = urls[c.id] || (urls[c.id] = URL.createObjectURL(c.blob)), ext = /mp4/.test(c.type) ? 'mp4' : 'webm';
     return `<div class="clip"><video src="${u}" controls playsinline preload="metadata"></video><div><b>${Log.clock(c.t)} · ${c.secs} s</b><small>on this phone only</small>
+      ${c.bob ? `<p class="bobline ${c.bob.v}" data-show="${c.id}"><b>${Bird.chip(c.bob)}</b> ${esc(Bird.text(c.bob))}</p>` : ''}<button class="btn" data-re="${c.id}">${c.bob ? 'Re-analyse' : 'Bird or Bot?'}</button>
       <a class="btn" href="${u}" download="rotor-ear-${new Date(c.t).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}">Download</a><button class="btn" data-del="${c.id}">Delete</button></div></div>`; };
-  $('eLogList').onclick = e => { const d = e.target.closest('[data-del]'); if (d && confirm('Delete this clip from this phone?')) Clips.del(d.dataset.del).then(drawLog); };
+  $('eLogList').onclick = async e => {
+    const d = e.target.closest('[data-del]'); if (d && confirm('Delete this clip from this phone?')) return Clips.del(d.dataset.del).then(drawLog);
+    const s = e.target.closest('[data-show]'), r = e.target.closest('[data-re]'); if (!s && !r) return;
+    const c = (await Clips.all()).find(x => x.id === (s || r).dataset.show || x.id === (s || r).dataset.re); if (!c) return;
+    if (s) return showBob(c.bob, c.F, c.model, c.snd);
+    r.disabled = true; r.textContent = 'Analysing…'; // plays the clip off-screen at normal speed (~10 s), with the sound verdict saved at the time
+    const v = await Bird.analyseBlob(c.blob, c.snd == null ? null : c.snd), bob = pack(v);
+    await Clips.put(Object.assign(c, { bob, F: v.F, model: v.model })); Log.upsert({ id: c.inc, bob });
+    if (node && node.link) sendBob(node.link, node.key, c.inc, bob);
+    showBob(bob, v.F, v.model, c.snd); drawLog();
+  };
   window.__earLog = { drawLog };
 
   // ---------------- ear mode ----------------

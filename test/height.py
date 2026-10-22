@@ -38,7 +38,7 @@ def demo():
         pg.goto(f'http://127.0.0.1:{PORT}/#demo'); pg.reload(); seen = []; shot = False
         for i in range(40):
             time.sleep(1)
-            r = pg.evaluate("(() => { const t = (__map.tracks || []).find(t => t.hot && t.h && t.h.ok); return { side: !document.getElementById('side').hidden, text: document.getElementById('sideT').textContent, h: t && t.h.z, err: t && t.herr }; })()")
+            r = pg.evaluate("(() => { const t = ['drone', 'tracking'].includes(__map.watch) && (__map.tracks || []).find(t => t.hot && t.h && t.h.ok); /* the strip shows once a drone is confirmed, not during the Checking hold */ return { side: !document.getElementById('side').hidden, text: document.getElementById('sideT').textContent, h: t ? t.h.z : null, err: t ? t.herr : null }; })()")
             if r['h'] is not None: seen.append((i, r['h'], r['err'], r['side'], r['text']))
             if SHOT and not shot and r['h'] is not None and i >= 18: pg.screenshot(path=f'{SHOT}/height-side.png'); shot = True
         log = pg.evaluate("RotorLog.list.filter(e => e.type === 'drone').map(e => ({ h: e.h, n: e.track.length, nz: e.track.filter(p => p.length === 4).length }))")
