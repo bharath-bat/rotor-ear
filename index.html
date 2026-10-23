@@ -111,6 +111,8 @@
     <div id="stWhere"></div>
     <div id="stSub"></div>
     <div id="stBob" hidden></div>
+    <button id="stTag" hidden></button>
+    <div id="stTrip" hidden></div>
     <div id="stDrones"></div>
     <div class="srow2"><button id="pill" hidden>Sound: ON</button><div id="stProg" hidden><i></i></div><span id="stNote"></span></div>
   </header>
@@ -122,6 +124,8 @@
     <div id="mapTag">MAP · this phone only until others join</div>
     <div id="mapInfo"></div>
     <div id="handoff" hidden></div>
+    <button id="tripBtn" aria-label="Tripwire lines">Tripwire</button>
+    <div id="tripDraw" hidden><span id="tripDrawT">Tap one end of the tripwire on the map</span><button id="tripCancel">Cancel</button></div>
     <div id="side" hidden><canvas></canvas><span id="sideT"></span></div>
     <button id="addPhones" hidden><b>+ Add phones for a position</b><small>opens the Phones sheet</small></button>
     <div id="endCard" hidden><b>That was the demo.</b><span>4 phones · no audio leaves the phones</span>
@@ -250,6 +254,26 @@
     <button class="done" data-close>Done</button>
   </section>
 
+  <!-- Tripwire sheet: lines on the map; a track crossing one alerts, with its direction -->
+  <section class="sheet" id="tripS" hidden>
+    <div class="grab"></div>
+    <div class="shead"><h2>Tripwire</h2><small id="tripN"></small></div>
+    <label class="chk toggle"><span><b>Alert only on tripwire crossing</b><br><small>a drone is still shown, but it flashes and beeps only when it crosses a line</small></span><input type="checkbox" id="tripOnly"></label>
+    <div class="list" id="tripList"></div>
+    <div class="tbtns"><button class="btn" id="tripAdd">+ Draw a line</button><button class="btn" id="tripDemo" hidden>Add the demo line</button></div>
+    <p class="note">Tap two points on the map. "In" is the side the phones were on when you drew it (Flip changes it). Saved on this phone, per room; the demo has its own lines. A crossing logs where, which way and when. Only positions the phones already worked out are used.</p>
+    <button class="done" data-close>Done</button>
+  </section>
+
+  <!-- Drone tags sheet: "Same drone again?" voiceprints, on this phone only -->
+  <section class="sheet" id="tagsS" hidden>
+    <div class="grab"></div>
+    <div class="shead"><h2>Drone tags</h2><small id="tagN"></small></div>
+    <p class="note">Each drone gets a voiceprint from numbers the phones already measure: its rotor pitch and the six fingerprint values. A new drone is matched against these. 80%+ = seen before, 60–79% = possible match (not sure), below = a new tag. Drones of one model can sound alike; a throttle change shifts the pitch. Saved on this phone only; never audio.</p>
+    <div class="list" id="tagList"></div>
+    <button class="done" data-close>Done</button>
+  </section>
+
   <!-- More sheet (•••): theme, sound, demo, device notes -->
   <section class="sheet" id="moreS" hidden>
     <div class="grab"></div>
@@ -262,6 +286,7 @@
     <div class="tbtns"><button class="btn" id="mDemo">60-second demo</button><button class="btn" id="mDemo2">Two drones crossing</button></div>
     <div class="k">Log</div>
     <button class="btn wide" id="mLog">Incident log</button>
+    <div class="tbtns"><button class="btn" id="mTags">Drone tags</button><button class="btn" id="mTrip">Tripwire lines</button></div>
     <div class="k">Mode</div>
     <button class="btn wide" data-go="home">Switch mode · screen / ear / demo</button>
     <div class="k">This device</div>
@@ -274,6 +299,8 @@
 <script src="detector.js"></script>
 <script src="mesh/peerjs.min.js"></script>
 <script src="mesh/core.js"></script>
+<script src="reid.js"></script>
+<script src="tripwire.js"></script>
 <script src="log.js"></script>
 <script src="samples.js"></script>
 <script src="bird.js"></script>

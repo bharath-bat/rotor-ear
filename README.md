@@ -196,6 +196,29 @@ Every episode the screen sees is saved on that device (`localStorage`, newest 10
 - **Clear all…** asks first, and also deletes the clips on that device.
 - An ear keeps its own short log: the incidents it was asked to look at, with its clips.
 
+## Same drone again?
+
+Each drone incident gets a voiceprint built from numbers the phones already measure: the median rotor pitch over about 4 s after the alert (8 samples), plus the mean of the six-feature fingerprint. It is kept on this phone only (`localStorage`, newest 200). No new audio is recorded.
+
+- **Score 0–100.** Pitch closeness counts 65 % (0 at ±10 %) and fingerprint closeness (split, beat, steady, sub) counts 35 %. With pitch only, the score is capped at 90 %.
+- **80 % or more: seen before.** The status block shows "Seen before · Drone #3 · last seen Tue 9:40 PM · 4 visits · 97% match", and a sure match refines the stored print.
+- **60–79 %: possible match.** It reads "Possible match · Drone #3? · … · not sure".
+- **Below 60 %: a new tag.** It reads "New drone · tagged Drone #4".
+- **Drone tags sheet** (••• → Drone tags, or tap that line): name a tag, or **Forget** it after confirming. Log entries keep their note.
+- **Log, JSON export and report:** the log row shows a chip (`new #4`, `#3? 72%`, `↺ #3 97%`), the printable report shows the sentence, and the JSON export includes `droneTags`.
+- **Demo drones only ever match demo tags.**
+- **Limits:** drones of one model sound alike, a throttle or payload change shifts the pitch, and tuning has only been done on synthetic sound.
+
+## Tripwire
+
+Draw lines on the map, then get told when a drone's position crosses one. The positions are the ones the phones already work out; nothing new is shared.
+
+- **Draw a line:** tap **Tripwire** at the top left of the map (or ••• → Tripwire), then tap two points. This works on both the plain map and the street map; on the street map, lines keep their lat/lon. Lines are saved per room on this phone. The demo has its own lines, and its default line sits across the drone's way out.
+- **"In"** is the side the phones were on when you drew the line. **Flip in/out** changes it, and **✕** deletes the line.
+- **What counts as a crossing:** two consecutive track positions on opposite sides of the line, both more than 0.45 m from it, with the move between them passing through the drawn segment. Jitter near a line doesn't fire.
+- **What a crossing shows:** a yellow line in the status block ("TRIPWIRE · Line 1 crossed OUT · heading SW · 10:59:24"), a ✕ on the map at the crossing point, and a fresh flash and beep. The crossing (point, direction, heading, time) also goes into the log row, the report and the JSON export (`trips`, plus `tripwires`).
+- **Alert only on tripwire crossing** (in the Tripwire sheet): the drone is still shown and logged, but there is no flash and no beeps until it crosses a line. This setting only applies when at least one line exists.
+
 ## Street map (optional)
 
 Phones sheet → **Street map**. Each ear may tick **Share GPS position** (off by default, per phone). It then sends only its latitude/longitude with its other numbers, never audio. With at least one GPS phone the screen draws OpenStreetMap tiles (Leaflet, attribution shown) under the map:
@@ -236,6 +259,8 @@ The code is plain JS:
 - `ear.js`: ear mode (with the look prompt, camera clip and the ear's log) and the relay demo phones.
 - `samples.js`: taught / labelled samples (Teach and the ear's Label), their clips and the Teach JSON format.
 - `log.js`: the incident log, JSON export, printable report, and clip storage (IndexedDB).
+- `reid.js`: Same drone again? (voiceprints, scores, tags).
+- `tripwire.js`: tripwire lines, segment crossing, in/out.
 - `bird.js`: Bird or Bot (blob tracker, motion features, the optional COCO-SSD check, the fusion and its words).
 - `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
@@ -261,6 +286,8 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/fieldkit.py`: two ears label hexa / box-fan recordings (notes, Other text, a kept clip), the screen's library gets numbers + label only, ear export → import, and the held-out recordings go from wrong to right after the library is added to Teach.
 - `python3 test/why.py`: every synthetic sound gets the expected reason (fan → steady/50 Hz, moto → motorbike, speech → voice …), Details shows the bars, the reason is logged, and the screen rebuilds the same reason from an ear's numbers.
 - `python3 test/height.py`: the height fit alone on noisy synthetic passes at 5/15/30 m (with and without arrival times), phones in a line → "unknown", whole-app passes at 5/15/30 m, and the demo: side strip, z in the log track, Height in the report. Prints its errors as they are.
+- `python3 test/reid.py`: scoring and thresholds, then the synthetic drone twice (`#demo&path=circle&f0=215`): first visit gives a new tag, the second gives Seen before with visits and match %. A 300 Hz drone gets a new tag. Also covers rename and forget, the log chips, the report and the JSON export.
+- `python3 test/tripwire.py`: segment math and jitter. Then the demo with Alert only on crossing: silent at confirm, then one alert with an OUT crossing that is logged, reported and exported. Also checks a circle that never crosses (no alert, no beeps), a circle with the toggle off (normal alert plus a crossing alert), drawing, flip, delete and persistence on the plain map, and a line on the street map that keeps lat/lon.
 - `python3 test/linked.py`: two screens linked over the relay, each with 4 simulated phones 30 m apart. Checks each draws the other's drone in its own frame, and a hand-off keeps one drone id across both.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
