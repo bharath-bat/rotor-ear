@@ -81,12 +81,13 @@
     if (!into) gateUntil = Math.max(gateUntil, performance.now() + t * 1000 + 300);
     A.beeps++; A.tones.push(kind);
   }
-  function raiseAlert(now, demo) { // the alert moment: 3 flashes + 3 beeps (demo: demo tone) + buzz; sheets close
-    A.count++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
+  function raiseAlert(now, demo, trip) { // the alert moment: 3 flashes + 3 beeps (demo: demo tone) + buzz; sheets close
+    if (!trip && tripOnly()) { A.held++; return; } // "Alert only on tripwire crossing": the drone is shown, silently
+    A.count++; if (trip) A.trips++; flash(); if (sheet !== 'teach') openSheet(null); nextBeep = now + REPEAT_MS;
     if (!muted()) { tone(demo ? 'demo' : 'alert', 3); if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 250]); }
   }
   function flash() { const b = $('status'); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); flashT = performance.now(); setTimeout(() => b.classList.remove('flash'), 1550); }
-  const A = window.__alert = { count: 0, beeps: 0, tones: [], beepIntoDetector: k => tone(k || 'alert', 1, bus), get gated() { return performance.now() < gateUntil; },
+  const A = window.__alert = { count: 0, beeps: 0, trips: 0, held: 0, tones: [], beepIntoDetector: k => tone(k || 'alert', 1, bus), get gated() { return performance.now() < gateUntil; },
     get muted() { return muted(); }, expireMute() { muteUntil = Date.now() - 1; }, get flashing() { return $('status').classList.contains('flash'); } };
   $('mTest').onclick = () => { flash(); if (!muted()) tone(isDemo() ? 'demo' : 'alert', 1); };
   $('mMute').onclick = () => setMute(!muted());
@@ -125,11 +126,12 @@
 
   // ---------- sheets: open from the bottom, close with Done or a swipe down; a DRONE alert closes them (not Teach: you may be recording it) ----------
   let sheet = null;
-  const SHEETS = ['teach', 'details', 'phones', 'moreS', 'logS'];
+  const SHEETS = ['teach', 'details', 'phones', 'moreS', 'logS', 'tripS', 'tagsS'];
   function openSheet(id) {
     sheet = sheet === id ? null : id;
     $('app').classList.toggle('sheet-open', !!sheet);
     SHEETS.forEach(s => $(s).hidden = s !== sheet);
+    if (sheet === 'tagsS') drawTags(); if (sheet === 'tripS') drawTrips();
     if (sheet) requestAnimationFrame(() => document.documentElement.style.setProperty('--sheet-top', ($('status').getBoundingClientRect().bottom + 8) + 'px'));
   }
   document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => openSheet(null));
@@ -203,7 +205,7 @@
   let saved = JSON.parse(localStorage.getItem(posKey()) || '{}'), model = new R.MeshModel(saved, loadCal());
   const activeModel = () => sim ? sim.model : model;
   const view = R.MapView($('map'), { colors: () => cols, project: dpr => project(dpr), onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
-    if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } } });
+    if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } }, onTap: p => tripTap(p), tapping: () => !!tripDraw });
   $('workings').onchange = () => workings = $('workings').checked;
   // coverage circles: each phone's estimated hearing radius (from its own background noise), gaps shaded
   let cover = localStorage.getItem('rotorear-cover') !== '0';
@@ -332,10 +334,10 @@
     if (sim) return;
     ensureCtx(); openSheet(null);
     const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1),
-      alt: +(hp.get('alt') || 1.5), side: +(hp.get('side') || 6), loud: +(hp.get('loud') || 0), ox: +(hp.get('ox') || 0) }); // alt: the drone's height (m) on the non-scripted paths; side: the phones' square (m); loud: dB louder drone; ox: this post's place on the 'cross' line
+      f0: +(hp.get('f0') || 0), alt: +(hp.get('alt') || 1.5), side: +(hp.get('side') || 6), loud: +(hp.get('loud') || 0), ox: +(hp.get('ox') || 0) }); // alt: the drone's height (m) on the non-scripted paths; side: the phones' square (m); loud: dB louder drone; ox: this post's place on the 'cross' line
     const m = new R.MeshModel({}), links = eng.nodes.map(n => new R.LoopLink(m, n));
     eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.blades = blades; });
-    sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null;
+    sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null; Trip.use('demo'); demoLine();
     sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = eng.truth(); m.truthAt = now; }, 50);
     sim.iv2 = setInterval(() => { const msgs = eng.messages(); links.forEach((l, i) => l.send(msgs[i])); }, 1000 / R.SEND_HZ);
     sim.iv3 = setInterval(() => { const ts = performance.now(); links.forEach(l => l.ping(ts)); }, 1000);
@@ -412,11 +414,17 @@
   const soloSlot = {};
   function dronesOf(st, live, D) {
     if (D.mesh) return st.tracks.filter(t => t.hot).map(t => Object.assign({ key: 't' + t.id, slot: t.slot, f0: t.f0, cls: t.label || 'Drone', score: t.score, nAgree: t.voters, agree: `${t.voters} of ${live.length} phones agree`,
-      flight: t.flight, rpm: t.f0 * 60 / blades, est: t.est, h: t.h, tz: t.herr != null ? t.h.z - t.herr : null, lead: t.id === st.lead, why: whyOf(t.agree, live) }, t.est ? whereOf(t.est, live) : { dir: '', where: '' }));
+      flight: t.flight, rpm: t.f0 * 60 / blades, est: t.est, h: t.h, fx: fxOf(t.f0, t.agree, live), tz: t.herr != null ? t.h.z - t.herr : null, lead: t.id === st.lead, why: whyOf(t.agree, live) }, t.est ? whereOf(t.est, live) : { dir: '', where: '' }));
     const os = det && listening() ? det.outs.filter(o => o.state === 'drone') : [];
     Object.keys(soloSlot).forEach(k => { if (!os.some(o => 's' + o.id === k)) delete soloSlot[k]; });
     return os.map(o => { const key = 's' + o.id; if (soloSlot[key] == null) soloSlot[key] = Object.values(soloSlot).includes(0) ? 1 : 0;
-      return { key, slot: soloSlot[key], f0: o.f0, cls: o.cls ? o.cls.label : 'Drone', score: o.cls ? o.cls.conf : 0, nAgree: 1, agree: 'this phone only', flight: o.flight && o.flight.state, rpm: o.flight ? o.flight.rpm : 0, est: null, dir: '', where: '', lead: o === det.out, why: o.why }; });
+      return { key, slot: soloSlot[key], f0: o.f0, cls: o.cls ? o.cls.label : 'Drone', score: o.cls ? o.cls.conf : 0, nAgree: 1, agree: 'this phone only', flight: o.flight && o.flight.state, rpm: o.flight ? o.flight.rpm : 0, est: null, dir: '', where: '', lead: o === det.out, why: o.why, fx: o.cls && o.cls.x }; });
+  }
+  // the six fingerprint numbers for a track: the mean of the agreeing phones whose own pitch is within 5% of it (with two drones,
+  // a phone's fingerprint belongs to the drone it hears loudest)
+  function fxOf(f0, keys, live) {
+    const xs = live.filter(n => n.fx && n.fr && (!keys || keys.includes(n.key)) && Math.abs(n.fr - f0) / f0 < 0.05).map(n => n.fx);
+    return xs.length ? [0, 1, 2, 3, 4, 5].map(i => xs.reduce((a, x) => a + x[i], 0) / xs.length) : null;
   }
   // the reason in words for what these phones hear: the surest phone that sent a fingerprint (else a sound summary)
   function whyOf(keys, live) {
@@ -481,10 +489,74 @@
       const f = shortFl(d.flight); if (f && !e.flights.includes(f)) e.flights.push(f);
       const h = d.h && d.h.ok ? d.h : null; if (h) e.h = { z: h.z, lo: h.lo, hi: h.hi };
       if (d.est) Log.point(e, d.est[0], d.est[1], h && h.z);
+      voice(k, d, now, demo);
+      if (d.est) Trip.step(k.trip = k.trip || {}, d.est).forEach(c => tripHit(e, c, now, demo));
     });
     const L = list.find(d => d.lead) || list[0]; if (L) inc = L.inc;
     return fresh;
   }
+  // ---------- "Same drone again?": a voiceprint from the first ~4 s of each drone, matched against past drones (reid.js) ----------
+  const Tags = window.RotorTags, VP_N = 8;
+  function voice(k, d, now, demo) {
+    const e = k.inc; if (e.reid || !d.f0) return;
+    k.vs = k.vs || []; if (now - (k.vsAt || 0) < 450) return; k.vsAt = now; k.vs.push({ f0: d.f0, x: d.fx || null });
+    if (k.vs.length < VP_N || (k.vs.filter(v => v.x).length < 3 && k.vs.length < VP_N * 2)) return; // wait for fingerprints (up to ~8 s)
+    e.vp = Tags.print(k.vs); e.reid = Tags.assign(e.vp, e.cls, demo); Log.save(true); logKey = tlKey = '';
+  }
+  const tagLine = (e, n) => e.reid ? Tags.text(e.reid) : 'Voiceprint · listening… ' + Math.min(VP_N, n || 0) + '/' + VP_N;
+  function drawTags() {
+    const L = Tags.list; setText('tagN', L.length + (L.length === 1 ? ' drone' : ' drones'));
+    const day = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    $('tagList').innerHTML = L.map(t => `<div class="tagrow${t.id === tagFocus ? ' on' : ''}" data-tag="${t.id}"><b>#${t.n}</b><input data-name="${t.id}" maxlength="32" value="${esc(t.name)}" placeholder="name it, e.g. Neighbour's DJI" aria-label="name for drone #${t.n}"><button data-forget="${t.id}">Forget</button>
+      <small>${esc(t.cls)} · ~${Math.round(t.f0)} Hz · ${t.visits} visit${t.visits > 1 ? 's' : ''} · first ${day(t.first)} · last ${day(t.last)}${t.demo ? ' · DEMO' : ''}</small></div>`).join('') || '<p class="note">No drones tagged yet. Each confirmed drone gets one after a few seconds.</p>';
+    if (tagFocus) { const i = $('tagList').querySelector(`[data-name="${tagFocus}"]`); if (i) i.scrollIntoView({ block: 'nearest' }); tagFocus = ''; }
+  }
+  let tagFocus = '';
+  $('tagList').onchange = e => { const id = e.target.dataset.name; if (id) { Tags.rename(id, e.target.value); logKey = tlKey = ''; $('stTag').dataset.k = ''; } };
+  $('tagList').onclick = e => { const id = e.target.dataset.forget; if (!id) return; const t = Tags.get(id);
+    if (t && confirm(`Forget drone #${t.n}${t.name ? ' (' + t.name + ')' : ''}? Its voiceprint is deleted; log entries keep their note.`)) { Tags.forget(id); drawTags(); logKey = tlKey = ''; } };
+  $('stTag').onclick = () => { if (inc && inc.reid) tagFocus = inc.reid.id; openSheet('tagsS'); };
+  $('mTags').onclick = () => openSheet('tagsS');
+
+  // ---------- tripwire lines (tripwire.js): drawn on the map, a crossing alerts with its direction ----------
+  const Trip = window.RotorTrip;
+  let tripDraw = null, lastTrip = null, nodesNow = [];
+  const tripOnly = () => Trip.only && Trip.lines.length > 0;
+  $('tripOnly').checked = Trip.only;
+  $('tripOnly').onchange = () => { Trip.only = $('tripOnly').checked; drawTrips(); };
+  const tripKey = () => sim ? 'demo' : room || 'solo';
+  function tripTap(p) {
+    if (!tripDraw) return;
+    if (!tripDraw.a) { tripDraw.a = p; setText('tripDrawT', 'Now tap the other end'); return; }
+    if (Math.hypot(p[0] - tripDraw.a[0], p[1] - tripDraw.a[1]) < 1) return; // too short: keep waiting
+    const ns = nodesNow.length ? nodesNow : [{ pos: [0, 0] }], mid = [ns.reduce((a, n) => a + n.pos[0], 0) / ns.length, ns.reduce((a, n) => a + n.pos[1], 0) / ns.length];
+    Trip.add(tripDraw.a, p, mid, geoF ? [geoF.toLatLng(tripDraw.a[0], tripDraw.a[1]), geoF.toLatLng(p[0], p[1])].map(q => q.map(v => +v.toFixed(7))) : null);
+    tripDraw = null; $('tripDraw').hidden = true;
+  }
+  const startDraw = () => { Trip.use(tripKey()); tripDraw = {}; openSheet(null); setText('tripDrawT', 'Tap one end of the tripwire on the map'); $('tripDraw').hidden = false; };
+  $('tripCancel').onclick = () => { tripDraw = null; $('tripDraw').hidden = true; };
+  $('tripBtn').onclick = $('mTrip').onclick = () => { if (tripDraw) return $('tripCancel').onclick(); Trip.lines.length ? openSheet('tripS') : startDraw(); };
+  $('tripAdd').onclick = startDraw;
+  $('tripDemo').onclick = () => { demoLine(true); drawTrips(); };
+  // the demo line: the square's B–D diagonal. The demo drone hovers on phone C's side and leaves to the SW at ~48 s: it crosses OUT
+  const demoLine = force => { if (sim && (force || (!Trip.lines.length && !localStorage.getItem('rotorear-trip-demo-init')))) { localStorage.setItem('rotorear-trip-demo-init', '1'); const s = sim.eng.o.side / 6; Trip.add([6.2 * s, -1 * s], [-1 * s, 6.2 * s], [4 * s, 4 * s]); } };
+  function drawTrips() {
+    Trip.use(tripKey()); const L = Trip.lines; setText('tripN', L.length ? L.length + (L.length > 1 ? ' lines' : ' line') + (Trip.only ? ' · alerts only on crossing' : '') : 'no lines yet');
+    $('tripDemo').hidden = !sim;
+    $('tripList').innerHTML = L.map(l => `<div><span><b>${Trip.name(l)}</b> <small>· ${Math.round(Math.hypot(l.b[0] - l.a[0], l.b[1] - l.a[1]))} m long${l.ll ? ' · on the street map' : ''}</small></span><button data-flip="${l.id}">Flip in/out</button><button data-del="${l.id}" aria-label="delete ${Trip.name(l)}">✕</button></div>`).join('')
+      || '<p class="note">No lines yet. ' + (Trip.only ? '"Alert only on crossing" does nothing until you draw one: normal alerts stay on.' : '') + '</p>';
+  }
+  $('tripList').onclick = e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.flip) Trip.flip(b.dataset.flip); if (b.dataset.del) Trip.remove(b.dataset.del); drawTrips(); };
+  function tripHit(e, c, now, demo) { // a crossing: logged on the incident, its own alert (also in "alert only on crossing" mode)
+    const r = { line: c.line.id, name: Trip.name(c.line), t: Date.now(), pt: c.pt, dir: c.dir, head: compass(c.head[0], c.head[1]) };
+    (e.trips = e.trips || []).push(r); Log.save(true); logKey = tlKey = '';
+    lastTrip = Object.assign({ at: now, slot: e.slot || 0 }, r);
+    ws.again(); raiseAlert(now, demo, true);
+  }
+  const tripWords = r => `TRIPWIRE · ${r.name} crossed ${r.dir.toUpperCase()}${r.head ? ' · heading ' + r.head : ''} · ${new Date(r.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`;
+  window.__mapTap = (x, y) => { const cv = $('map'), r = cv.getBoundingClientRect(), q = view.W2P(x, y); return [r.left + q[0] * r.width / cv.width, r.top + q[1] * r.height / cv.height]; }; // tests: world m → page px
+  window.__trip = { get lines() { return Trip.lines; }, get last() { return lastTrip; }, get only() { return tripOnly(); }, get drawing() { return tripDraw; } };
+
   function lastDrone() {
     const e = Log.list.find(x => x.type === 'drone'); if (!e) return '';
     const d = new Date(e.t0), days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(e.t0).setHours(0, 0, 0, 0)) / 864e5);
@@ -553,7 +625,7 @@
       lmap.setView(geoF.toLatLng(3, 3), 19); geoFit = 0; }).catch(() => { tiles.bad = 99; geoMsg = 'Street map library failed to load: plain map.'; }); return; }
     const now = performance.now(); if (now - geoFit < 1000) return; geoFit = now;
     lmap.invalidateSize(false);
-    const ps = st.nodes.map(n => n.pos).concat(st.est ? [st.est] : [], replay ? replay.e.track.map(p => [p[1], p[2]]) : []).map(p => geoF.toLatLng(p[0], p[1]));
+    const ps = st.nodes.map(n => n.pos).concat(st.est ? [st.est] : [], replay ? replay.e.track.map(p => [p[1], p[2]]) : [], Trip.lines.flatMap(l => [l.a, l.b])).map(p => geoF.toLatLng(p[0], p[1]));
     lmap.fitBounds(L.latLngBounds(ps).pad(0.25), { animate: false, maxZoom: 21, padding: [24, 24] });
   }
   const project = dpr => {
@@ -588,7 +660,7 @@
   let watchStart = 0, prevS = 'ready', lastEst = null, lastDir = '', lastHead = '', lostInfo = null, renderKey = '';
   const f1 = v => v == null ? '—' : v.toFixed(1);
   function frame() {
-    const M = activeModel(), st = M.update(), now = performance.now();
+    const M = activeModel(), st = M.update(), now = performance.now(); Trip.use(tripKey()); if (geoF) Trip.refit(geoF.fromLatLng);
     const live = st.nodes.filter(n => n.age < R.STALE_MS), D = describe(st, live), demo = isDemo();
     const on = listening() || !!sim || live.some(n => n.key !== ME);
     ws.update(now, on ? D.raw : 'off', on);
@@ -597,13 +669,13 @@
     if (hot && st.est) { lastEst = st.est.slice(); lastDir = D.dir || lastDir; lastHead = D.heading || lastHead; }
     // alert moment (see raiseAlert()); then 1 beep every 10 s until Got it
     if (ws.ev === 'alert') {
-      lastDir = lastHead = ''; raiseAlert(now, demo); replay = null; known = [];
+      lastDir = lastHead = ''; lastTrip = null; raiseAlert(now, demo); replay = null; known = [];
       if (!D.drones.length) D.drones = [{ key: 'lead', slot: 0, f0: D.hz || 0, cls: D.cls || 'Drone', score: D.score, nAgree: st.voters || 1, agree: D.agree, flight: D.flight, dir: D.dir, est: st.est, lead: true }];
     }
     if (ws.ev === 'back') nextBeep = now + REPEAT_MS; // back within 60 s: no new alert sound
-    if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted() && !birdy(inc)) tone(demo ? 'demo' : 'alert', 1); } // the camera says bird: no repeat beeps
-    if (ws.ev === 'lost') { if (!muted()) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
-    if (ws.ev === 'gone') { inc = null; known = []; Log.save(true); }
+    if (s === 'drone' && now > nextBeep) { nextBeep = now + REPEAT_MS; if (!muted() && !birdy(inc) && (!tripOnly() || lastTrip)) tone(demo ? 'demo' : 'alert', 1); } // tripwire-only: repeat beeps after a crossing // the camera says bird: no repeat beeps
+    if (ws.ev === 'lost') { if (!muted() && (!tripOnly() || lastTrip)) tone('lost', 1); lostInfo = { pos: lastEst, dir: lastDir, heading: lastHead }; }
+    if (ws.ev === 'gone') { inc = null; known = []; lastTrip = null; Log.save(true); }
     if (hot) {
       // a second drone while the first is still up: its own alert (flash, tone, buzz, un-acknowledged)
       if (trackDrones(D.drones, live, now, demo) && ws.ev !== 'alert') { ws.again(); raiseAlert(now, demo); }
@@ -629,7 +701,12 @@
       setText('replayT', 'REPLAY · ' + clock(e.t0) + ' · ' + (e.cls || 'Drone') + (e.demo ? ' · DEMO' : ''));
     }
     $('replayBar').hidden = !replay;
+    // tripwires: the lines, the first tap while drawing, this episode's crossing points (or the replayed incident's)
+    st.trips = Trip.lines.map(l => ({ a: l.a, b: l.b, inS: l.inS, label: Trip.name(l), hot: !!(lastTrip && lastTrip.line === l.id && now - lastTrip.at < 4000) }));
+    st.tripDraft = tripDraw && tripDraw.a; st.tripHits = replay ? (replay.e.trips || []) : (hot || s === 'lost') ? known.flatMap(k => k.inc.trips || []) : [];
+    nodesNow = st.nodes;
     if (!st.label && !D.mesh) st.label = D.cls; // solo marker text
+    $('tripBtn').textContent = Trip.lines.length ? 'Tripwire · ' + Trip.lines.length + (tripOnly() ? ' · only' : '') : 'Tripwire';
     st.remote = Link.on ? Link.remote(hot ? D.drones : []) : [];
     $('handoff').hidden = !Link.note; setText('handoff', Link.note);
     geoTick(st, live);
@@ -679,7 +756,7 @@
         word = (demo ? 'DEMO · ' : '') + (birdy(inc) ? 'LIKELY A BIRD' : 'DRONE'); cls = (D.cls || 'Drone') + (D.word ? ' · ' + D.word : '');
         where = D.rough ? (D.where ? D.where + ' · rough, calibrate ›' : 'Position is rough. Clap to calibrate ›') : D.mesh ? [D.where, D.trend].filter(Boolean).join(' · ') : D.trend + ' · one phone: no direction';
         sub = [D.agree, 'seen ' + mmss(now - ws.first)].filter(Boolean).join(' · ');
-        pill = s === 'tracking' ? '✓ Acknowledged ' + clock(Date.now() - (now - ws.ackAt)) + ' · silent' : mt || (birdy(inc) ? 'Camera says bird · beeps paused' : demo ? 'Demo tone · beeping' : 'Sound ON · beeping');
+        pill = s === 'tracking' ? '✓ Acknowledged ' + clock(Date.now() - (now - ws.ackAt)) + ' · silent' : mt || (birdy(inc) ? 'Camera says bird · beeps paused' : tripOnly() && !lastTrip ? 'Tripwire only · silent until a line is crossed' : demo ? 'Demo tone · beeping' : 'Sound ON · beeping');
         peekT = 'Why we think so ˄'; peekS = 'rotor hum ~' + Math.round(D.hz || 0) + ' Hz' + (D.learned ? ' · ' + D.learned.replace(/^Matched your taught samples \((\d+) .*\)$/, 'matches $1 of your samples') : D.flight ? ' · ' + shortFl(D.flight).toLowerCase() : '');
         acts = s === 'drone' ? [demo ? ['replay', 'Replay demo', 'from 0:00'] : muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'banner keeps flashing'], ['ack', 'Got it', 'stops flash + beeps', 1]]
           : [muted() ? ['unmute', 'Unmute', muteLeft() + ' left'] : ['mute', 'Mute 5 min', 'also silences Lost tone'], ['details', 'Details', 'where · how sure · flight']];
@@ -694,12 +771,16 @@
     }
     const b = $('status'); b.classList.remove('ready', 'watching', 'checking', 'notdrone', 'drone', 'tracking', 'lost'); b.classList.add(s);
     // two drones at once: one line each, in its map colour
-    const many = hot && D.drones.length > 1, dl = many ? D.drones.map(d => `<div class="drow"><i class="dot d${d.slot + 1}"></i><b>${esc(d.cls)}${d.word ? ' · ' + d.word : ''}${d.inc && d.inc.bob ? ' · ' + RotorBird.chip(d.inc.bob) : ''}</b><small>${[d.where, d.agree].filter(Boolean).map(esc).join(' · ')}</small></div>`).join('') : '';
+    const many = hot && D.drones.length > 1, dl = many ? D.drones.map(d => `<div class="drow"><i class="dot d${d.slot + 1}"></i><b>${esc(d.cls)}${d.word ? ' · ' + d.word : ''}${d.inc && d.inc.bob ? ' · ' + RotorBird.chip(d.inc.bob) : ''}</b><small>${[d.where, d.agree, d.inc && d.inc.reid && Tags.chip(d.inc.reid)].filter(Boolean).map(esc).join(' · ')}</small></div>`).join('') : '';
     if ($('stDrones').dataset.k !== dl) { $('stDrones').dataset.k = dl; $('stDrones').innerHTML = dl; }
     if (many) { word = (demo ? 'DEMO · ' : '') + D.drones.length + ' DRONES'; cls = where = ''; sub = 'seen ' + mmss(now - ws.first); }
     b.classList.toggle('birdy', hot && !many && birdy(inc)); // downgraded, not dismissed: calmer colours, the drone stays on the map
     const bb = hot && !many && inc && inc.bob, bk = bb ? JSON.stringify(bb) : ''; // the camera's Bird / Bot chip, with its reason
     if ($('stBob').dataset.k !== bk) { $('stBob').dataset.k = bk; $('stBob').hidden = !bb; $('stBob').innerHTML = bb ? `<span class="bob ${bb.v}">${RotorBird.chip(bb)}</span> <small>phone ${esc(bb.phone)}: ${esc(RotorBird.text(bb))}</small>` : ''; }
+    const kn = inc && known.find(k => k.inc === inc), tg = hot && !many && inc ? tagLine(inc, kn && kn.vs && kn.vs.length) : '', tk = tg + (inc && inc.reid ? inc.reid.kind : '');
+    if ($('stTag').dataset.k !== tk) { $('stTag').dataset.k = tk; $('stTag').hidden = !tg; $('stTag').className = inc && inc.reid ? inc.reid.kind : 'wait'; $('stTag').innerHTML = tg ? `<span>${esc(tg)}</span>${inc && inc.reid ? '<u>Rename ›</u>' : ''}` : ''; }
+    const tw = hot && lastTrip ? tripWords(lastTrip) : hot && tripOnly() ? 'Tripwire only: no beeps until it crosses a line' : '';
+    $('stTrip').hidden = !tw; setText('stTrip', tw); $('stTrip').classList.toggle('hit', !!(hot && lastTrip));
     setText('stIcon', icon); setText('stWord', word); $('stWord').classList.toggle('long', word.length > 13); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
     $('pill').hidden = !pill; if (pill) { setText('pill', pill); $('pill').classList.toggle('muted', !!mt); }
     $('stProg').hidden = prog == null; if (prog != null) $('stProg').firstChild.style.width = Math.round(Math.max(0, Math.min(1, prog)) * 100) + '%'; setText('stNote', note);

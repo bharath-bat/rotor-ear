@@ -262,3 +262,17 @@ html:not(.sun) #geomap .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) br
 #stBob small{display:block;font-size:13px;margin-top:3px;opacity:.92}#app.sheet-open #stBob{display:none}
 #status.birdy{background:var(--panel2);border-color:var(--alert);color:var(--ink)}#status.birdy #pill{background:var(--btn);color:var(--btn-ink);border-color:var(--btn)}
 #status.birdy #stWord{font-size:30px!important;white-space:normal!important}
+/* Same drone again? (voiceprint tag line) · tripwire */
+#stTag{display:flex;align-items:center;gap:8px;width:100%;margin-top:6px;padding:6px 10px;border-radius:10px;border:1.5px solid currentColor;background:transparent;color:inherit;font:inherit;font-size:14px;font-weight:700;text-align:left}
+#stTag[hidden]{display:none}#stTag span{flex:1}#stTag u{text-decoration:none;font-size:12px;white-space:nowrap;opacity:.9}
+#stTag.wait{border-style:dashed;font-weight:500;opacity:.85}#stTag.match{background:#fff;color:#7a2200;border-color:#fff}#stTag.possible{border-style:dashed}
+#stTag.match{animation:tagin .9s ease-out}@keyframes tagin{0%{transform:scale(1.04)}100%{transform:none}}
+#stTrip{margin-top:6px;font-size:14px;font-weight:800}#stTrip.hit{padding:6px 10px;border-radius:10px;background:var(--check);color:#0B0D12}
+#app.sheet-open #stTag,#app.sheet-open #stTrip{display:none}
+#tripBtn{position:absolute;left:8px;top:34px;z-index:2;min-height:36px;padding:4px 12px;border-radius:10px;border:1.5px solid var(--check);background:var(--surface);color:var(--ink);font-size:13px;font-weight:700}
+#tripDraw{position:absolute;left:8px;right:8px;top:30px;z-index:3;display:flex;align-items:center;gap:8px;padding:6px 6px 6px 12px;border-radius:12px;background:var(--panel);border:2px dashed var(--check);font-size:14px;font-weight:800}
+#tripDraw[hidden]{display:none}#tripDraw span{flex:1}#tripDraw button{min-height:40px;padding:0 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+.tagrow{display:grid!important;grid-template-columns:auto 1fr auto!important;gap:4px 8px;padding:6px 0}.tagrow b{font-size:16px}.tagrow small{grid-column:1/-1}
+.tagrow input{min-height:40px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:0 8px;font-size:15px;min-width:0}
+.tagrow.on input{border-color:var(--check);box-shadow:0 0 0 2px var(--check)}
+#tripList div{grid-template-columns:1fr auto auto}#tripList button{padding:0 10px}

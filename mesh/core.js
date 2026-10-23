@@ -461,6 +461,8 @@
       (S.tracks || []).forEach(t => { if (t.hot && t.est) { xs.push(clamp(t.est[0], -12, 18)); ys.push(clamp(t.est[1], -12, 18)); } });
       (S.remote || []).forEach(r => { xs.push(clamp(r.x, -40, 46) - 5, clamp(r.x, -40, 46) + 5); ys.push(clamp(r.y, -40, 46) - 2); }); // linked posts' drones, with room for the label
       [S.est, L, S.ui && S.ui.workings && S.truth && [S.truth.x, S.truth.y]].forEach(p => { if (p) { xs.push(clamp(p[0], -12, 18)); ys.push(clamp(p[1], -12, 18)); } });
+      (S.trips || []).forEach(l => [l.a, l.b].forEach(p => { xs.push(clamp(p[0], -20, 26)); ys.push(clamp(p[1], -20, 26)); })); // tripwire lines stay in view
+      if (S.tripDraft) { xs.push(clamp(S.tripDraft[0], -20, 26)); ys.push(clamp(S.tripDraft[1], -20, 26)); }
       const x0 = Math.min(...xs) - 3, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 3, y1 = Math.max(...ys) + 3, s = Math.max(x1 - x0, y1 - y0);
       view = { x0: (x0 + x1) / 2 - s / 2, y0: (y0 + y1) / 2 - s / 2, s };
     }
@@ -515,6 +517,21 @@
         text('one phone: no direction · add phones for a position', x, y + 120 * dpr, C.ink2, 12 * dpr);
       }
     }
+    // tripwire lines (S.trips: [{ a, b, inS, label, hot }]): thick dashed yellow, an "in" arrow at the middle; S.tripDraft = first tap;
+    // S.tripHits: [{ pt, dir }] crossing points of this episode
+    function tripwires(C, dpr, now) {
+      (S.trips || []).forEach(l => {
+        const [ax, ay] = W2P(l.a[0], l.a[1]), [bx, by] = W2P(l.b[0], l.b[1]), hot = l.hot && Math.floor(now / 300) % 2;
+        g.strokeStyle = hot ? C.alert : C.check; g.lineWidth = 4 * dpr; g.setLineDash([10 * dpr, 6 * dpr]); g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke(); g.setLineDash([]);
+        g.fillStyle = C.check; [[ax, ay], [bx, by]].forEach(([x, y]) => { g.beginPath(); g.arc(x, y, 5 * dpr, 0, 7); g.fill(); });
+        const mx = (ax + bx) / 2, my = (ay + by) / 2, L = Math.hypot(bx - ax, by - ay) || 1, nx = (by - ay) / L * l.inS, ny = -(bx - ax) / L * l.inS; // screen y points down, so the world's left of a→b is (Δy, −Δx) on screen
+        arrow(mx - nx * 10 * dpr, my - ny * 10 * dpr, mx + nx * 22 * dpr, my + ny * 22 * dpr, C.check, 2.5 * dpr);
+        text('in', mx + nx * 34 * dpr, my + ny * 34 * dpr, C.check, 12 * dpr, true);
+        text(l.label, bx + (bx - ax) / L * 16 * dpr - nx * 14 * dpr, by + (by - ay) / L * 16 * dpr - ny * 14 * dpr, C.ink, 12 * dpr, true); // at the b end: the middle is where crossings land
+      });
+      if (S.tripDraft) { const [x, y] = W2P(S.tripDraft[0], S.tripDraft[1]), ph = 1 + 0.25 * Math.sin(now / 150); g.strokeStyle = C.check; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 10 * dpr * ph, 0, 7); g.stroke(); text('tap the other end', x, y - 22 * dpr, C.ink, 12 * dpr, true); }
+      (S.tripHits || []).forEach(h => { const [x, y] = W2P(h.pt[0], h.pt[1]), r = 8 * dpr; g.strokeStyle = C.alert; g.lineWidth = 4 * dpr; g.beginPath(); g.moveTo(x - r, y - r); g.lineTo(x + r, y + r); g.moveTo(x + r, y - r); g.lineTo(x - r, y + r); g.stroke(); text(h.dir === 'in' ? 'crossed IN' : 'crossed OUT', x, y + 20 * dpr, C.alert, 12 * dpr, true); });
+    }
     function draw() {
       const dpr = Math.min(2, devicePixelRatio || 1), Wd = Math.round(cv.clientWidth * dpr), Hd = Math.round(cv.clientHeight * dpr) || Wd;
       if (cv.width !== Wd || cv.height !== Hd) { cv.width = Wd; cv.height = Hd; }
@@ -532,6 +549,7 @@
       if (S.calSpot) { const [x, y] = W2P(S.calSpot[0], S.calSpot[1]), ph = 1 + 0.3 * Math.sin(now / 120); g.strokeStyle = C.check; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 24 * dpr * ph, 0, 7); g.stroke(); text('👏 clap here', x, y - 34 * dpr, C.ink, 13 * dpr, true); }
       if (work && S.truth) { const [x, y] = W2P(S.truth.x, S.truth.y); g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.setLineDash([3 * dpr, 3 * dpr]); g.beginPath(); g.arc(x, y, 9 * dpr, 0, 7); g.stroke(); g.setLineDash([]); text('true', x, y + 20 * dpr, C.ink2, 11 * dpr); }
       if (work && S.estL && S.estF) { const [x, y] = W2P(S.estL[0], S.estL[1]); g.strokeStyle = C.check; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 6 * dpr, 0, 7); g.stroke(); }
+      tripwires(C, dpr, now);
       // drones: every confirmed track (and the lead one while hot), each in its own colour: first C.alert, second C.alert2
       const dots = (T, col) => { g.fillStyle = col; for (let i = 0; i < T.length; i += 3) { const [a, b] = W2P(T[i][0], T[i][1]); g.globalAlpha = 0.15 + 0.5 * i / T.length; g.beginPath(); g.arc(a, b, 2.5 * dpr, 0, 7); g.fill(); } g.globalAlpha = 1; };
       if (ws === 'lost') dots(S.trail || [], C.alert);
@@ -574,15 +592,17 @@
     }
     requestAnimationFrame(draw);
     const evPos = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height]; };
+    let down = null; // a tap that isn't a pin drag → opts.onTap(world point) (drawing tripwires)
     cv.addEventListener('pointerdown', e => {
-      if (!opts.onDrag || !S) return; const [px, py] = evPos(e); let best = null, bd = 30 * Math.min(2, devicePixelRatio || 1);
-      S.nodes.forEach(n => { const [x, y] = W2P(n.pos[0], n.pos[1]), d = Math.hypot(x - px, y - py); if (d < bd) { bd = d; best = n; } });
-      if (best) { drag = best.key; cv.setPointerCapture(e.pointerId); e.preventDefault(); }
+      if (!S) return; const [px, py] = evPos(e); let best = null, bd = 30 * Math.min(2, devicePixelRatio || 1); down = [px, py];
+      if (opts.onDrag) S.nodes.forEach(n => { const [x, y] = W2P(n.pos[0], n.pos[1]), d = Math.hypot(x - px, y - py); if (d < bd) { bd = d; best = n; } });
+      if (best && !(opts.tapping && opts.tapping())) { drag = best.key; down = null; cv.setPointerCapture(e.pointerId); e.preventDefault(); }
     });
+    cv.addEventListener('pointerup', e => { if (!down || !opts.onTap) return; const [px, py] = evPos(e); if (Math.hypot(px - down[0], py - down[1]) < 14 * Math.min(2, devicePixelRatio || 1)) opts.onTap(P2W(px, py)); down = null; });
     cv.addEventListener('pointermove', e => { if (!drag) return; const [px, py] = evPos(e), [x, y] = P2W(px, py); opts.onDrag(drag, [Math.round(x * 2) / 2, Math.round(y * 2) / 2], false); });
     const end = () => { if (!drag) return; const n = S.nodes.find(m => m.key === drag); if (n) opts.onDrag(drag, n.pos, true); drag = null; };
     cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
-    return { set(state) { S = state; } };
+    return { set(state) { S = state; }, W2P: (x, y) => W2P(x, y) };
   }
 
   // Linked watch posts: every post's screen joins one link code. The first takes the well-known id and relays what each post sends
@@ -683,9 +703,9 @@
   const pp = u => { u = ((u % 2) + 2) % 2; return u < 1 ? u : 2 - u; }; // ping-pong 0→1→0
   class SimEngine {
     constructor(ctx, o) {
-      this.o = Object.assign({ n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, loud: 0, ox: 0, clockOffMs: 400, jitterMs: 1, biasMs: 0, gainDb: 0 }, o); // loud: dB louder drone (heard further); ox: where this post sits on the 'cross' line (m east)
+      this.o = Object.assign({ f0: 0, n: 4, side: 6, path: 'circle', speed: 1, alt: 1.5, loud: 0, ox: 0, clockOffMs: 400, jitterMs: 1, biasMs: 0, gainDb: 0 }, o); // loud: dB louder drone (heard further); ox: where this post sits on the 'cross' line (m east)
       this.ctx = ctx; this.t = 0; this.drone = this.drone2 = null;
-      const s = this.o.side, POS = [[0, 0], [s, 0], [s, s], [0, s]].slice(0, this.o.n), base = this.o.path === 'cross' ? 215 : 205 + Math.random() * 20; // 'cross': the same drone at every post
+      const s = this.o.side, POS = [[0, 0], [s, 0], [s, s], [0, s]].slice(0, this.o.n), base = this.o.f0 || (this.o.path === 'cross' ? 215 : 205 + Math.random() * 20); // 'cross': the same drone at every post
       const src = RotorEar.syntheticDrone(ctx, base);
       // path 'two': a second, higher-pitched drone (×1.4: its low harmonics sit between the first one's)
       const src2 = this.o.path === 'two' ? RotorEar.syntheticDrone(ctx, base * 1.4) : null;
