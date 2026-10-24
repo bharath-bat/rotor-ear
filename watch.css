@@ -276,3 +276,18 @@ html:not(.sun) #geomap .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) br
 .tagrow input{min-height:40px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:0 8px;font-size:15px;min-width:0}
 .tagrow.on input{border-color:var(--check);box-shadow:0 0 0 2px var(--check)}
 #tripList div{grid-template-columns:1fr auto auto}#tripList button{padding:0 10px}
+/* per-ear link chips (offline buffering) and hotspot mode */
+#stNet{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+#stNet .net{font-size:13px;font-weight:700;padding:4px 10px;border-radius:999px;border:1.5px solid var(--line);background:var(--panel)}
+#stNet .net.off{border-style:dashed;border-color:var(--check)}#stNet .net.off::before{content:'⚠ '}
+#stNet .net.back::before{content:'✓ '}
+#app.sheet-open #stNet{display:none}
+.hotspot{margin:14px 0;padding:12px 14px;border:1.5px dashed var(--line);border-radius:16px}
+.hotspot .trow .btn{flex:1}
+.linkbtn{width:100%;margin-top:8px}
+.hint{font-weight:600;color:var(--ink)}
+.steps{margin:6px 0 10px 20px;padding:0;font-size:14px;line-height:1.5;color:var(--ink-2)}
+canvas.qr{display:block;width:min(300px,80vw);height:auto;margin:10px auto;border-radius:8px;image-rendering:pixelated}
+#eCam,#hCam{display:block;width:100%;max-height:50vh;border-radius:12px;background:#000;margin:8px 0}
+#eCam[hidden],#hCam[hidden]{display:none}
+#earHot{padding:4px 0 12px}

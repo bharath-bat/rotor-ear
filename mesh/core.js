@@ -1,7 +1,8 @@
 // Rotor Ear · mesh core (shared by the screen, the ear and the demo phones of the one app).
 // Nodes send ONLY numbers: detector confidence, pitch, band energy, fingerprint label, and the times
 // of rotor-envelope peaks (for arrival-time direction finding). Never audio. Passive only.
-// Transport: PeerJS cloud (wss://0.peerjs.com:443) signalling + one WebRTC data channel per node → map.
+// Transport: PeerJS cloud (wss://0.peerjs.com:443) signalling + one WebRTC data channel per node → map (the default), or
+// hotspot mode (mesh/hotspot.js): the same data channel paired by QR codes, no server at all.
 (function () {
   'use strict';
   const BASE = document.currentScript.src.replace(/[^/]*$/, '');
@@ -58,66 +59,112 @@
   }
 
   // ---------------- transport ----------------
-  // NodeLink keeps a data channel open to the room's map, reconnecting forever, and answers the
-  // map's clock pings with its own clock (NTP-style) so the map can line up arrival times.
+  // NodeLink keeps a data channel open to the room's map and answers the map's clock pings with its own clock (NTP-style)
+  // so the map can line up arrival times. Relay mode: PeerJS, reconnecting forever with backoff (1 s doubling to 15 s), also
+  // when the relay itself drops. Hotspot mode (opts.local): no PeerJS; the page hands it a paired data channel (attach).
+  // Offline buffering: while the map isn't answering (no ping for 3 s), the ear's messages (telemetry, labels, clip and
+  // Bird-or-Bot flags: numbers only) are queued with their time, newest QMAX kept; once the map answers again the queue
+  // goes out in order, CHUNK at a time, each chunk resent until the map acks it. Pongs and demo truth are never queued.
+  const QMAX = 2400, CHUNK = 25, QTYPES = { s: 1, label: 1, clip: 1, bob: 1 };
   class NodeLink {
-    constructor(room, key, onStatus, onMsg, clock) {
-      Object.assign(this, { room, key, onStatus, onMsg, clock: clock || (() => performance.now()), conn: null, peer: null, lastPing: 0, idSuffix: '' });
-      this.makePeer();
+    constructor(room, key, onStatus, onMsg, clock, opts) {
+      Object.assign(this, { room, key, onStatus, onMsg, clock: clock || (() => performance.now()), conn: null, peer: null, lastPing: 0, idSuffix: '',
+        local: !!(opts && opts.local), q: [], seq: 0, dropped: 0, fails: 0, wait: 0, inflight: null, downAt: Date.now(), cut: false, sid: randKey(4) });
+      if (!this.local) this.makePeer();
       this.watch = setInterval(() => this.watchdog(), 1000);
     }
+    get online() { const c = this.conn; return !this.cut && !!(c && c.open) && Date.now() - this.lastPing < 3000; }
+    backoff() { const ms = Math.min(15000, 1000 * 2 ** Math.min(this.fails++, 4)); this.wait = Date.now() + ms; return ms; }
+    later(fn) { clearTimeout(this.rt); this.rt = setTimeout(fn, this.backoff()); }
     makePeer() {
-      if (this.peer) { try { this.peer.destroy(); } catch (e) {} }
+      if (this.peer) { try { this.peer.destroy(); } catch (e) {} this.peer = null; }
+      if (this.cut) return this.later(() => this.makePeer());
       const p = this.peer = new Peer(PREFIX + this.room + '-n-' + this.key + this.idSuffix, { debug: 0 });
       this.onStatus('connecting to relay…', 'bad');
       p.on('open', () => this.connect());
-      p.on('disconnected', () => { if (!p.destroyed) setTimeout(() => { try { p.reconnect(); } catch (e) {} }, 1000); });
+      p.on('disconnected', () => { if (p === this.peer && !p.destroyed) this.later(() => { try { p.reconnect(); } catch (e) { this.makePeer(); } }); });
       p.on('error', err => {
-        if (err.type === 'peer-unavailable') { this.onStatus('map not open yet — retrying…', 'bad'); this.retry(2000); }
+        if (p !== this.peer) return;
+        if (err.type === 'peer-unavailable') { this.onStatus('map not open yet — retrying…', 'bad'); this.later(() => this.connect()); }
         else if (err.type === 'unavailable-id') { this.idSuffix = '-' + randKey(3); setTimeout(() => this.makePeer(), 500); }
-        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) { this.onStatus('relay unreachable — retrying…', 'bad'); setTimeout(() => this.makePeer(), 3000); }
-        else { this.onStatus('error: ' + err.type, 'bad'); this.retry(3000); }
+        else { this.onStatus((['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type) ? 'relay unreachable' : 'error: ' + err.type) + ' — retrying…', 'bad'); this.later(() => this.makePeer()); }
       });
     }
-    retry(ms) { clearTimeout(this.rt); this.rt = setTimeout(() => this.connect(), ms); }
     connect() {
-      const p = this.peer; if (!p || p.destroyed || p.disconnected || !p.open) return;
+      const p = this.peer; if (this.cut || !p || p.destroyed || p.disconnected || !p.open) return this.later(() => this.peer && this.peer.open ? this.connect() : this.makePeer());
       if (this.conn) { try { this.conn.close(); } catch (e) {} }
-      const c = this.conn = p.connect(hubId(this.room), { reliable: false, serialization: 'json', metadata: { role: 'node', key: this.key } });
+      this.bind(p.connect(hubId(this.room), { reliable: false, serialization: 'json', metadata: { role: 'node', key: this.key } }));
       this.onStatus('connecting to map…', 'bad');
-      c.on('open', () => { this.lastPing = Date.now(); this.onStatus('connected to map', 'ok'); });
+    }
+    attach(c) { if (this.conn && this.conn !== c) { try { this.conn.close(); } catch (e) {} } this.bind(c); } // hotspot: a paired data channel
+    bind(c) {
+      this.conn = c; this.inflight = null;
+      const up = () => { this.lastPing = Date.now(); this.fails = 0; this.wasUp = true; this.tell = true; this.onStatus('connected to map', 'ok'); };
+      if (c.open) up(); else c.on('open', up);
       c.on('data', d => {
+        if (this.cut || this.conn !== c) return;
         if (d && d.t === 'ping') { this.lastPing = Date.now(); if (d.ts != null) this.send({ t: 'pong', k: this.key, ts: d.ts, tn: this.clock() }); }
+        if (d && d.t === 'ack') { this.q = this.q.filter(x => x.s > d.s); this.inflight = null; this.flush(); return; }
         this.onMsg && this.onMsg(d);
       });
-      c.on('close', () => { if (this.conn === c) { this.onStatus('lost map — reconnecting…', 'bad'); this.retry(1500); } });
-      c.on('error', () => { if (this.conn === c) this.retry(2000); });
+      c.on('close', () => { if (this.conn === c) { this.onStatus(this.local ? 'hotspot link lost — pair again' : 'lost map — reconnecting…', 'bad'); if (!this.local) this.later(() => this.connect()); } });
+      c.on('error', () => { if (this.conn === c && !this.local) this.later(() => this.connect()); });
+    }
+    flush() { // oldest first; one chunk in flight, resent after 2 s without an ack. After a (re)connect an empty queue says "nothing missed"
+      if (!this.online || (this.inflight && Date.now() - this.inflight < 2000) || !(this.q.length || this.tell)) return;
+      const part = this.q.slice(0, CHUNK); this.inflight = Date.now(); this.tell = false;
+      try { this.conn.send({ t: 'late', k: this.key, id: this.sid, s0: part.length ? part[0].s : this.seq + 1, m: part.map(x => x.m), left: this.q.length - part.length, lost: this.dropped }); } catch (e) {}
     }
     watchdog() {
-      const c = this.conn;
-      if (c && c.open && Date.now() - this.lastPing > 7000) { this.onStatus('map silent — reconnecting…', 'bad'); try { c.close(); } catch (e) {} this.retry(500); }
-      if (c && !c.open && Date.now() - (this.lastTry || 0) > 10000) { this.lastTry = Date.now(); if (this.peer && this.peer.open) this.retry(0); }
+      const c = this.conn, now = Date.now();
+      if (this.online) { this.downAt = 0; this.flush(); }
+      else {
+        if (!this.downAt) this.downAt = now;
+        if (!this.cut && c && c.open && now - this.lastPing > 7000 && !this.local) { try { c.close(); } catch (e) {} this.later(() => this.connect()); }
+        if (!this.cut && !this.local && (!this.peer || this.peer.destroyed) && now > this.wait) this.makePeer(); // the relay went away: start over
+        if (!this.cut && !this.local && c && !c.open && this.peer && this.peer.open && now > this.wait && now - (this.lastTry || 0) > 10000) { this.lastTry = now; this.connect(); } // stuck opening
+        const s = Math.round((now - this.downAt) / 1000), w = Math.max(0, Math.ceil((this.wait - now) / 1000));
+        if (s >= 3 && this.wasUp) this.onStatus(`offline ${s} s · ${this.q.length} queued` + (this.local ? ' · waiting for the hotspot link' : w ? ` · retrying in ${w} s` : ' · retrying…'), 'bad');
+      }
     }
-    send(o) { const c = this.conn; if (c && c.open) { try { c.send(o); } catch (e) {} } }
+    send(o) {
+      if (!o) return;
+      if (QTYPES[o.t] && (!this.online || this.q.length)) { // keep order: once anything is queued, new messages queue behind it
+        this.q.push({ s: ++this.seq, m: Object.assign({}, o, { at: +this.clock().toFixed(1), w: Date.now() }) });
+        if (this.q.length > QMAX) { this.q.shift(); this.dropped++; }
+        return;
+      }
+      const c = this.conn; if (c && c.open && !this.cut) { try { c.send(o); } catch (e) {} }
+    }
+    // tests: drop the link (and the relay) for a while, as if the network went away
+    drop(on) { this.cut = !!on; if (on) { if (this.conn) try { this.conn.close(); } catch (e) {} if (this.peer && !this.local) { try { this.peer.destroy(); } catch (e) {} } } else { this.fails = 0; this.wait = 0; } }
   }
 
-  // Hub: the map owns the room's well-known peer id. If it's taken, we become a read-only viewer.
+  // Hub: the map. Relay mode owns the room's well-known peer id (if it's taken, we become a read-only viewer) and reconnects
+  // with backoff when the relay drops. Hotspot mode (room = null): no PeerJS, paired data channels are handed in by add().
   function startHub(room, cb) {
-    let peer, conns = new Set(), mode = 'hub', hubConn = null;
+    let peer, conns = new Set(), mode = 'hub', hubConn = null, fails = 0, owned = false;
+    const later = fn => setTimeout(fn, Math.min(15000, 1000 * 2 ** Math.min(fails++, 4)));
+    const accept = c => {
+      const opened = () => { // an ear that paired / connected again replaces its old link
+        const k = c.metadata && c.metadata.key; if (k) conns.forEach(o => { if (o !== c && o.metadata && o.metadata.key === k) { conns.delete(o); try { o.close(); } catch (e) {} } });
+        conns.add(c); try { c.send({ t: 'ping', ts: performance.now() }); } catch (e) {} };
+      if (c.open) opened(); else c.on('open', opened);
+      c.on('data', d => cb.data(c, d));
+      c.on('close', () => conns.delete(c));
+      c.on('error', () => conns.delete(c));
+    };
     const make = () => {
-      peer = new Peer(mode === 'hub' ? hubId(room) : PREFIX + room + '-v-' + randKey(5), { debug: 0 });
-      peer.on('open', () => { if (mode === 'hub') cb.status('map is live — waiting for nodes', 'ok'); else viewerConnect(); });
-      peer.on('connection', c => {
-        c.on('open', () => { conns.add(c); c.send({ t: 'ping', ts: performance.now() }); });
-        c.on('data', d => cb.data(c, d));
-        c.on('close', () => conns.delete(c));
-        c.on('error', () => conns.delete(c));
-      });
-      peer.on('disconnected', () => { if (!peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch (e) {} }, 1000); });
-      peer.on('error', err => {
-        if (err.type === 'unavailable-id' && mode === 'hub') { mode = 'viewer'; cb.status('another map already hosts this room — viewing it', 'bad'); cb.viewer && cb.viewer(); peer.destroy(); setTimeout(make, 300); }
+      const p = peer = new Peer(mode === 'hub' ? hubId(room) : PREFIX + room + '-v-' + randKey(5), { debug: 0 });
+      p.on('open', () => { fails = 0; if (mode === 'hub') { owned = true; cb.status('map is live — waiting for nodes', 'ok'); } else viewerConnect(); });
+      p.on('connection', accept);
+      p.on('disconnected', () => { if (p === peer && !p.destroyed) later(() => { try { p.reconnect(); } catch (e) { p.destroy(); make(); } }); });
+      p.on('error', err => {
+        if (p !== peer) return;
+        if (err.type === 'unavailable-id' && owned) { cb.status('relay still holds this room — retrying…', 'bad'); p.destroy(); later(make); } // our own old id, after a drop
+        else if (err.type === 'unavailable-id' && mode === 'hub') { mode = 'viewer'; cb.status('another map already hosts this room — viewing it', 'bad'); cb.viewer && cb.viewer(); p.destroy(); setTimeout(make, 300); }
         else if (err.type === 'peer-unavailable' && mode === 'viewer') setTimeout(viewerConnect, 2000);
-        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) { cb.status('relay unreachable — retrying…', 'bad'); peer.destroy(); setTimeout(make, 3000); }
+        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) { cb.status('relay unreachable — retrying…', 'bad'); p.destroy(); later(make); }
         else cb.status('relay error: ' + err.type, 'bad');
       });
     };
@@ -127,12 +174,13 @@
       hubConn.on('data', d => cb.view && cb.view(d));
       hubConn.on('close', () => setTimeout(viewerConnect, 1500));
     }
-    make();
+    if (room) make(); else cb.status('pair each ear by code', 'ok');
     // 1 Hz clock pings: nodes answer with their own clock (see NodeLink), the map keeps the lowest-RTT offset
     setInterval(() => { const ts = performance.now(); conns.forEach(c => { if (c.open) try { c.send({ t: 'ping', ts, label: c.nodeLabel }); } catch (e) {} }); }, 1000);
     return {
       get mode() { return mode; },
       get count() { return [...conns].filter(c => c.open && c.metadata && c.metadata.role === 'node').length; },
+      add: accept,
       sendTo(key, o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.key === key) try { c.send(o); } catch (e) {} }); },
       broadcastViewers(o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.role === 'viewer') try { c.send(o); } catch (e) {} }); }
     };
@@ -150,16 +198,27 @@
       }
       return n;
     }
+    // each phone's timeline [t (map clock ms), score, pitch, state, late?], live and late points merged in time order
+    mark(n, t, d, late) {
+      const tl = n.tl || (n.tl = []); let i = tl.length; while (i && tl[i - 1][0] > t) i--;
+      tl.splice(i, 0, [+t.toFixed(1), d.c, d.f, d.st, late]); if (tl.length > 4000) tl.shift();
+    }
+    // a message the ear queued while it was offline (d.at: its own clock, d.w: its wall clock) → its time on the map clock
+    late(d, now = performance.now()) {
+      if (!d || d.t !== 's' || !d.k) return null; const n = this.node(d.k, d);
+      const t = Math.min(now, n.off != null && d.at != null ? d.at + n.off : now - (Date.now() - d.w));
+      this.mark(n, t, d, 1); return t;
+    }
     ingest(d, now = performance.now()) {
       if (!d) return null;
       if (d.t === 'truth') { this.truth = d; this.truthAt = now; return null; }
       if (d.t === 'pong') { // NTP-style: offset maps node clock → map clock; trust the lowest round trip
         const n = this.nodes.get(d.k); if (!n) return null;
         const rtt = now - d.ts; n.sync.push({ rtt, off: d.ts + rtt / 2 - d.tn }); if (n.sync.length > 12) n.sync.shift();
-        const b = n.sync.reduce((a, s) => s.rtt < a.rtt ? s : a); n.off = b.off; n.rtt = b.rtt; return n;
+        const b = n.sync.reduce((a, s) => s.rtt < a.rtt ? s : a); n.off = b.off; n.rtt = b.rtt; n.lastPong = now; return n;
       }
       if (d.t !== 's' || !d.k) return null;
-      const n = this.node(d.k, d);
+      const n = this.node(d.k, d); this.mark(n, now, d, 0);
       if (!this.saved[d.k] && d.p && !n.userMoved) n.pos = d.p.slice();
       Object.assign(n, { name: d.n || '', c: d.c, f: d.f, e: d.e, st: d.st, cl: d.cl || '', cp: d.cp || 0, lr: !!d.lr, wy: d.wy || '', fs: d.fs || '', fx: d.fx || null, fr: d.fr || 0, sn: d.sn || null, geo: d.g || null, nf: d.nf == null ? null : d.nf, hr: d.hr || null, last: now });
       // calibration (if any): this phone's input latency (ms) and mic gain (dB) relative to the others

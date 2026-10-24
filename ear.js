@@ -29,9 +29,10 @@
   const clsText = o => o.cls ? o.cls.label + ' · ' + RotorEar.likelihood(o.cls.conf) : '';
 
   // ---------------- NODE ----------------
-  function runNode(room) {
+  function runNode(room, conn) { // conn: a hotspot data channel (room 'hotspot', no relay)
+    const local = !!conn;
     $('node').hidden = false; $('earJoin').hidden = true;
-    $('roomTag').textContent = 'Ear · room ' + room.toUpperCase();
+    $('roomTag').textContent = local ? 'Ear · hotspot' : 'Ear · room ' + room.toUpperCase();
     const kStore = 'rotorear-key-' + room;
     const key = localStorage.getItem(kStore) || R.randKey(5); localStorage.setItem(kStore, key);
     $('nName').value = localStorage.getItem('rotorear-name') || '';
@@ -41,7 +42,8 @@
     const link = new R.NodeLink(room, key, status, d => {
       if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); }
       if (d.t === 'look') look.show(d);
-    });
+    }, null, { local });
+    if (local) { link.attach(conn); setInterval(() => { $('nPair').hidden = link.online || !$('earHot').hidden; }, 1000); }
     const look = Look(link, key, room, () => det && (mic || sim) ? det.out.state : null), lab = Label(link, key, () => ({ ctx, bus, on: !!(mic || sim) }));
     const useSamples = () => { if (det) { det.learned = Smp.list; det.useLearned = Smp.use; det.forget(); } }; // labels tune this phone like Teach
     Smp.onChange(useSamples);
@@ -102,7 +104,7 @@
         sim = { d, nz }; simSpk.gain.value = $('nSimSpk').checked ? 1 : 0; updDist();
       } else if (sim) { sim.d.stop(); sim.nz.stop(); simGain.disconnect(); sim = null; }
     };
-    window.__node = { get out() { return det && det.out; }, key, look, lab, get geo() { return geo; } };
+    window.__node = { get out() { return det && det.out; }, key, link, look, lab, get geo() { return geo; } };
     return { room, link, key, stop() { if (mic) $('nStart').onclick(); if (sim) { $('nSim').checked = false; $('nSim').onchange(); } } };
   }
 
@@ -274,14 +276,41 @@
   let node = null;
   $('joinBtn').onclick = () => { const c = $('joinCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12); if (c) location.hash = 'ear&room=' + c; };
   $('joinCode').onkeydown = e => { if (e.key === 'Enter') $('joinBtn').onclick(); };
+  // ---------------- hotspot pairing (no internet): scan the screen's offer code, show this phone's answer code ----------------
+  const HS = window.RotorHotspot; let hsStop = null;
+  const hsMsg = (t, bad) => { $('eMsg').textContent = t; $('eMsg').className = 'msg' + (bad ? ' bad' : ''); };
+  const hsKey = () => { const k = localStorage.getItem('rotorear-key-hotspot') || R.randKey(5); localStorage.setItem('rotorear-key-hotspot', k); return k; };
+  const hsCam = () => { if (hsStop) { hsStop(); hsStop = null; } $('eCam').hidden = true; };
+  async function hsOffer(code) {
+    hsCam(); hsMsg('making this phone\'s code…');
+    try {
+      const a = await HS.answer(code, hsKey()); await HS.libs();
+      HS.drawQR($('eQR'), a.code); $('eCode').value = a.code; $('eAns').hidden = false;
+      hsMsg('Show this code to the screen (Scan the ear\'s code). It connects by itself.');
+      const c = await a.conn, up = () => { $('earHot').hidden = true; $('eAns').hidden = true; hsMsg(''); if (node) node.link.attach(c); else node = runNode('hotspot', c); };
+      if (c.open) up(); else c.on('open', up);
+    } catch (e) { hsMsg(e.message || String(e), true); }
+  }
+  $('eScan').onclick = async () => {
+    if (hsStop) return;
+    try { await HS.libs(); $('eCam').hidden = false; hsStop = await HS.scan($('eCam'), hsOffer); hsMsg('point the camera at the code on the screen'); }
+    catch (e) { $('eCam').hidden = true; hsMsg('Camera unavailable (' + (e.name || e.message) + '). Paste the screen\'s code instead.', true); }
+  };
+  $('eOk').onclick = () => hsOffer($('eOff').value);
+  $('eOff').onkeydown = e => { if (e.key === 'Enter') $('eOk').onclick(); };
+  $('eCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('eCode').value).catch(() => {}); $('eCopy').textContent = 'Copied'; };
+  $('nPair').onclick = () => { $('earHot').hidden = false; $('eAns').hidden = true; $('eOff').value = ''; hsMsg(''); $('nPair').hidden = true; $('earHot').scrollIntoView(); };
+
   App.modes.ear = {
     enter(p) {
-      if (node && node.room !== p.room) return location.reload(); // one room per page load
+      if (node && node.room !== (p.net ? 'hotspot' : p.room)) return location.reload(); // one room per page load
       drawLog();
+      if (p.net === 'hotspot') { $('earJoin').hidden = true; if (!node) { $('earHot').hidden = false; $('node').hidden = true; $('roomTag').textContent = 'Ear · hotspot'; } return; }
+      $('earHot').hidden = true;
       if (!p.room) { $('earJoin').hidden = false; $('node').hidden = true; $('roomTag').textContent = 'Be an ear'; return; }
       if (!node) node = runNode(p.room);
     },
-    leave() { if (node) node.stop(); },
+    leave() { if (node) node.stop(); hsCam(); },
   };
 
   // ---------------- demo phones for a room (relay) ----------------
