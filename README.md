@@ -12,6 +12,8 @@ The link opens a start screen with three choices. Switching modes doesn't reload
 - **Be an ear** (`#ear`): this phone listens and sends numbers to a screen. Its join link is `?room=CODE`, which lands here. Without a code it asks for one.
 - **Watch a demo** (`#demo`): the scripted 60 s demo on the screen. `#demo&room=CODE` instead runs simulated phones that report to that room's screen over the relay (the old simulator).
 
+The start screen also has **No internet? Use hotspot mode** (`#screen&net=hotspot`, `#ear&net=hotspot`). It's an extra option: the relay mode above stays the default. See [Hotspot mode](#hotspot-mode-no-internet).
+
 Old links and QR codes still work:
 
 - `mesh/#room=R&role=node`, `mesh/#room=R` and `?room=R` open `#ear&room=R`.
@@ -249,6 +251,41 @@ While the 10 s clip records, the ear phone also checks whether the thing in the 
 - **The screen** gets only `{v, c, r, f, h, a}`: verdict, confidence, reason code, beats per second, hum yes/no/unknown and image score. It rebuilds the words itself. It shows a 🐦/🤖 chip on the drone status (and on each row when there are two drones), in the log and in the report. A confident bird (≥ 70%) changes the alert to **LIKELY A BIRD**, in calmer colours, and stops the repeat beeps. Nothing is dismissed: the drone stays on the map until you decide.
 - **Saved clips**: **Re-analyse** (or **Bird or Bot?** on older clips) in the ear's log plays the clip off-screen and checks it again, using the sound result saved with it.
 
+## Dropouts: ears keep listening and catch up
+
+When an ear loses the screen (no clock ping for 3 s: Wi-Fi blip, relay down, phone walked out of range) it keeps detecting.
+
+- It queues its numbers (telemetry, labels, clip and Bird-or-Bot flags), each with its own clock time and wall time. The queue keeps the newest 2400 messages (about 5 minutes at 8 per second). Clock pongs are never queued.
+- It retries with backoff (1, 2, 4, 8, then every 15 s). If the relay itself went away it starts a fresh relay peer. Its status line says `offline 12 s · 96 queued · retrying in 4 s`.
+- Once the screen answers again it sends the queue oldest first, 25 at a time, each chunk acked (resent after 2 s without an ack, duplicates skipped).
+- The screen maps each late point onto its own clock with that ear's clock offset and merges it into the ear's timeline by time.
+- The screen's status block shows a chip per ear: **Ear B offline 12 s** (counting up), then **Ear B back · syncing 40 points…**, then **Ear B back · synced 96 points** for 12 s. A drone an ear heard while offline becomes its own log entry, "heard by ear B while offline". It can't be placed on the map, because one phone gives no position.
+
+Still numbers only: nothing in the queue is audio or video.
+
+## Hotspot mode (no internet)
+
+For a field with no signal. **One phone turns on hotspot, others join it, then scan codes.** It's opt-in from the start screen, the ear's join screen or the screen's Phones sheet. The relay mode stays the default.
+
+- **Screen** (`#screen&net=hotspot`): Phones → **Add an ear** shows an offer QR (and the same text, to copy).
+- **Ear** (`#ear&net=hotspot`): **Scan the screen's code** with the rear camera (or paste it). The ear then shows its answer QR.
+- **Screen:** **Scan the ear's code** (or paste it) → Connect. Repeat Add an ear for each ear.
+
+How it works:
+
+- A WebRTC data channel per ear with **no signalling server, no STUN, no TURN**. Only host ICE candidates are used, so traffic stays on the hotspot's Wi-Fi.
+- A code is only what the other side needs to rebuild the SDP: ICE ufrag and password, the DTLS fingerprint and up to 4 host candidates (mDNS `.local` names are packed too). That's about 100 characters, so it makes a small QR (`mesh/hotspot.js`).
+- The same messages go over the channel as over the relay, so the map, log, tripwire, re-ID, camera confirm and the dropout catch-up all work the same.
+- If the link drops, the ear keeps listening and queues, and offers **Pair again**. A fresh code pair replaces the old link and the queue catches up.
+- The QR libraries are vendored: `lib/qrcode.min.js` (qrcode-generator 1.4.4, MIT) and `lib/jsQR.min.js` (jsQR 1.4.0, Apache-2.0, `lib/jsQR.LICENSE`). They load only in hotspot mode.
+- **Offline app shell:** `sw.js` caches the app on the first online visit (network first, same-origin only), so the page and hotspot mode load later with no internet. Open the app once while online on every phone. A service worker needs HTTPS (or localhost).
+
+Limits:
+
+- Camera scanning needs HTTPS and a camera permission. Paste works everywhere.
+- **iPhone:** Safari and every iOS browser (Chrome on iOS is WebKit) scan with jsQR from the camera, which works. WebRTC between phones on one hotspot generally works. Some iOS versions hide local addresses behind mDNS names that Android can't resolve, and some hotspots block traffic between clients (client isolation). In those cases the link doesn't open, and the app says so after 12 s. Making the hotspot phone itself the screen avoids client isolation.
+- iOS may evict the service worker cache after weeks unused, so open the app online before going out.
+
 ## Code
 
 The code is plain JS:
@@ -264,8 +301,11 @@ The code is plain JS:
 - `bird.js`: Bird or Bot (blob tracker, motion features, the optional COCO-SSD check, the fusion and its words).
 - `lib/leaflet.js`, `lib/leaflet.css`: Leaflet 1.9.4 (BSD-2), loaded only when the street map is shown.
 - `watch.css`: all styles (Night and Sun).
-- `mesh/core.js`: relay, clock sync, timing tap, MeshModel estimators, the height fit (`heightFit`), the GPS frame (`Geo`), the post link (`linkPosts`), MapView, SimEngine.
+- `mesh/core.js`: relay link (with the offline queue and reconnect), clock sync, timing tap, MeshModel estimators, the height fit (`heightFit`), the GPS frame (`Geo`), the post link (`linkPosts`), MapView, SimEngine.
 - `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
+- `mesh/hotspot.js`: hotspot mode: the SDP ⇄ short code packing, offer / answer, the data channel adapter, QR draw and camera scan.
+- `sw.js`: the offline app shell (service worker).
+- `lib/qrcode.min.js`, `lib/jsQR.min.js`: QR encode / decode for hotspot pairing, loaded only in hotspot mode.
 - `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
 - `mesh/index.html` and `mesh/sim.html`: redirects only, for old links.
 
@@ -289,6 +329,8 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/reid.py`: scoring and thresholds, then the synthetic drone twice (`#demo&path=circle&f0=215`): first visit gives a new tag, the second gives Seen before with visits and match %. A 300 Hz drone gets a new tag. Also covers rename and forget, the log chips, the report and the JSON export.
 - `python3 test/tripwire.py`: segment math and jitter. Then the demo with Alert only on crossing: silent at confirm, then one alert with an OUT crossing that is logged, reported and exported. Also checks a circle that never crosses (no alert, no beeps), a circle with the toggle off (normal alert plus a crossing alert), drawing, flip, delete and persistence on the plain map, and a line on the street map that keeps lat/lon.
 - `python3 test/linked.py`: two screens linked over the relay, each with 4 simulated phones 30 m apart. Checks each draws the other's drone in its own frame, and a hand-off keeps one drone id across both.
+- `python3 test/offline.py`: the dropout queue (cap, order, timestamps). Then a screen and an ear over the relay: the ear's link and relay are cut mid-stream, the screen shows "Ear A offline N s" counting up while the ear queues, and after reconnect the chip says "synced N points". The late points are merged in time order into the gap.
+- `python3 test/hotspot.py`: hotspot mode with PeerJS blocked: the screen and two ears pair by pasted codes (both QR codes decode back to the codes), the ears' simulated drone drives the screen to DRONE, a dropped link re-pairs and catches up, and the app shell plus the QR libraries load offline through the service worker.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.

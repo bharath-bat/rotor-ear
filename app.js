@@ -18,12 +18,12 @@
   const parse = () => {
     const h = new URLSearchParams(location.hash.slice(1)), room = clean(h.get('room'));
     const mode = MODES.find(m => h.has(m)) || 'home';
-    return { mode: mode === 'demo' && room ? 'sim' : mode, room, h, demo: mode === 'demo' };
+    return { mode: mode === 'demo' && room ? 'sim' : mode, room, h, demo: mode === 'demo', net: h.get('net') === 'hotspot' ? 'hotspot' : '' };
   };
   const SECTION = { home: 'home', screen: 'app', demo: 'app', ear: 'ear', sim: 'simv' };
   const App = window.RotorApp = { modes: {}, cur: null, key: '' };
   function route() {
-    const p = parse(), key = p.mode + '|' + p.room;
+    const p = parse(), key = p.mode + '|' + p.room + '|' + p.net;
     if (key === App.key) return;
     const mod = m => App.modes[m === 'demo' ? 'screen' : m], old = App.cur && mod(App.cur);
     if (old && old.leave) old.leave(p.mode);
@@ -40,4 +40,8 @@
   window.addEventListener('hashchange', route);
   window.addEventListener('popstate', route);
   document.addEventListener('DOMContentLoaded', route);
+  // offline app shell: after one online visit the page (and hotspot mode) loads with no internet (sw.js).
+  // Not under test automation (it would hide requests from the tests' network stubs) unless a test asks for it.
+  if ('serviceWorker' in navigator && window.isSecureContext && (!navigator.webdriver || localStorage.getItem('rotorear-sw-test')))
+    navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

@@ -15,6 +15,11 @@
   <button class="choice" data-go="screen"><i aria-hidden="true">▣</i><span><b>Be the screen</b><small>Status, map and alerts. Other phones join this one.</small></span></button>
   <button class="choice" data-go="ear"><i aria-hidden="true">◉</i><span><b>Be an ear</b><small>This phone listens and sends numbers to a screen.</small></span></button>
   <button class="choice demo" data-go="demo"><i aria-hidden="true">▷</i><span><b>Watch a demo</b><small>60 s on 4 simulated phones, marked DEMO throughout.</small></span></button>
+  <div class="hotspot" id="homeHot">
+    <div class="k">No internet? Use hotspot mode</div>
+    <p class="note">One phone turns on hotspot, others join it, then scan codes. Then phones talk over that Wi-Fi only: no relay, no internet.</p>
+    <div class="trow"><button class="btn" data-go="screen&amp;net=hotspot">Screen · hotspot</button><button class="btn" data-go="ear&amp;net=hotspot">Ear · hotspot</button></div>
+  </div>
   <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
   <p class="note">Best with 3–4 phones a few metres apart. Works alone too, without direction.</p>
 </section>
@@ -26,6 +31,21 @@
     <p class="lead">Enter the room code from the screen phone (Phones → Create a room), or open its join link.</p>
     <div class="trow"><input id="joinCode" placeholder="room code, e.g. ab12" maxlength="12" autocapitalize="off" autocomplete="off"><button class="btn" id="joinBtn">Join</button></div>
     <p class="note">No screen yet? Pick <a href="#screen">Be the screen</a> on another phone first.</p>
+    <button class="btn linkbtn" data-go="ear&amp;net=hotspot">No internet? Use hotspot mode</button>
+  </div>
+  <!-- hotspot mode: pair with the screen by QR code, no relay -->
+  <div id="earHot" hidden>
+    <div class="k">Hotspot mode · no internet</div>
+    <p class="note hint">One phone turns on hotspot, others join it, then scan codes.</p>
+    <ol class="steps"><li>Join the hotspot's Wi-Fi.</li><li>On the screen: Phones → Add an ear. Scan its code here.</li><li>Show this phone's code to the screen.</li></ol>
+    <video id="eCam" playsinline muted hidden></video>
+    <button class="btn big" id="eScan">Scan the screen's code</button>
+    <div class="trow"><input id="eOff" placeholder="or paste the screen's code" autocapitalize="off" autocomplete="off"><button class="btn" id="eOk">Next</button></div>
+    <div id="eAns" hidden>
+      <canvas id="eQR" class="qr"></canvas>
+      <div class="trow"><input id="eCode" readonly><button class="btn" id="eCopy">Copy</button></div>
+    </div>
+    <div class="msg" id="eMsg"></div>
   </div>
   <div id="node" hidden>
     <!-- camera confirm: the screen asks the ear nearest the drone to look; the clip stays on this phone -->
@@ -40,6 +60,7 @@
     <div id="bob" class="card" hidden></div>
     <div id="nBanner" class="banner ready"><b class="w">⊖ READY</b><small>tap Start listening</small></div>
     <div class="nstatus" id="nStatus">not connected</div>
+    <button class="btn" id="nPair" hidden>Pair again with the screen (this phone keeps listening and catches up)</button>
     <div class="stats3">
       <div class="card"><div class="k">Rotor score</div><div class="v" id="nConf">0</div><div class="meter"><i id="nMeter"></i></div></div>
       <div class="card"><div class="k">Pitch</div><div class="v"><span id="nF0">—</span><u>Hz</u></div></div>
@@ -113,6 +134,7 @@
     <div id="stBob" hidden></div>
     <button id="stTag" hidden></button>
     <div id="stTrip" hidden></div>
+    <div id="stNet" hidden></div>
     <div id="stDrones"></div>
     <div class="srow2"><button id="pill" hidden>Sound: ON</button><div id="stProg" hidden><i></i></div><span id="stNote"></span></div>
   </header>
@@ -212,6 +234,20 @@
       <p class="note">This phone becomes the map. Other phones open a link and listen; they send only numbers (confidence, pitch, loudness, envelope-peak times). Never audio.</p>
       <button class="btn big" id="pCreate">Create a room</button>
       <div class="trow"><input id="pCode" placeholder="or join room code" maxlength="12" autocapitalize="off"><button class="btn" id="pJoin">Join</button></div>
+      <button class="btn linkbtn" id="pHotGo">No internet? Use hotspot mode</button>
+    </div>
+    <div id="pHot" hidden>
+      <div class="k">Hotspot mode · no internet</div>
+      <p class="note hint">One phone turns on hotspot, others join it, then scan codes.</p>
+      <button class="btn big" id="hAdd">Add an ear</button>
+      <div id="hOffer" hidden>
+        <canvas id="hQR" class="qr"></canvas>
+        <div class="trow"><input id="hCode" readonly><button class="btn" id="hCopy">Copy</button></div>
+        <video id="hCam" playsinline muted hidden></video>
+        <button class="btn big" id="hScan">Scan the ear's code</button>
+        <div class="trow"><input id="hAns" placeholder="or paste the ear's code" autocapitalize="off" autocomplete="off"><button class="btn" id="hOk">Connect</button></div>
+      </div>
+      <div class="msg" id="hMsg"></div>
     </div>
     <div id="pRoom" hidden>
       <div class="k">Open this on each listening phone · room <b id="pRoomCode"></b></div>
@@ -279,7 +315,12 @@
     <div class="grab"></div>
     <div class="shead"><h2>More</h2></div>
     <div class="k">Theme</div>
-    <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
+    <div class="hotspot" id="homeHot">
+    <div class="k">No internet? Use hotspot mode</div>
+    <p class="note">One phone turns on hotspot, others join it, then scan codes. Then phones talk over that Wi-Fi only: no relay, no internet.</p>
+    <div class="trow"><button class="btn" data-go="screen&amp;net=hotspot">Screen · hotspot</button><button class="btn" data-go="ear&amp;net=hotspot">Ear · hotspot</button></div>
+  </div>
+  <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
     <div class="k">Sound</div>
     <div class="tbtns"><button class="btn" id="mMute">Mute 5 min</button><button class="btn" id="mTest">Test alert</button></div>
     <div class="k">Demo</div>
@@ -299,6 +340,7 @@
 <script src="detector.js"></script>
 <script src="mesh/peerjs.min.js"></script>
 <script src="mesh/core.js"></script>
+<script src="mesh/hotspot.js"></script>
 <script src="reid.js"></script>
 <script src="tripwire.js"></script>
 <script src="log.js"></script>

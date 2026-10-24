@@ -250,12 +250,97 @@
   let hubStatus = '';
   function joinRoom(r) {
     if (!r || hub) return;
-    room = r; history.replaceState(null, '', location.pathname + '#screen&room=' + r); window.RotorApp.key = 'screen|' + r;
+    room = r; history.replaceState(null, '', location.pathname + '#screen&room=' + r); window.RotorApp.key = 'screen|' + r + '|';
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
     Lib.load();
-    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: (c, d) => { if (d && d.t === 'clip') return clipFlag(d); if (d && d.t === 'bob') return bobFlag(d); if (d && d.t === 'label') return Lib.add(d); const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label; } });
+    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: hubData });
   }
+  function hubData(c, d) {
+    if (!d) return;
+    if (d.t === 'late') return lateIn(c, d);
+    if (d.t === 'clip') return clipFlag(d); if (d.t === 'bob') return bobFlag(d); if (d.t === 'label') return Lib.add(d);
+    const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label;
+  }
+  // an ear's queued messages after an outage, oldest first, 25 at a time: merged into its timeline by time, then acked
+  function lateIn(c, d) {
+    if (!Array.isArray(d.m) || !d.k) return;
+    const n = model.nodes.get(d.k) || model.node(d.k, d.m[0]), s0 = +d.s0 || 0;
+    if (n.lateId !== d.id) { n.lateId = d.id; n.lateS = 0; } // a new page on that ear numbers from 1 again
+    d.m.forEach((m, i) => {
+      if (!m || s0 + i <= n.lateS) return; m.k = d.k; // a chunk resent after a lost ack: skip what we have
+      if (m.t === 's') { const t = model.late(m); if (t != null) { n.syncN = (n.syncN || 0) + 1; offlineHeard(n, m, t); } }
+      else if (m.t === 'clip') clipFlag(m); else if (m.t === 'bob') bobFlag(m); else if (m.t === 'label') Lib.add(m);
+    });
+    n.lateS = Math.max(n.lateS, s0 + d.m.length - 1); n.lost = +d.lost || 0;
+    if (!(d.left > 0)) { n.synced = true; n.backAt = performance.now(); }
+    try { c.send({ t: 'ack', s: n.lateS }); } catch (e) {}
+  }
+  // a drone an ear heard while it couldn't reach this screen: its own log entry, marked as heard offline
+  function offlineHeard(n, m, t) {
+    if (m.st !== 'drone') return;
+    const at = Date.now() - (performance.now() - t), e = n.offInc && Log.get(n.offInc);
+    if (e && at - e.t1 < 20000) { e.t1 = Math.max(e.t1, at); e.peak = Math.max(e.peak, m.c || 0); Log.save(); logKey = tlKey = ''; return; }
+    n.offInc = Log.add({ id: Log.newId(), type: 'drone', t0: at, t1: at, cls: m.cl || 'Drone', peak: m.c || 0, agree: 'heard by ear ' + n.label + ' while offline',
+      flights: [], track: [], clips: [], pins: [], geo: null, f0: Math.round(m.f || 0), room, offline: n.label }).id;
+    logKey = tlKey = '';
+  }
+  // per-ear link chips: "Ear B offline 12 s" (counting from its last clock reply), then "Ear B back · synced 96 points"
+  const OFF_MS = 3500, BACK_MS = 12000;
+  function netChips(now) {
+    if (sim || !hub) return '';
+    return [...model.nodes.values()].filter(n => n.key !== ME && n.lastPong).map(n => {
+      const gone = now - n.lastPong, name = 'Ear ' + n.label;
+      if (gone > OFF_MS) {
+        if (!n.offAt) { n.offAt = n.lastPong; n.wasOff = true; n.synced = false; n.syncN = 0; }
+        return gone < 15 * 60000 ? `<span class="net off">${name} offline ${gone < 60000 ? Math.round(gone / 1000) + ' s' : Math.floor(gone / 60000) + ' min'}</span>` : '';
+      }
+      n.offAt = 0; if (!n.wasOff) return '';
+      const pts = (n.syncN || 0) + ' point' + (n.syncN === 1 ? '' : 's');
+      if (!n.synced) return `<span class="net back">${name} back · syncing ${pts}…</span>`;
+      if (now - n.backAt > BACK_MS) { n.wasOff = false; return ''; }
+      return `<span class="net back">${name} back · synced ${pts}${n.lost ? ' · ' + n.lost + ' too old, dropped' : ''}</span>`;
+    }).join('');
+  }
+
+  window.__net = () => ({ chips: $('stNet').hidden ? '' : $('stNet').textContent, count: hub ? hub.count : 0, nodes: [...model.nodes.values()].filter(n => n.key !== ME)
+    .map(n => ({ key: n.key, label: n.label, syncN: n.syncN || 0, lost: n.lost || 0, tl: (n.tl || []).map(p => [p[0], p[4], p[3]]) })) }); // tests
+
+  // ---------- hotspot mode (no internet): no relay; this screen pairs each ear with QR codes (mesh/hotspot.js) ----------
+  const HS = window.RotorHotspot; let hsPend = null, hsStop = null;
+  const hsMsg = (t, bad) => { setText('hMsg', t); $('hMsg').className = 'msg' + (bad ? ' bad' : ''); };
+  function startHotspot() {
+    if (hub) return;
+    room = 'hotspot'; saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
+    $('pNone').hidden = true; $('pHot').hidden = false; $('pLeave').hidden = false;
+    Lib.load();
+    hub = R.startHub(null, { status: s => { hubStatus = s; }, data: hubData });
+  }
+  function hsCancel() { if (hsStop) { hsStop(); hsStop = null; } $('hCam').hidden = true; if (hsPend) { try { hsPend.pc.close(); } catch (e) {} hsPend = null; } }
+  $('hAdd').onclick = async () => {
+    hsCancel(); hsMsg('making a code…');
+    try { const o = await HS.offer(); await HS.libs(); hsPend = o; HS.drawQR($('hQR'), o.code); $('hCode').value = o.code; $('hOffer').hidden = false; $('hAns').value = '';
+      hsMsg('On the ear: Be an ear → No internet? → Scan the screen\'s code. Then scan the ear\'s code here.'); }
+    catch (e) { hsMsg(e.message || String(e), true); }
+  };
+  async function hsAccept(code) {
+    if (hsStop) { hsStop(); hsStop = null; } $('hCam').hidden = true;
+    const p = hsPend; if (!p) return hsMsg('Tap Add an ear first.', true);
+    try {
+      const c = await p.accept(code); hsPend = null; hub.add(c); hsMsg('linking…');
+      const ok = () => { $('hOffer').hidden = true; hsMsg('Ear paired. Add the next ear the same way.'); };
+      if (c.open) ok(); else c.on('open', ok);
+      setTimeout(() => { if (!c.open) hsMsg('No link yet. Are both phones on the same hotspot Wi-Fi? Tap Add an ear to try again.', true); }, 12000);
+    } catch (e) { hsMsg(e.message || String(e), true); }
+  }
+  $('hScan').onclick = async () => {
+    if (hsStop) return; await HS.libs();
+    try { $('hCam').hidden = false; hsStop = await HS.scan($('hCam'), hsAccept); hsMsg('point the camera at the code on the ear'); }
+    catch (e) { $('hCam').hidden = true; hsMsg('Camera unavailable (' + (e.name || e.message) + '). Paste the ear\'s code instead.', true); }
+  };
+  $('hOk').onclick = () => hsAccept($('hAns').value);
+  $('hCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('hCode').value).catch(() => {}); $('hCopy').textContent = 'Copied'; };
+  $('pHotGo').onclick = () => App.go('screen&net=hotspot');
   $('pCreate').onclick = () => joinRoom(R.randKey(4));
   $('pJoin').onclick = () => joinRoom($('pCode').value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12));
   $('pCopy').onclick = () => { navigator.clipboard && navigator.clipboard.writeText($('pLink').value); $('pCopy').textContent = 'Copied'; };
@@ -357,10 +442,11 @@
   App.modes.screen = {
     enter(p) {
       if (p.room && !hub) joinRoom(p.room);
+      if (p.net === 'hotspot' && !hub) { startHotspot(); pendingSheet = pendingSheet || 'phones'; }
       if (p.demo) { startDemo(p.h); setTimeout(tapStart, 300); }
       if (pendingSheet) { openSheet(pendingSheet); pendingSheet = null; }
     },
-    leave() { inc = hum = replay = null; Log.save(true); stopDemo(); $('tapStart').hidden = true; if (micStream) toggleMic(); stopTest(); stopFile(); if (sheet) openSheet(null); },
+    leave() { inc = hum = replay = null; Log.save(true); stopDemo(); $('tapStart').hidden = true; if (micStream) toggleMic(); stopTest(); stopFile(); if (sheet) openSheet(null); hsCancel(); },
   };
   const isDemo = () => !!sim || !!(model.state && model.state.demo);
 
@@ -393,7 +479,7 @@
     setText('cMsg', c.msg || (live.length < 2 ? 'Calibration needs 2+ phones listening.' : ''));
     setText('cState', ncal ? `· ${ncal}/${live.length} calibrated` : '');
     setHTML('lkState', Link.state);
-    setText('pStatus', sim ? 'DEMO · ' + live.length + ' simulated phones' : hub ? 'Room ' + room.toUpperCase() + ' · ' + live.length + ' connected' + (hubStatus && !live.length ? ' · ' + hubStatus : '') : 'this phone only');
+    setText('pStatus', sim ? 'DEMO · ' + live.length + ' simulated phones' : hub ? (room === 'hotspot' ? 'Hotspot' : 'Room ' + room.toUpperCase()) + ' · ' + live.length + ' connected' + (hubStatus && !live.length ? ' · ' + hubStatus : '') : 'this phone only');
     const rows = [...live].sort((a, b) => a.label < b.label ? -1 : 1).map(n => { const k = cal[n.key], [w, f] = resWord(k), sync = n.key === ME ? 'this phone' : n.rtt != null ? 'sync ±' + Math.round(n.rtt / 2) + ' ms' : 'syncing…';
       return `<div class="prow"><span class="pin">${n.label}</span><span class="nm"><b>${n.key === ME ? 'This phone' : esc(n.name || 'Phone ' + n.label)}</b><small>hears ${rangeOf(n)} · ${sync}${k ? ` · latency ${k.lat >= 0 ? '+' : ''}${k.lat.toFixed(1)} ms · gain ${k.gain >= 0 ? '+' : ''}${k.gain.toFixed(1)} dB` : ''}</small>` +
         `<span class="rbar"><i><u style="width:${Math.round(Math.min(1, f) * 100)}%"></u></i>${w}</span></span>${k && k.resMs >= 6 ? '<button data-redo>Redo</button>' : '<span></span>'}</div>`; }).join('');
@@ -781,6 +867,7 @@
     if ($('stTag').dataset.k !== tk) { $('stTag').dataset.k = tk; $('stTag').hidden = !tg; $('stTag').className = inc && inc.reid ? inc.reid.kind : 'wait'; $('stTag').innerHTML = tg ? `<span>${esc(tg)}</span>${inc && inc.reid ? '<u>Rename ›</u>' : ''}` : ''; }
     const tw = hot && lastTrip ? tripWords(lastTrip) : hot && tripOnly() ? 'Tripwire only: no beeps until it crosses a line' : '';
     $('stTrip').hidden = !tw; setText('stTrip', tw); $('stTrip').classList.toggle('hit', !!(hot && lastTrip));
+    const nc = netChips(now); if ($('stNet').dataset.k !== nc) { $('stNet').dataset.k = nc; $('stNet').innerHTML = nc; $('stNet').hidden = !nc; }
     setText('stIcon', icon); setText('stWord', word); $('stWord').classList.toggle('long', word.length > 13); setText('stCls', cls); setText('stWhere', where); setText('stSub', sub); $('stWhere').classList.toggle('link', D.rough && hot);
     $('pill').hidden = !pill; if (pill) { setText('pill', pill); $('pill').classList.toggle('muted', !!mt); }
     $('stProg').hidden = prog == null; if (prog != null) $('stProg').firstChild.style.width = Math.round(Math.max(0, Math.min(1, prog)) * 100) + '%'; setText('stNote', note);
