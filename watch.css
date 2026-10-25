@@ -281,6 +281,10 @@ html:not(.sun) #geomap .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) br
 #stNet .net{font-size:13px;font-weight:700;padding:4px 10px;border-radius:999px;border:1.5px solid var(--line);background:var(--panel)}
 #stNet .net.off{border-style:dashed;border-color:var(--check)}#stNet .net.off::before{content:'⚠ '}
 #stNet .net.back::before{content:'✓ '}
+#stNet .net.via{border-color:#2EE6A6;color:var(--ink)}#stNet .net.dir{opacity:.75}
+#stNet .net .lock{display:inline-block;width:10px;height:12px;margin-left:4px;vertical-align:-1px;fill:#2EE6A6;color:#2EE6A6}
+#cutBtn{position:absolute;right:8px;bottom:34px;z-index:2;min-height:36px;padding:4px 12px;border-radius:10px;border:1.5px solid #FF4D4D;background:var(--surface);color:var(--ink);font-size:13px;font-weight:700}
+#cutBtn[hidden]{display:none}
 #app.sheet-open #stNet{display:none}
 .hotspot{margin:14px 0;padding:12px 14px;border:1.5px dashed var(--line);border-radius:16px}
 .hotspot .trow .btn{flex:1}

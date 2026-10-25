@@ -68,12 +68,21 @@ with sync_playwright() as p:
         S.screenshot(path='/tmp/hs-s.png'); E.screenshot(path='/tmp/hs-e.png')
         a, c = Image.open('/tmp/hs-s.png'), Image.open('/tmp/hs-e.png'); im = Image.new('RGB', (a.width + c.width + 24, max(a.height, c.height)), 'white')
         im.paste(a, (0, 0)); im.paste(c, (a.width + 24, 0)); im.save(f'{SHOTS}/hotspot-connected.png')
-    # the link drops (as if the hotspot blinked): the ear keeps queueing, "Pair again" re-pairs, the screen catches up
+    # the two ears link to each other too (pairing codes passed on by the screen); when A's own link drops, its data goes via B
+    kA, kB = E.evaluate('__node.key'), E2.evaluate('__node.key')
+    check('the ears pair with each other through the screen (hotspot mode, no PeerJS)', wait(lambda: E.evaluate(f"!!(__node.link.nbs.get('{kB}') || {{}}).at") and E2.evaluate(f"!!(__node.link.nbs.get('{kA}') || {{}}).at"), 20))
     E.evaluate("__node.link.conn.close()")
+    via = wait(lambda: S.evaluate('__net().links').get(kA, {}).get('via') == [kB] and S.evaluate('__net().chips'), 10)
+    check("A's own link drops: its data goes via B, sealed", via and 'Ear A via B (2 hops) · sealed' in via, repr(via))
+    n0 = len(S.evaluate("__net().nodes")[0]['tl']); time.sleep(2)
+    check('A keeps updating through B (nothing queued)', len(S.evaluate("__net().nodes")[0]['tl']) > n0 + 10 and E.evaluate('__node.link.q.length') == 0)
+    check('A offers "Pair again" while relayed', wait(lambda: E.is_visible('#nPair'), 4))
+    # B goes out of range as well (as if the hotspot blinked): the ear keeps queueing, "Pair again" re-pairs, the screen catches up
+    E.evaluate(f"__node.link.cutLink('{kB}', true)")
     check('screen chip: Ear A offline, counting', wait(lambda: 'Ear A offline' in S.evaluate('__net().chips'), 10), S.evaluate('__net().chips'))
     check('ear offers "Pair again", keeps listening and queues', wait(lambda: E.is_visible('#nPair') and 'queued' in E.inner_text('#nStatus'), 8), E.inner_text('#nStatus'))
     time.sleep(3); q = E.evaluate('__node.link.q.length')
-    E.click('#nPair'); connect(answer_code(E, offer_code(S.input_value('#hCode')), ans))
+    E.evaluate(f"__node.link.cutLink('{kB}', false)"); E.click('#nPair'); connect(answer_code(E, offer_code(S.input_value('#hCode')), ans))
     chip = wait(lambda: 'synced' in S.evaluate('__net().chips') and S.evaluate('__net().chips'), 20)
     if SHOTS: S.screenshot(path=f'{SHOTS}/hotspot-resynced.png')
     n = S.evaluate("__net().nodes")[0]; ts = [x[0] for x in n['tl']]

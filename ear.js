@@ -43,7 +43,7 @@
       if (d.t === 'ping' && d.label && d.label !== label) { label = d.label; status('connected to the screen', 'ok'); }
       if (d.t === 'look') look.show(d);
     }, null, { local });
-    if (local) { link.attach(conn); setInterval(() => { $('nPair').hidden = link.online || !$('earHot').hidden; }, 1000); }
+    if (local) { link.attach(conn); setInterval(() => { $('nPair').hidden = link.direct || !$('earHot').hidden; }, 1000); }
     const look = Look(link, key, room, () => det && (mic || sim) ? det.out.state : null), lab = Label(link, key, () => ({ ctx, bus, on: !!(mic || sim) }));
     const useSamples = () => { if (det) { det.learned = Smp.list; det.useLearned = Smp.use; det.forget(); } }; // labels tune this phone like Teach
     Smp.onChange(useSamples);
@@ -330,7 +330,7 @@
         $('sStart').textContent = '■ Stop'; $('sStart').classList.add('on');
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         eng = new R.SimEngine(ctx, opts());
-        eng.nodes.forEach(n => { n.status = ''; n.link = new R.NodeLink(room, n.key, s => n.status = s, null, n.clock); });
+        eng.nodes.forEach(n => { n.status = ''; n.link = new R.NodeLink(room, n.key, s => n.status = s, null, n.clock, { mesh: false }); });
         S.nodes = eng.nodes; $('claps').hidden = false;
         // for the screen's Calibrate: a clap 30 cm from that phone
         'ABCD'.split('').forEach((l, i) => { $('clap' + l).hidden = i >= eng.nodes.length; $('clap' + l).onclick = () => { const q = eng.nodes[i].p; eng.clap(q[0] + R.NEAR, q[1]); }; });

@@ -205,7 +205,7 @@
   let saved = JSON.parse(localStorage.getItem(posKey()) || '{}'), model = new R.MeshModel(saved, loadCal());
   const activeModel = () => sim ? sim.model : model;
   const view = R.MapView($('map'), { colors: () => cols, project: dpr => project(dpr), onDrag: (k, p, done) => { const m = activeModel(), n = m.nodes.get(k); if (!n) return; n.pos = p; n.userMoved = true;
-    if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } }, onTap: p => tripTap(p), tapping: () => !!tripDraw });
+    if (done && !sim) { saved[k] = p; localStorage.setItem(posKey(), JSON.stringify(saved)); } }, onTap: p => { if (!tripDraw && demoTapLink(p)) return; tripTap(p); }, tapping: () => !!tripDraw });
   $('workings').onchange = () => workings = $('workings').checked;
   // coverage circles: each phone's estimated hearing radius (from its own background noise), gaps shaded
   let cover = localStorage.getItem('rotorear-cover') !== '0';
@@ -254,57 +254,85 @@
     saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pRoom').hidden = false; $('pLeave').hidden = false; $('pRoomCode').textContent = r; $('pLink').value = nodeUrl(r);
     Lib.load();
-    hub = R.startHub(r, { status: s => { hubStatus = s; }, viewer: () => {}, data: hubData });
+    hub = R.startHub(r, hubCb('rotorear-seal-screen-' + r));
   }
-  function hubData(c, d) {
-    if (!d) return;
-    if (d.t === 'late') return lateIn(c, d);
+  const curHub = () => sim ? sim.hub : hub;
+  const labelOf = k => { const n = activeModel().nodes.get(k); return n ? n.label : ''; };
+  const hubCb = store => ({ status: s => { hubStatus = s; }, viewer: () => {}, data: hubData, label: labelOf, seal: window.RotorSeal ? RotorSeal.screen(store) : null });
+  // what an ear sent, straight or (via: the ears it passed, sealed) relayed by others
+  function hubData(c, d, via) {
+    if (!d) return; const M = activeModel();
+    if (d.t === 'nb') { const n = M.nodes.get(d.k); if (n) { n.nb = d.l; n.nbAt = performance.now(); } return; } // its neighbour links
+    if (d.t === 'late') return lateIn(d);
     if (d.t === 'clip') return clipFlag(d); if (d.t === 'bob') return bobFlag(d); if (d.t === 'label') return Lib.add(d);
-    const n = model.ingest(d); if (n && d.t === 's') c.nodeLabel = n.label;
+    const n = M.ingest(d); if (n && d.t === 's' && !via) c.nodeLabel = n.label;
   }
   // an ear's queued messages after an outage, oldest first, 25 at a time: merged into its timeline by time, then acked
-  function lateIn(c, d) {
+  function lateIn(d) {
     if (!Array.isArray(d.m) || !d.k) return;
-    const n = model.nodes.get(d.k) || model.node(d.k, d.m[0]), s0 = +d.s0 || 0;
+    const M = activeModel(), n = M.nodes.get(d.k) || M.node(d.k, d.m[0]), s0 = +d.s0 || 0;
     if (n.lateId !== d.id) { n.lateId = d.id; n.lateS = 0; } // a new page on that ear numbers from 1 again
     d.m.forEach((m, i) => {
       if (!m || s0 + i <= n.lateS) return; m.k = d.k; // a chunk resent after a lost ack: skip what we have
-      if (m.t === 's') { const t = model.late(m); if (t != null) { n.syncN = (n.syncN || 0) + 1; offlineHeard(n, m, t); } }
+      if (m.t === 's') { const t = M.late(m); if (t != null) { n.syncN = (n.syncN || 0) + 1; offlineHeard(n, m, t); } }
       else if (m.t === 'clip') clipFlag(m); else if (m.t === 'bob') bobFlag(m); else if (m.t === 'label') Lib.add(m);
     });
     n.lateS = Math.max(n.lateS, s0 + d.m.length - 1); n.lost = +d.lost || 0;
     if (!(d.left > 0)) { n.synced = true; n.backAt = performance.now(); }
-    try { c.send({ t: 'ack', s: n.lateS }); } catch (e) {}
+    curHub().sendTo(d.k, { t: 'ack', s: n.lateS, id: d.id }); // straight back, or along the path it came
   }
   // a drone an ear heard while it couldn't reach this screen: its own log entry, marked as heard offline
   function offlineHeard(n, m, t) {
-    if (m.st !== 'drone') return;
+    if (m.st !== 'drone' || sim) return;
     const at = Date.now() - (performance.now() - t), e = n.offInc && Log.get(n.offInc);
     if (e && at - e.t1 < 20000) { e.t1 = Math.max(e.t1, at); e.peak = Math.max(e.peak, m.c || 0); Log.save(); logKey = tlKey = ''; return; }
     n.offInc = Log.add({ id: Log.newId(), type: 'drone', t0: at, t1: at, cls: m.cl || 'Drone', peak: m.c || 0, agree: 'heard by ear ' + n.label + ' while offline',
       flights: [], track: [], clips: [], pins: [], geo: null, f0: Math.round(m.f || 0), room, offline: n.label }).id;
     logKey = tlKey = '';
   }
-  // per-ear link chips: "Ear B offline 12 s" (counting from its last clock reply), then "Ear B back · synced 96 points"
-  const OFF_MS = 3500, BACK_MS = 12000;
+  // per-ear link chips: "Ear B offline 12 s" (counting from its last clock reply), then "Ear B back · synced 96 points";
+  // while any ear is relayed: "Ear C via B (2 hops) · sealed" and "Ear A direct"
+  const OFF_MS = 3500, BACK_MS = 12000, LOCK = '<svg class="lock" viewBox="0 0 10 12" aria-hidden="true"><rect x="1" y="5" width="8" height="6.5" rx="1.2"/><path d="M3 5.2V3.6a2 2 0 0 1 4 0v1.6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+  const screenKey = () => sim ? sim.eng.nodes[0].key : ME;
+  const viaText = (L, n) => { const v = L[n.key] && L[n.key].via; return v && v.length ? `via ${v.map(labelOf).join(' → ')} (${v.length + 1} hops)` : ''; };
   function netChips(now) {
-    if (sim || !hub) return '';
-    return [...model.nodes.values()].filter(n => n.key !== ME && n.lastPong).map(n => {
-      const gone = now - n.lastPong, name = 'Ear ' + n.label;
+    const H = curHub(); if (!H) return '';
+    const L = H.links(), ears = [...activeModel().nodes.values()].filter(n => n.key !== screenKey() && n.lastPong), anyVia = ears.some(n => viaText(L, n));
+    return ears.map(n => {
+      const gone = now - n.lastPong, name = 'Ear ' + n.label, via = viaText(L, n), seal = via ? ` · sealed ${LOCK}` : '';
       if (gone > OFF_MS) {
         if (!n.offAt) { n.offAt = n.lastPong; n.wasOff = true; n.synced = false; n.syncN = 0; }
         return gone < 15 * 60000 ? `<span class="net off">${name} offline ${gone < 60000 ? Math.round(gone / 1000) + ' s' : Math.floor(gone / 60000) + ' min'}</span>` : '';
       }
-      n.offAt = 0; if (!n.wasOff) return '';
+      n.offAt = 0;
       const pts = (n.syncN || 0) + ' point' + (n.syncN === 1 ? '' : 's');
-      if (!n.synced) return `<span class="net back">${name} back · syncing ${pts}…</span>`;
-      if (now - n.backAt > BACK_MS) { n.wasOff = false; return ''; }
-      return `<span class="net back">${name} back · synced ${pts}${n.lost ? ' · ' + n.lost + ' too old, dropped' : ''}</span>`;
+      if (n.wasOff && !n.synced) return `<span class="net back">${name} back · syncing ${pts}…${seal}</span>`;
+      if (n.wasOff && now - n.backAt > BACK_MS) n.wasOff = false;
+      if (n.wasOff) return `<span class="net back">${name} back · synced ${pts}${n.lost ? ' · ' + n.lost + ' too old, dropped' : ''}${via ? ' · ' + via : ''}${seal}</span>`;
+      return via ? `<span class="net via">${name} ${via}${seal}</span>` : anyVia ? `<span class="net dir">${name} direct</span>` : '';
     }).join('');
   }
+  // the links map: each ear's direct line to this screen and its lines to other ears (from their reports), broken ones (that
+  // worked before) dashed red; the path its data takes now, in its colour; a lock on ears heard sealed through others
+  function netView(st) {
+    const H = curHub(); if (!H || replay) return null;
+    const M = activeModel(), L = H.links(), sk = screenKey(), pos = {}, now = performance.now();
+    st.nodes.forEach(n => pos[n.key] = n.pos);
+    const ears = st.nodes.filter(n => n.key !== sk && M.nodes.get(n.key)); if (!ears.length) return null;
+    const scr = pos[sk] || [ears.reduce((a, n) => a + n.pos[0], 0) / ears.length, Math.min(...ears.map(n => n.pos[1])) - 3];
+    const links = [], paths = [], locks = [], nb = {};
+    ears.forEach(e => {
+      const m = M.nodes.get(e.key), l = L[e.key], up = !!(l && l.direct); if (up) m.hadDirect = true;
+      if (up || m.hadDirect) links.push({ a: scr, b: e.pos, up, id: 'screen|' + e.key });
+      const fresh = l && m.nb && now - m.nbAt < 5000;
+      (m.nb || []).forEach(([k, on]) => { if (!pos[k] || k === sk) return; const id = [e.key, k].sort().join('|'); nb[id] = nb[id] || { a: pos[e.key], b: pos[k], up: false, id }; if (on && fresh) nb[id].up = true; });
+      if (l) { const chain = [e.key].concat(l.via).map(k => pos[k]); if (chain.every(Boolean)) paths.push({ pts: chain.concat([scr]), col: m.color, via: l.via.length > 0 }); if (l.via.length) locks.push(e.key); }
+    });
+    return { scr, scrPin: !pos[sk], links: links.concat(Object.values(nb)), paths, locks };
+  }
 
-  window.__net = () => ({ chips: $('stNet').hidden ? '' : $('stNet').textContent, count: hub ? hub.count : 0, nodes: [...model.nodes.values()].filter(n => n.key !== ME)
-    .map(n => ({ key: n.key, label: n.label, syncN: n.syncN || 0, lost: n.lost || 0, tl: (n.tl || []).map(p => [p[0], p[4], p[3]]) })) }); // tests
+  window.__net = () => { const H = curHub(); return { chips: $('stNet').hidden ? '' : $('stNet').textContent, count: H ? H.count : 0, links: H ? H.links() : {}, fw: H ? H.stats.fw : 0, seal: H && H.seal ? H.seal.stats : null, view: nodesNet,
+    nodes: [...activeModel().nodes.values()].filter(n => n.key !== screenKey()).map(n => ({ key: n.key, label: n.label, syncN: n.syncN || 0, lost: n.lost || 0, tl: (n.tl || []).map(p => [p[0], p[4], p[3]]) })) }; }; // tests
 
   // ---------- hotspot mode (no internet): no relay; this screen pairs each ear with QR codes (mesh/hotspot.js) ----------
   const HS = window.RotorHotspot; let hsPend = null, hsStop = null;
@@ -314,7 +342,7 @@
     room = 'hotspot'; saved = JSON.parse(localStorage.getItem(posKey()) || '{}'); model = new R.MeshModel(saved, loadCal());
     $('pNone').hidden = true; $('pHot').hidden = false; $('pLeave').hidden = false;
     Lib.load();
-    hub = R.startHub(null, { status: s => { hubStatus = s; }, data: hubData });
+    hub = R.startHub(null, hubCb('rotorear-seal-screen-hotspot'));
   }
   function hsCancel() { if (hsStop) { hsStop(); hsStop = null; } $('hCam').hidden = true; if (hsPend) { try { hsPend.pc.close(); } catch (e) {} hsPend = null; } }
   $('hAdd').onclick = async () => {
@@ -420,15 +448,41 @@
     ensureCtx(); openSheet(null);
     const eng = new R.SimEngine(ctx, { n: 4, path: hp.get('path') || 'demo', speed: +(hp.get('speed') || 1), biasMs: +(hp.get('bias') || 0), gainDb: +(hp.get('gain') || 0), jitterMs: +(hp.get('jit') || 1),
       f0: +(hp.get('f0') || 0), alt: +(hp.get('alt') || 1.5), side: +(hp.get('side') || 6), loud: +(hp.get('loud') || 0), ox: +(hp.get('ox') || 0) }); // alt: the drone's height (m) on the non-scripted paths; side: the phones' square (m); loud: dB louder drone; ox: this post's place on the 'cross' line
-    const m = new R.MeshModel({}), links = eng.nodes.map(n => new R.LoopLink(m, n));
+    const m = new R.MeshModel({});
     eng.nodes.forEach(n => { Teach.setDet(n.det); n.det.blades = blades; });
-    sim = { eng, model: m, links, t0: performance.now() }; ws.reset(); calib = null; Trip.use('demo'); demoLine();
+    sim = { eng, model: m, t0: performance.now() }; ws.reset(); calib = null; Trip.use('demo'); demoLine();
+    // the phones talk to this screen over in-page links through the real mesh code (relay, seal, queue): phone A is this
+    // screen; B, C, D each link to it and to their neighbours (B–C, C–D), so a cut link reroutes through another ear
+    sim.hub = R.startHub(null, Object.assign(hubCb(null), { status: () => {} }));
+    sim.links = eng.nodes.map(n => new R.NodeLink('demo', n.key, () => {}, null, n.clock, { local: true, auto: false, store: null }));
+    sim.edges = [[0, 1], [0, 2], [0, 3], [1, 2], [2, 3]].map(([a, b]) => ({ a, b, cut: false }));
+    const [x0, y0] = R.pipe({ role: 'map' }, { role: 'node', key: eng.nodes[0].key }); sim.links[0].attach(x0); sim.hub.add(y0); // this phone's own ear
+    sim.edges.forEach(e => demoWire(e, true)); sim.step = 0; $('cutBtn').hidden = false;
     sim.iv1 = setInterval(() => { const now = performance.now(); eng.step(now); m.truth = eng.truth(); m.truthAt = now; }, 50);
-    sim.iv2 = setInterval(() => { const msgs = eng.messages(); links.forEach((l, i) => l.send(msgs[i])); }, 1000 / R.SEND_HZ);
-    sim.iv3 = setInterval(() => { const ts = performance.now(); links.forEach(l => l.ping(ts)); }, 1000);
+    sim.iv2 = setInterval(() => { const msgs = eng.messages(); sim.links.forEach((l, i) => l.send(msgs[i])); }, 1000 / R.SEND_HZ);
     keepAwake();
   }
-  function stopDemo() { if (!sim) return; clearInterval(sim.iv1); clearInterval(sim.iv2); clearInterval(sim.iv3); sim.eng.stop(); sim = null; ws.reset(); calib = null; }
+  function demoWire(e, on) { // a demo link on (a fresh in-page link) or off; a = 0: this screen
+    const A = sim.links[e.a], B = sim.links[e.b], ka = sim.eng.nodes[e.a].key, kb = sim.eng.nodes[e.b].key; e.cut = !on;
+    if (!e.a) { if (!on) return B.cutLink('screen', true); B.cutLink('screen', false); const [x, y] = R.pipe({ role: 'map' }, { role: 'node', key: kb }); B.attach(x); sim.hub.add(y); return; }
+    if (!on) { A.cutLink(kb, true); B.cutLink(ka, true); return; }
+    A.cutLink(kb, false); B.cutLink(ka, false); const [x, y] = R.pipe({ role: 'ear', key: kb }, { role: 'ear', key: ka }); A.addNb(x, kb); B.addNb(y, ka);
+  }
+  // "Cut a link": C loses its line to the screen (its data goes via B), then B does (B → C → D → screen), then all heal
+  const CUTS = [[[0, 2]], [[0, 1]], null];
+  $('cutBtn').onclick = () => demoCut();
+  function demoCut() {
+    if (!sim) return; const c = CUTS[sim.step++ % CUTS.length], E = (a, b) => sim.edges.find(e => e.a === a && e.b === b);
+    if (c) c.forEach(([a, b]) => demoWire(E(a, b), false)); else sim.edges.forEach(e => { if (e.cut) demoWire(e, true); });
+  }
+  function demoTapLink(p) { // a tap near a line in the demo cuts it, or heals it
+    if (!sim || !nodesNet) return false; const P = k => sim.model.nodes.get(sim.eng.nodes[k].key);
+    const d = e => { const a = P(e.a), b = P(e.b); if (!a || !b) return 1e9; const [ax, ay] = a.pos, [bx, by] = b.pos, L = (bx - ax) ** 2 + (by - ay) ** 2 || 1, u = Math.max(0.15, Math.min(0.85, ((p[0] - ax) * (bx - ax) + (p[1] - ay) * (by - ay)) / L));
+      return Math.hypot(p[0] - ax - u * (bx - ax), p[1] - ay - u * (by - ay)); };
+    const e = sim.edges.reduce((a, e) => d(e) < d(a) ? e : a); if (d(e) > 0.8) return false;
+    demoWire(e, e.cut); return true;
+  }
+  function stopDemo() { $('cutBtn').hidden = true; if (!sim) return; clearInterval(sim.iv1); clearInterval(sim.iv2); sim.links.forEach(l => { clearInterval(l.watch); l.drop(true); }); sim.hub.stop(); sim.eng.stop(); sim = null; ws.reset(); calib = null; }
   const replayDemo = () => { if (sim) { sim.eng.replay(); ws.reset(); } };
   const App = window.RotorApp;
   $('tryDemo').onclick = $('mDemo').onclick = () => App.go(sim ? 'screen' : 'demo');
@@ -606,7 +660,7 @@
 
   // ---------- tripwire lines (tripwire.js): drawn on the map, a crossing alerts with its direction ----------
   const Trip = window.RotorTrip;
-  let tripDraw = null, lastTrip = null, nodesNow = [];
+  let tripDraw = null, lastTrip = null, nodesNow = [], nodesNet = null;
   const tripOnly = () => Trip.only && Trip.lines.length > 0;
   $('tripOnly').checked = Trip.only;
   $('tripOnly').onchange = () => { Trip.only = $('tripOnly').checked; drawTrips(); };
@@ -790,7 +844,7 @@
     // tripwires: the lines, the first tap while drawing, this episode's crossing points (or the replayed incident's)
     st.trips = Trip.lines.map(l => ({ a: l.a, b: l.b, inS: l.inS, label: Trip.name(l), hot: !!(lastTrip && lastTrip.line === l.id && now - lastTrip.at < 4000) }));
     st.tripDraft = tripDraw && tripDraw.a; st.tripHits = replay ? (replay.e.trips || []) : (hot || s === 'lost') ? known.flatMap(k => k.inc.trips || []) : [];
-    nodesNow = st.nodes;
+    nodesNow = st.nodes; st.net = nodesNet = netView(st);
     if (!st.label && !D.mesh) st.label = D.cls; // solo marker text
     $('tripBtn').textContent = Trip.lines.length ? 'Tripwire · ' + Trip.lines.length + (tripOnly() ? ' · only' : '') : 'Tripwire';
     st.remote = Link.on ? Link.remote(hot ? D.drones : []) : [];
