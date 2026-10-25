@@ -62,70 +62,155 @@
   // NodeLink keeps a data channel open to the room's map and answers the map's clock pings with its own clock (NTP-style)
   // so the map can line up arrival times. Relay mode: PeerJS, reconnecting forever with backoff (1 s doubling to 15 s), also
   // when the relay itself drops. Hotspot mode (opts.local): no PeerJS; the page hands it a paired data channel (attach).
-  // Offline buffering: while the map isn't answering (no ping for 3 s), the ear's messages (telemetry, labels, clip and
-  // Bird-or-Bot flags: numbers only) are queued with their time, newest QMAX kept; once the map answers again the queue
+  // Pass it along: each ear also links to the other ears the map names in its pings (relay mode: PeerJS; hotspot mode: the
+  // map passes the pairing codes between them). An ear whose own link is down sends through the neighbour with the fewest
+  // hops to the map (every second each ear tells its neighbours its hop count and path, so no route loops back), sealed
+  // (mesh/seal.js) so the ears in between can't read or change it: { t: 'fw', o: origin, id, ttl, v: [ears so far], iv, x }.
+  // The map answers back along the same path ({ t: 'dn', to, r: [hops left], iv, x }). The direct link stays the default.
+  // Offline buffering: while there is no way to the map at all (no ping for 3 s), the ear's messages (telemetry, labels, clip
+  // and Bird-or-Bot flags: numbers only) are queued with their time, newest QMAX kept; once the map answers again the queue
   // goes out in order, CHUNK at a time, each chunk resent until the map acks it. Pongs and demo truth are never queued.
-  const QMAX = 2400, CHUNK = 25, QTYPES = { s: 1, label: 1, clip: 1, bob: 1 };
+  const QMAX = 2400, CHUNK = 25, QTYPES = { s: 1, label: 1, clip: 1, bob: 1 }, FRESH_MS = 3000, MAXHOP = 6, MAXNB = 6;
+  const OPEN = { reliable: false, serialization: 'json' };
   class NodeLink {
     constructor(room, key, onStatus, onMsg, clock, opts) {
-      Object.assign(this, { room, key, onStatus, onMsg, clock: clock || (() => performance.now()), conn: null, peer: null, lastPing: 0, idSuffix: '',
-        local: !!(opts && opts.local), q: [], seq: 0, dropped: 0, fails: 0, wait: 0, inflight: null, downAt: Date.now(), cut: false, sid: randKey(4) });
+      opts = opts || {};
+      Object.assign(this, { room, key, onStatus, onMsg, clock: clock || (() => performance.now()), conn: null, peer: null, lastPing: 0, lastDirect: 0, idSuffix: '',
+        local: !!opts.local, mesh: opts.mesh !== false, auto: opts.auto !== false, q: [], seq: 0, dropped: 0, fails: 0, wait: 0, inflight: null, downAt: Date.now(), cut: false, sid: randKey(4),
+        nbs: new Map(), known: new Map(), cuts: new Set(), tried: {}, pend: {}, names: {}, seen: new Set(), seenQ: [], fwd: 0, sealer: null, rsig: '' });
+      if (this.mesh && window.RotorSeal) RotorSeal.ear(key, opts.store !== undefined ? opts.store : 'rotorear-seal-' + (this.local ? 'hotspot' : room) + '-' + key).then(s => this.sealer = s).catch(() => {});
       if (!this.local) this.makePeer();
       this.watch = setInterval(() => this.watchdog(), 1000);
     }
-    get online() { const c = this.conn; return !this.cut && !!(c && c.open) && Date.now() - this.lastPing < 3000; }
+    get direct() { const c = this.conn; return !this.cut && !this.cuts.has('screen') && !!(c && c.open) && Date.now() - this.lastDirect < FRESH_MS; }
+    // the way to the map: { hop, via (neighbour key, or none: direct), c, path: [ears from here on] } or null
+    route() {
+      if (this.cut) return null; if (this.direct) return { hop: 1, path: [this.key] };
+      let best = null; const now = Date.now();
+      this.nbs.forEach((b, k) => { if (b.c.open && b.hop > 0 && b.hop < MAXHOP && now - b.at < FRESH_MS && !b.path.includes(this.key) && (!best || b.hop < best.hop || (b.hop === best.hop && k < best.via))) best = { hop: b.hop, via: k, c: b.c, path: b.path }; });
+      return best && { hop: best.hop + 1, via: best.via, c: best.c, path: [this.key].concat(best.path) };
+    }
+    get online() { const r = this.route(); return !!r && (!r.via || !!(this.sealer && this.sealer.ready)); } // direct: pinged < 3 s ago; via: the neighbour is (hello < 3 s)
+    say(s, cls) { const r = this.online && this.route(); if (!(r && r.via)) this.onStatus(s, cls); } // relaying: the watchdog says so
     backoff() { const ms = Math.min(15000, 1000 * 2 ** Math.min(this.fails++, 4)); this.wait = Date.now() + ms; return ms; }
     later(fn) { clearTimeout(this.rt); this.rt = setTimeout(fn, this.backoff()); }
     makePeer() {
       if (this.peer) { try { this.peer.destroy(); } catch (e) {} this.peer = null; }
       if (this.cut) return this.later(() => this.makePeer());
       const p = this.peer = new Peer(PREFIX + this.room + '-n-' + this.key + this.idSuffix, { debug: 0 });
-      this.onStatus('connecting to relay…', 'bad');
+      this.say('connecting to relay…', 'bad');
       p.on('open', () => this.connect());
+      p.on('connection', c => { if (p === this.peer && c.metadata && c.metadata.role === 'ear') this.addNb(c, c.metadata.key); }); // a neighbour ear
       p.on('disconnected', () => { if (p === this.peer && !p.destroyed) this.later(() => { try { p.reconnect(); } catch (e) { this.makePeer(); } }); });
       p.on('error', err => {
         if (p !== this.peer) return;
-        if (err.type === 'peer-unavailable') { this.onStatus('map not open yet — retrying…', 'bad'); this.later(() => this.connect()); }
+        if (err.type === 'peer-unavailable') { if (this.conn && this.conn.open) return; this.say('map not open yet — retrying…', 'bad'); this.later(() => this.connect()); } // (or a neighbour that left)
         else if (err.type === 'unavailable-id') { this.idSuffix = '-' + randKey(3); setTimeout(() => this.makePeer(), 500); }
-        else { this.onStatus((['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type) ? 'relay unreachable' : 'error: ' + err.type) + ' — retrying…', 'bad'); this.later(() => this.makePeer()); }
+        else { this.say((['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type) ? 'relay unreachable' : 'error: ' + err.type) + ' — retrying…', 'bad'); this.later(() => this.makePeer()); }
       });
     }
     connect() {
-      const p = this.peer; if (this.cut || !p || p.destroyed || p.disconnected || !p.open) return this.later(() => this.peer && this.peer.open ? this.connect() : this.makePeer());
+      const p = this.peer; if (this.cut || this.cuts.has('screen') || !p || p.destroyed || p.disconnected || !p.open) return this.later(() => this.peer && this.peer.open ? this.connect() : this.makePeer());
       if (this.conn) { try { this.conn.close(); } catch (e) {} }
-      this.bind(p.connect(hubId(this.room), { reliable: false, serialization: 'json', metadata: { role: 'node', key: this.key } }));
-      this.onStatus('connecting to map…', 'bad');
+      this.bind(p.connect(hubId(this.room), Object.assign({ metadata: { role: 'node', key: this.key } }, OPEN)));
+      this.say('connecting to map…', 'bad');
     }
-    attach(c) { if (this.conn && this.conn !== c) { try { this.conn.close(); } catch (e) {} } this.bind(c); } // hotspot: a paired data channel
+    attach(c) { if (this.conn && this.conn !== c) { try { this.conn.close(); } catch (e) {} } this.cuts.delete('screen'); this.bind(c); } // hotspot: a paired data channel
     bind(c) {
       this.conn = c; this.inflight = null;
-      const up = () => { this.lastPing = Date.now(); this.fails = 0; this.wasUp = true; this.tell = true; this.onStatus('connected to map', 'ok'); };
+      const up = () => { this.lastPing = this.lastDirect = Date.now(); this.fails = 0; this.wasUp = true; this.tell = true; this.onStatus('connected to map', 'ok'); };
       if (c.open) up(); else c.on('open', up);
       c.on('data', d => {
-        if (this.cut || this.conn !== c) return;
-        if (d && d.t === 'ping') { this.lastPing = Date.now(); if (d.ts != null) this.send({ t: 'pong', k: this.key, ts: d.ts, tn: this.clock() }); }
-        if (d && d.t === 'ack') { this.q = this.q.filter(x => x.s > d.s); this.inflight = null; this.flush(); return; }
-        this.onMsg && this.onMsg(d);
+        if (this.cut || this.conn !== c || this.cuts.has('screen') || !d) return;
+        if (d.t === 'ping') { this.lastDirect = Date.now(); if (d.pk && this.sealer) this.sealer.setScreen(d.pk).catch(() => {}); } // the map's key: only from the direct link
+        if (d.t === 'dn') return this.dn(d);
+        this.got(d);
       });
-      c.on('close', () => { if (this.conn === c) { this.onStatus(this.local ? 'hotspot link lost — pair again' : 'lost map — reconnecting…', 'bad'); if (!this.local) this.later(() => this.connect()); } });
+      c.on('close', () => { if (this.conn === c) { this.hello(true); this.say(this.local ? 'hotspot link lost — pair again' : 'lost map — reconnecting…', 'bad'); if (!this.local) this.later(() => this.connect()); } });
       c.on('error', () => { if (this.conn === c && !this.local) this.later(() => this.connect()); });
+    }
+    got(d) { // a message from the map, direct or opened from a 'dn'
+      if (d.t === 'ping') { this.lastPing = Date.now(); if (d.ts != null) this.send({ t: 'pong', k: this.key, ts: d.ts, tn: this.clock(), pk: this.direct && this.sealer ? this.sealer.pub : undefined }); if (d.nb) this.meet(d.nb); }
+      if (d.t === 'sig') return this.sig(d);
+      if (d.t === 'ack') { if (d.id && d.id !== this.sid) return; this.q = this.q.filter(x => x.s > d.s); this.inflight = null; this.flush(); return; }
+      this.onMsg && this.onMsg(d);
+    }
+    // the map's list of the other ears [key, relay peer id, label]: link to the ones with a lower key (they link to the higher)
+    meet(list) {
+      const now = Date.now(); list.forEach(([k, , l]) => { if (l) this.names[k] = l; });
+      if (!this.mesh || !this.auto || this.cut) return;
+      list.forEach(([k, pid]) => {
+        const b = this.nbs.get(k); if (k >= this.key || this.cuts.has(k) || (b && b.c.open) || this.nbs.size >= MAXNB || now - (this.tried[k] || 0) < 5000) return;
+        this.tried[k] = now;
+        if (!this.local && pid && this.peer && this.peer.open) this.addNb(this.peer.connect(pid, Object.assign({ metadata: { role: 'ear', key: this.key } }, OPEN)), k);
+        else if (this.local && window.RotorHotspot && this.direct) RotorHotspot.offer().then(o => { if (this.pend[k]) try { this.pend[k].pc.close(); } catch (e) {} this.pend[k] = o; this.send({ t: 'sig', k: this.key, to: k, code: o.code }); }).catch(() => {});
+      });
+    }
+    async sig(d) { // hotspot: a pairing code from another ear, passed on by the map
+      if (!window.RotorHotspot || !d.from || this.cuts.has(d.from)) return;
+      try {
+        if (/^R1~o/.test(d.code)) { const a = await RotorHotspot.answer(d.code, this.key); this.send({ t: 'sig', k: this.key, to: d.from, code: a.code }); this.addNb(await a.conn, d.from); }
+        else { const o = this.pend[d.from]; if (!o) return; delete this.pend[d.from]; this.addNb(await o.accept(d.code), d.from); }
+      } catch (e) {}
+    }
+    addNb(c, k) {
+      if (!c || !k || k === this.key) return;
+      if (this.cuts.has(k) || this.cut) { try { c.close(); } catch (e) {} return; }
+      const old = this.nbs.get(k); if (old && old.c !== c) { try { old.c.close(); } catch (e) {} }
+      const b = { c, hop: 0, path: [], at: 0 }; this.nbs.set(k, b); this.known.set(k, Date.now());
+      const gone = () => { if (this.nbs.get(k) === b) { this.nbs.delete(k); this.known.set(k, Date.now()); this.hello(true); } };
+      c.on('data', d => { if (this.nbs.get(k) !== b || this.cut || !d) return;
+        if (d.t === 'hello') { b.hop = +d.hop || 0; b.path = Array.isArray(d.path) ? d.path.slice(0, MAXHOP) : []; b.at = Date.now(); this.hello(true); }
+        else if (d.t === 'fw') this.forward(d);
+        else if (d.t === 'dn') this.dn(d); });
+      c.on('close', gone); c.on('error', gone);
+    }
+    forward(p) { // another ear's sealed packet: on towards the map, once, never back through an ear it already passed
+      const id = p.o + '/' + p.id, r = this.route();
+      if (!p.o || p.o === this.key || !Array.isArray(p.v) || p.v.includes(this.key) || !(p.ttl > 1) || this.seen.has(id) || !r || (r.via && p.v.includes(r.via))) return;
+      this.seen.add(id); this.seenQ.push(id); if (this.seenQ.length > 2000) this.seen.delete(this.seenQ.shift());
+      this.fwd++; try { (r.via ? r.c : this.conn).send(Object.assign({}, p, { ttl: p.ttl - 1, v: p.v.concat(this.key) })); } catch (e) {}
+    }
+    dn(d) { // from the map along a path: pass it on, or open it if it's ours
+      if (Array.isArray(d.r) && d.r.length) { const b = this.nbs.get(d.r[0]); if (b && b.c.open) { this.fwd++; try { b.c.send(Object.assign({}, d, { r: d.r.slice(1) })); } catch (e) {} } return; }
+      if (d.to === this.key && this.sealer) this.sealer.down(d).then(o => { if (o && !this.cut) this.got(o); });
+    }
+    up(o) { // direct as before; through a neighbour: sealed
+      const r = this.route(); if (!r) return;
+      if (!r.via) { try { this.conn.send(o); } catch (e) {} return; }
+      if (this.sealer && this.sealer.ready) this.sealer.up(o).then(x => { try { r.c.send({ t: 'fw', o: this.key, id: x.id, ttl: MAXHOP, v: [this.key], iv: x.iv, x: x.x }); } catch (e) {} });
     }
     flush() { // oldest first; one chunk in flight, resent after 2 s without an ack. After a (re)connect an empty queue says "nothing missed"
       if (!this.online || (this.inflight && Date.now() - this.inflight < 2000) || !(this.q.length || this.tell)) return;
       const part = this.q.slice(0, CHUNK); this.inflight = Date.now(); this.tell = false;
-      try { this.conn.send({ t: 'late', k: this.key, id: this.sid, s0: part.length ? part[0].s : this.seq + 1, m: part.map(x => x.m), left: this.q.length - part.length, lost: this.dropped }); } catch (e) {}
+      this.up({ t: 'late', k: this.key, id: this.sid, s0: part.length ? part[0].s : this.seq + 1, m: part.map(x => x.m), left: this.q.length - part.length, lost: this.dropped });
+    }
+    hello(only) { // tell the neighbours our way to the map (1 Hz, and at once when it changes, so a reroute takes ~one link delay)
+      const r = this.route(), h = { t: 'hello', k: this.key, hop: r ? r.hop : 0, path: r ? r.path : [] }, sg = h.path.join(','); if (only && sg === this.hsig) return; this.hsig = sg;
+      this.nbs.forEach(b => { if (b.c.open) try { b.c.send(h); } catch (e) {} });
     }
     watchdog() {
-      const c = this.conn, now = Date.now();
-      if (this.online) { this.downAt = 0; this.flush(); }
-      else {
+      const c = this.conn, now = Date.now(), r = this.route(); this.hello();
+      this.known.forEach((t, k) => { if (!this.nbs.has(k) && now - t > 60000) this.known.delete(k); });
+      if (this.online) {
+        if (this.wasUp && this.downAt) this.tell = true; // back after an outage, whichever way: say what we missed
+        this.downAt = 0; this.flush();
+        if (this.known.size) this.up({ t: 'nb', k: this.key, l: [...this.known.keys()].map(k => [k, this.nbs.has(k) && this.nbs.get(k).c.open && now - this.nbs.get(k).at < FRESH_MS ? 1 : 0]) });
+        const sg = r.via ? r.via + r.hop : 'direct';
+        if (r.via) this.onStatus(`connected via ${r.path.slice(1).map(k => this.names[k] || '?').join(' → ')} (${r.hop} hops) · sealed`, 'ok');
+        else if (this.rsig && this.rsig !== sg) this.onStatus('connected to the screen (direct)', 'ok');
+        this.rsig = sg;
+      } else {
         if (!this.downAt) this.downAt = now;
-        if (!this.cut && c && c.open && now - this.lastPing > 7000 && !this.local) { try { c.close(); } catch (e) {} this.later(() => this.connect()); }
-        if (!this.cut && !this.local && (!this.peer || this.peer.destroyed) && now > this.wait) this.makePeer(); // the relay went away: start over
-        if (!this.cut && !this.local && c && !c.open && this.peer && this.peer.open && now > this.wait && now - (this.lastTry || 0) > 10000) { this.lastTry = now; this.connect(); } // stuck opening
         const s = Math.round((now - this.downAt) / 1000), w = Math.max(0, Math.ceil((this.wait - now) / 1000));
         if (s >= 3 && this.wasUp) this.onStatus(`offline ${s} s · ${this.q.length} queued` + (this.local ? ' · waiting for the hotspot link' : w ? ` · retrying in ${w} s` : ' · retrying…'), 'bad');
+        this.rsig = '';
       }
+      if (this.cut || this.local) return; // relay mode: keep (re)trying the direct link, also while relaying through a neighbour
+      if ((!this.peer || this.peer.destroyed) && now > this.wait) return this.makePeer(); // the relay went away: start over
+      if (this.cuts.has('screen') || !c) return;
+      if (c.open && now - this.lastDirect > 7000) { try { c.close(); } catch (e) {} this.later(() => this.connect()); }
+      else if (!c.open && this.peer && this.peer.open && now > this.wait && now - (this.lastTry || 0) > 10000) { this.lastTry = now; this.connect(); } // stuck opening
     }
     send(o) {
       if (!o) return;
@@ -134,26 +219,63 @@
         if (this.q.length > QMAX) { this.q.shift(); this.dropped++; }
         return;
       }
-      const c = this.conn; if (c && c.open && !this.cut) { try { c.send(o); } catch (e) {} }
+      this.up(o);
     }
-    // tests: drop the link (and the relay) for a while, as if the network went away
-    drop(on) { this.cut = !!on; if (on) { if (this.conn) try { this.conn.close(); } catch (e) {} if (this.peer && !this.local) { try { this.peer.destroy(); } catch (e) {} } } else { this.fails = 0; this.wait = 0; } }
+    // tests + the demo: cut one link ('screen': this ear's direct link, or a neighbour's key) until it's restored
+    cutLink(k, on) {
+      if (on) { this.cuts.add(k); const c = k === 'screen' ? this.conn : this.nbs.get(k) && this.nbs.get(k).c; if (c) { try { c.close(); } catch (e) {} } }
+      else { this.cuts.delete(k); this.tried[k] = 0; if (k === 'screen' && !this.local) { this.fails = 0; this.wait = 0; this.connect(); } }
+    }
+    // tests: drop every link (and the relay) for a while, as if the network went away
+    drop(on) {
+      this.cut = !!on;
+      if (on) { if (this.conn) try { this.conn.close(); } catch (e) {} this.nbs.forEach(b => { try { b.c.close(); } catch (e) {} }); if (this.peer && !this.local) { try { this.peer.destroy(); } catch (e) {} } }
+      else { this.fails = 0; this.wait = 0; this.tried = {}; }
+    }
   }
 
   // Hub: the map. Relay mode owns the room's well-known peer id (if it's taken, we become a read-only viewer) and reconnects
   // with backoff when the relay drops. Hotspot mode (room = null): no PeerJS, paired data channels are handed in by add().
+  // cb.seal: a RotorSeal.screen (promise) to open sealed packets relayed by other ears and answer back along their path.
   function startHub(room, cb) {
-    let peer, conns = new Set(), mode = 'hub', hubConn = null, fails = 0, owned = false;
+    let peer, conns = new Set(), mode = 'hub', hubConn = null, fails = 0, owned = false, S = null;
+    const routes = new Map(), stats = { fw: 0 }; // routes: ear key → { v: [origin, …ears it passed], c: the conn it came in on, at }
+    if (cb.seal) cb.seal.then(s => S = s).catch(() => {});
     const later = fn => setTimeout(fn, Math.min(15000, 1000 * 2 ** Math.min(fails++, 4)));
+    const isNode = c => c.open && c.metadata && c.metadata.role === 'node';
+    const directOf = (k, fresh) => { let b = null; conns.forEach(c => { if (isNode(c) && c.metadata.key === k && (!fresh || Date.now() - (c.lastPong || 0) < 3500)) b = c; }); return b; };
+    const routeOf = k => { const r = routes.get(k); return r && r.c.open && Date.now() - r.at < FRESH_MS ? r : null; };
     const accept = c => {
       const opened = () => { // an ear that paired / connected again replaces its old link
         const k = c.metadata && c.metadata.key; if (k) conns.forEach(o => { if (o !== c && o.metadata && o.metadata.key === k) { conns.delete(o); try { o.close(); } catch (e) {} } });
-        conns.add(c); try { c.send({ t: 'ping', ts: performance.now() }); } catch (e) {} };
+        conns.add(c); try { c.send({ t: 'ping', ts: performance.now(), pk: S && S.pub }); } catch (e) {} };
       if (c.open) opened(); else c.on('open', opened);
-      c.on('data', d => cb.data(c, d));
+      c.on('data', d => {
+        if (!d) return;
+        if (d.t === 'pong' && c.metadata && d.k === c.metadata.key) { c.lastPong = Date.now(); if (d.pk && S) S.learn(d.k, d.pk); } // an ear's key: only from its own direct link
+        if (d.t === 'fw') return relayed(c, d);
+        if (d.t === 'sig') return sig(d);
+        cb.data(c, d, null);
+      });
       c.on('close', () => conns.delete(c));
       c.on('error', () => conns.delete(c));
     };
+    async function relayed(c, p) { // a sealed packet another ear passed on: the last ear on its list must be the one that handed it over
+      const v = p.v, from = c.metadata && c.metadata.key;
+      if (!S || !Array.isArray(v) || !v.length || v.length > MAXHOP || v[0] !== p.o || v[v.length - 1] !== from) return;
+      const d = await S.open(p.o, p); // null: changed on the way, an ear we never met directly, or a replay / duplicate
+      if (!d || d.k !== p.o) return;
+      stats.fw++; routes.set(p.o, { v: v.slice(), c, at: Date.now() });
+      if (d.t === 'sig') return sig(d);
+      cb.data(c, d, { via: v.slice(1), sealed: true });
+    }
+    function sig(d) { if (d.to) send(d.to, { t: 'sig', from: d.k, code: d.code }); } // hotspot: one ear's pairing code to another
+    function send(k, o) { // direct if that link answers, else back along the path its data came in on (sealed), else any direct link
+      const c = directOf(k, true), r = !c && routeOf(k);
+      if (r && S) { S.seal(k, o).then(x => { if (x) try { r.c.send(Object.assign({ t: 'dn', to: k, r: r.v.slice(0, -1).reverse() }, x)); } catch (e) {} }); return; }
+      const d = c || directOf(k, false); if (d) try { d.send(o); } catch (e) {}
+    }
+    const ears = () => { const m = new Map(); conns.forEach(c => { if (isNode(c)) m.set(c.metadata.key, c.peer || ''); }); routes.forEach((r, k) => { if (routeOf(k) && !m.has(k)) m.set(k, ''); }); return m; };
     const make = () => {
       const p = peer = new Peer(mode === 'hub' ? hubId(room) : PREFIX + room + '-v-' + randKey(5), { debug: 0 });
       p.on('open', () => { fails = 0; if (mode === 'hub') { owned = true; cb.status('map is live — waiting for nodes', 'ok'); } else viewerConnect(); });
@@ -175,13 +297,22 @@
       hubConn.on('close', () => setTimeout(viewerConnect, 1500));
     }
     if (room) make(); else cb.status('pair each ear by code', 'ok');
-    // 1 Hz clock pings: nodes answer with their own clock (see NodeLink), the map keeps the lowest-RTT offset
-    setInterval(() => { const ts = performance.now(); conns.forEach(c => { if (c.open) try { c.send({ t: 'ping', ts, label: c.nodeLabel }); } catch (e) {} }); }, 1000);
+    // 1 Hz clock pings: nodes answer with their own clock (see NodeLink), the map keeps the lowest-RTT offset. Each ping also
+    // names the other ears (to link to) and carries the map's public key; ears only heard through others get theirs sealed
+    const iv = setInterval(() => {
+      const ts = performance.now(), E = ears(), lbl = k => (cb.label && cb.label(k)) || '', nb = k => [...E].filter(([j]) => j !== k).map(([j, pid]) => [j, pid, lbl(j)]);
+      conns.forEach(c => { if (c.open) try { c.send(Object.assign({ t: 'ping', ts, label: c.nodeLabel, pk: S && S.pub }, isNode(c) ? { nb: nb(c.metadata.key) } : null)); } catch (e) {} });
+      routes.forEach((r, k) => { if (routeOf(k) && !directOf(k, true)) send(k, { t: 'ping', ts, label: lbl(k), nb: nb(k) }); });
+    }, 1000);
     return {
       get mode() { return mode; },
-      get count() { return [...conns].filter(c => c.open && c.metadata && c.metadata.role === 'node').length; },
+      get count() { return ears().size; },
       add: accept,
-      sendTo(key, o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.key === key) try { c.send(o); } catch (e) {} }); },
+      sendTo: send,
+      // each ear: is its direct link answering, and the ears its data passed through (none: direct)
+      links() { const o = {}; ears().forEach((_, k) => { const r = routeOf(k), d = !!directOf(k, true); o[k] = { direct: d, via: d || !r ? [] : r.v.slice(1) }; }); return o; },
+      get seal() { return S; }, stats,
+      stop() { clearInterval(iv); conns.forEach(c => { try { c.close(); } catch (e) {} }); if (peer) try { peer.destroy(); } catch (e) {} },
       broadcastViewers(o) { conns.forEach(c => { if (c.open && c.metadata && c.metadata.role === 'viewer') try { c.send(o); } catch (e) {} }); }
     };
   }
@@ -510,7 +641,7 @@
     const sc = () => ext ? ext.k : Math.min(cv.width, cv.height) / view.s;
     const W2P = (x, y) => { if (ext) return ext.W2P(x, y); const k = sc(); return [cv.width / 2 + (x - view.x0 - view.s / 2) * k, cv.height / 2 - (y - view.y0 - view.s / 2) * k]; };
     const P2W = (px, py) => { if (ext) return ext.P2W(px, py); const k = sc(); return [view.x0 + view.s / 2 + (px - cv.width / 2) / k, view.y0 + view.s / 2 - (py - cv.height / 2) / k]; };
-    const DARK = { map: '#0f1218', ink: '#F4F6FA', ink2: '#B9C0CE', line: '#2A303C', pin: '#3a414f', pinInk: '#F4F6FA', alert: '#FF5A1F', alert2: '#3DA9FC', shade: 'rgba(0,0,0,.42)', check: '#E8B500', demo: '#A78BFA', panel: '#161A22' };
+    const DARK = { map: '#0f1218', ink: '#F4F6FA', ink2: '#B9C0CE', line: '#2A303C', pin: '#3a414f', pinInk: '#F4F6FA', alert: '#FF5A1F', alert2: '#3DA9FC', shade: 'rgba(0,0,0,.42)', check: '#E8B500', demo: '#A78BFA', panel: '#161A22', cut: '#FF4D4D', seal: '#2EE6A6' };
     function fitView(list) {
       if (drag) return;
       if (S.solo) { const n = list.find(m => m.key === S.solo); view = { x0: n.pos[0] - 6, y0: n.pos[1] - 6, s: 12 }; return; }
@@ -591,6 +722,32 @@
       if (S.tripDraft) { const [x, y] = W2P(S.tripDraft[0], S.tripDraft[1]), ph = 1 + 0.25 * Math.sin(now / 150); g.strokeStyle = C.check; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 10 * dpr * ph, 0, 7); g.stroke(); text('tap the other end', x, y - 22 * dpr, C.ink, 12 * dpr, true); }
       (S.tripHits || []).forEach(h => { const [x, y] = W2P(h.pt[0], h.pt[1]), r = 8 * dpr; g.strokeStyle = C.alert; g.lineWidth = 4 * dpr; g.beginPath(); g.moveTo(x - r, y - r); g.lineTo(x + r, y + r); g.moveTo(x + r, y - r); g.lineTo(x - r, y + r); g.stroke(); text(h.dir === 'in' ? 'crossed IN' : 'crossed OUT', x, y + 20 * dpr, C.alert, 12 * dpr, true); });
     }
+    // the links map (S.net, see watch.js): links between phones, broken ones dashed red; each ear's current path to the
+    // screen bold in its colour with packets running along it; the screen's own marker when it isn't one of the pins
+    function network(N, C, dpr, now) {
+      N.links.forEach(l => {
+        const [ax, ay] = W2P(l.a[0], l.a[1]), [bx, by] = W2P(l.b[0], l.b[1]);
+        g.strokeStyle = l.up ? C.ink2 : C.cut; g.globalAlpha = l.up ? 0.4 : 0.95; g.lineWidth = (l.up ? 1.5 : 2.5) * dpr; g.setLineDash(l.up ? [] : [7 * dpr, 6 * dpr]);
+        g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+        if (!l.up) { const mx = (ax + bx) / 2, my = (ay + by) / 2, r = 6 * dpr; g.strokeStyle = C.cut; g.lineWidth = 3 * dpr; g.beginPath(); g.moveTo(mx - r, my - r); g.lineTo(mx + r, my + r); g.moveTo(mx + r, my - r); g.lineTo(mx - r, my + r); g.stroke(); }
+      });
+      // longest first and widest, so a path that shares links with a shorter one shows as a border around it
+      N.paths.slice().sort((a, b) => b.pts.length - a.pts.length).forEach(p => {
+        const P = p.pts.map(q => W2P(q[0], q[1])), L = []; let tot = 0;
+        for (let i = 1; i < P.length; i++) { L.push(Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1])); tot += L[L.length - 1]; }
+        g.strokeStyle = p.col; g.globalAlpha = p.via ? 0.95 : 0.55; g.lineWidth = (p.via ? 1.5 + 3 * (p.pts.length - 2) : 2.5) * dpr; g.lineJoin = 'round';
+        g.beginPath(); P.forEach(([x, y], i) => g[i ? 'lineTo' : 'moveTo'](x, y)); g.stroke(); g.globalAlpha = 1;
+        if (tot > 4) for (let k = 0; k < 3; k++) { // packets: three dots, ear → screen, ~120 px/s
+          let u = ((now * 0.12 * dpr / tot + k / 3) % 1) * tot, i = 0; while (i < L.length - 1 && u > L[i]) { u -= L[i]; i++; }
+          const f = L[i] ? u / L[i] : 0; g.fillStyle = p.col; g.beginPath(); g.arc(P[i][0] + (P[i + 1][0] - P[i][0]) * f, P[i][1] + (P[i + 1][1] - P[i][1]) * f, (p.via ? 4.5 : 3) * dpr, 0, 7); g.fill();
+        }
+      });
+      if (N.scrPin) { const [x, y] = W2P(N.scr[0], N.scr[1]), w = 30 * dpr, h = 20 * dpr; g.fillStyle = C.pin; g.strokeStyle = C.ink2; g.lineWidth = 1.2 * dpr; g.beginPath(); g.roundRect(x - w / 2, y - h / 2, w, h, 4 * dpr); g.fill(); g.stroke(); text('screen', x, y + h / 2 + 11 * dpr, C.ink2, 11 * dpr); }
+    }
+    function lock(x, y, dpr, C) { // "sealed": a padlock badge on the pin of an ear heard through others
+      const r = 9 * dpr; g.fillStyle = C.panel; g.strokeStyle = C.seal; g.lineWidth = 1.5 * dpr; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill(); g.stroke();
+      g.fillStyle = C.seal; g.fillRect(x - 4 * dpr, y - 1 * dpr, 8 * dpr, 6 * dpr); g.beginPath(); g.arc(x, y - 1 * dpr, 2.6 * dpr, Math.PI, 0); g.lineWidth = 1.6 * dpr; g.stroke();
+    }
     function draw() {
       const dpr = Math.min(2, devicePixelRatio || 1), Wd = Math.round(cv.clientWidth * dpr), Hd = Math.round(cv.clientHeight * dpr) || Wd;
       if (cv.width !== Wd || cv.height !== Hd) { cv.width = Wd; cv.height = Hd; }
@@ -608,6 +765,7 @@
       if (S.calSpot) { const [x, y] = W2P(S.calSpot[0], S.calSpot[1]), ph = 1 + 0.3 * Math.sin(now / 120); g.strokeStyle = C.check; g.lineWidth = 3 * dpr; g.beginPath(); g.arc(x, y, 24 * dpr * ph, 0, 7); g.stroke(); text('👏 clap here', x, y - 34 * dpr, C.ink, 13 * dpr, true); }
       if (work && S.truth) { const [x, y] = W2P(S.truth.x, S.truth.y); g.strokeStyle = C.ink2; g.lineWidth = 2 * dpr; g.setLineDash([3 * dpr, 3 * dpr]); g.beginPath(); g.arc(x, y, 9 * dpr, 0, 7); g.stroke(); g.setLineDash([]); text('true', x, y + 20 * dpr, C.ink2, 11 * dpr); }
       if (work && S.estL && S.estF) { const [x, y] = W2P(S.estL[0], S.estL[1]); g.strokeStyle = C.check; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 6 * dpr, 0, 7); g.stroke(); }
+      if (S.net) network(S.net, C, dpr, now);
       tripwires(C, dpr, now);
       // drones: every confirmed track (and the lead one while hot), each in its own colour: first C.alert, second C.alert2
       const dots = (T, col) => { g.fillStyle = col; for (let i = 0; i < T.length; i += 3) { const [a, b] = W2P(T[i][0], T[i][1]); g.globalAlpha = 0.15 + 0.5 * i / T.length; g.beginPath(); g.arc(a, b, 2.5 * dpr, 0, 7); g.fill(); } g.globalAlpha = 1; };
@@ -646,6 +804,7 @@
         if (!stale && (ws === 'watching' || ws === 'ready') && n.key === U.me) { const ph = (Math.sin(now / 4000 * 2 * Math.PI) + 1) / 2; g.strokeStyle = C.ink2; g.lineWidth = 1.5 * dpr; g.setLineDash([4 * dpr, 4 * dpr]); g.globalAlpha = 0.4 + 0.5 * ph; g.beginPath(); g.arc(x, y, r + (6 + 6 * ph) * dpr, 0, 7); g.stroke(); g.setLineDash([]); g.globalAlpha = 1; }
         g.fillStyle = stale ? C.line : C.pin; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill(); g.strokeStyle = C.ink2; g.lineWidth = 1.2 * dpr; g.stroke();
         text(n.label, x, y + 1, stale ? C.ink2 : C.pinInk, 14 * dpr, true);
+        if (S.net && S.net.locks.includes(n.key)) lock(x + r * 0.85, y - r * 0.85, dpr, C);
         if (n.key === U.me && (ws === 'watching' || ws === 'ready')) text('this phone', x, y + r + 24 * dpr, C.ink2, 12 * dpr);
       });
     }
@@ -846,18 +1005,20 @@
       return d ? Object.assign({ t: 'truth' }, r(d), this.drone2 ? { d2: r(this.drone2) } : null) : null; }
     stop() { if (this.src2) this.src2.stop(); this.src.stop(); if (this.fan) this.fan.stop(); this.nodes.forEach(n => { n.nz.stop(); n.bus.disconnect(); }); }
   }
-  // In-page loopback "link" for the watch post's sim mode: same messages, a simulated 5–40 ms network,
-  // and the same ping/pong clock sync as the real relay.
-  class LoopLink {
-    constructor(model, node) { this.model = model; this.node = node; }
-    net() { return 5 + Math.random() * 35; }
-    send(m) { setTimeout(() => this.model.ingest(m), this.net()); }
-    ping(ts) { setTimeout(() => this.send({ t: 'pong', k: this.node.key, ts, tn: this.node.clock() }), this.net()); }
+  // In-page link pair for the demo: the bits of a data connection the mesh uses (open, send, close, on, metadata), 5–40 ms
+  // each way, JSON copies, so the demo runs the real NodeLink / hub code: relaying, sealing, queueing
+  function pipe(ma, mb) {
+    const mk = metadata => { const h = {}; return { metadata, open: true, h, on(ev, fn) { (h[ev] = h[ev] || []).push(fn); return this; } }; };
+    const a = mk(ma), b = mk(mb), fire = (x, ev, d) => (x.h[ev] || []).forEach(f => f(d));
+    const wire = (x, y) => {
+      x.send = o => { if (!x.open) return; const s = JSON.stringify(o); setTimeout(() => { if (y.open) fire(y, 'data', JSON.parse(s)); }, 5 + Math.random() * 35); };
+      x.close = () => { if (!x.open) return; x.open = y.open = false; setTimeout(() => { fire(x, 'close'); fire(y, 'close'); }, 0); };
+    };
+    wire(a, b); wire(b, a); return [a, b];
   }
-
   // spectrogram palette (inferno-like), shared by the screen and the ear
   const PAL = [];
   (() => { const stops = [[0, 0, 0, 4], [0.2, 40, 11, 84], [0.4, 120, 28, 109], [0.6, 200, 60, 70], [0.8, 248, 140, 30], [1, 252, 255, 164]];
     for (let i = 0; i < 256; i++) { const t = i / 255; let k = 0; while (t > stops[k + 1][0]) k++; const [t0, r0, g0, b0] = stops[k], [t1, r1, g1, b1] = stops[k + 1], u = (t - t0) / (t1 - t0); PAL.push(`rgb(${r0 + (r1 - r0) * u | 0},${g0 + (g1 - g0) * u | 0},${b0 + (b1 - b0) * u | 0})`); } })();
-  window.RotorMesh = { linkPosts, heightFit, Geo, PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, LoopLink };
+  window.RotorMesh = { linkPosts, heightFit, Geo, PAL, NEAR, solveCal, Calibrator, PREFIX, SEND_HZ, STALE_MS, C_SOUND, LABELS, COLORS, DEFAULT_POS, hubId, randKey, telemetry, TimingTap, NodeLink, startHub, MeshModel, MapView, SimEngine, pipe };
 })();

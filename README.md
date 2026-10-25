@@ -286,6 +286,41 @@ Limits:
 - **iPhone:** Safari and every iOS browser (Chrome on iOS is WebKit) scan with jsQR from the camera, which works. WebRTC between phones on one hotspot generally works. Some iOS versions hide local addresses behind mDNS names that Android can't resolve, and some hotspots block traffic between clients (client isolation). In those cases the link doesn't open, and the app says so after 12 s. Making the hotspot phone itself the screen avoids client isolation.
 - iOS may evict the service worker cache after weeks unused, so open the app online before going out.
 
+## Relay through other ears (multi-hop)
+
+An ear that loses its own link to the screen keeps reporting **through a neighbour ear** that still has one, over as many ears as it takes (up to 6 hops): C → B → A → screen. When links are fine nothing changes: every ear talks to the screen directly, as before.
+
+- **Neighbours:** the screen names the other ears in its 1 Hz clock pings; each ear links to the others (the higher key dials), up to 6. Relay mode dials them over PeerJS; hotspot mode passes the pairing codes through the screen's data channels, so no QR scan is needed.
+- **Route:** fewest hops. Each ear tells its neighbours its own way to the screen once a second, and at once when it changes, so a reroute takes about one link delay. A neighbour whose path already contains this ear is never used (no loops).
+- **Packets:** `{ id, origin, ttl, visited }`. An ear forwards a packet once (it remembers the id), never back through an ear on the visited list, and drops it when the ttl runs out. The screen takes each id once.
+- **Queue only when there's no route at all.** If no neighbour can reach the screen either, the ear queues as in [Dropouts](#dropouts-ears-keep-listening-and-catch-up) and catches up later, whichever way it gets back.
+- The screen answers (clock pings, acks) back along the same path.
+- The ear's own status says how it's connected: `connected via B → A (3 hops) · sealed`. "Pair again" (hotspot) shows whenever the ear has no direct link.
+
+## Links map
+
+The map draws the links between phones: each ear's line to the screen, and lines between ears. Each ear's current path to the screen is drawn in its colour with packets running along it. A link that worked and broke turns **dashed red with a cross**, and the path visibly moves to the new route. Ear chips say `Ear C via B (2 hops) · sealed` (with a lock) and `Ear A direct` while any ear is relayed. Ears heard through others get a small lock on their pin.
+
+**In the demo** (`#demo`) the four phones run the real relay, seal and queue code over in-page links (5 to 40 ms each): phone A is this screen, B, C and D each link to it and to their neighbours (B–C, C–D). **✂ Cut a link** steps through: C loses the screen (C → B → screen), then B does (B → C → D → screen), then everything heals. Tapping a line also cuts it, or heals it. The dots keep moving the whole time.
+
+## Sealed packets
+
+What an ear sends **through other ears** is encrypted and authenticated for the screen, so the ears in between carry it but can't read or change it (`mesh/seal.js`, Web Crypto only).
+
+- The screen and each ear keep an **ECDH P-256** key pair on the phone. The screen's public key rides in its pings, and the ear's rides in its pongs. Each side takes them **only from a direct link**, never through another ear.
+- ECDH → HKDF-SHA-256 → two **AES-256-GCM** keys per ear (up and down). The origin ear's key and the packet id are authenticated too, so a changed bit anywhere is rejected. The GCM tag serves as the signature (a shared-key MAC). There's no separate ECDSA signature, so anyone holding that ear's key pair (the ear and the screen) could make it.
+- **Replays:** ids are `epoch.n`. The epoch counts page loads on that phone (kept on the phone), and n counts within one. The receiver keeps the newest ids it took (512 back) and a floor that survives a reload. Old, repeated or out-of-window ids are rejected.
+- Direct links are unchanged: plain messages over the WebRTC (DTLS) link, as before.
+
+**How far to trust it.** Sealing protects against the **ears in between**. It is not a pairing ceremony:
+
+- In relay mode the public keys are swapped over the direct WebRTC link, whose DTLS fingerprints are themselves exchanged through the PeerJS relay. Someone controlling that relay at pairing time could sit in the middle. Nothing compares keys by eye.
+- In hotspot mode the keys ride the data channel that the scanned QR codes set up, which is better: the code carries the DTLS fingerprint.
+- A new key on a direct link replaces the old one (last writer wins), so an ear that re-pairs with a fresh phone storage just works. The same rule would let an impostor with a direct link take over that ear's name.
+- Keys are stored in `localStorage`, extractable, in the clear. Anyone with the phone can read them, and clearing site data makes new ones.
+- An ear that has never had a direct link to this screen can't relay its own data. The screen doesn't know its key yet, so its packets are dropped.
+- **iPhone:** Web Crypto needs a secure context (HTTPS or localhost), the same as the mic. Safari may clear `localStorage` after 7 days without a visit. The ear then re-keys at its next direct link, and until then its relayed packets are dropped.
+
 ## Code
 
 The code is plain JS:
@@ -304,6 +339,8 @@ The code is plain JS:
 - `mesh/core.js`: relay link (with the offline queue and reconnect), clock sync, timing tap, MeshModel estimators, the height fit (`heightFit`), the GPS frame (`Geo`), the post link (`linkPosts`), MapView, SimEngine.
 - `mesh/core.js` also holds the Calibrator. `detector.js` holds the FlightTracker.
 - `mesh/hotspot.js`: hotspot mode: the SDP ⇄ short code packing, offer / answer, the data channel adapter, QR draw and camera scan.
+- `mesh/seal.js`: sealed packets: key pairs, HKDF → AES-GCM keys per ear, the replay window.
+- `mesh/core.js` also holds the multi-hop relay (`NodeLink` neighbours, routes, forwarding; `startHub` opening relayed packets) and `pipe` (in-page links for the demo).
 - `sw.js`: the offline app shell (service worker).
 - `lib/qrcode.min.js`, `lib/jsQR.min.js`: QR encode / decode for hotspot pairing, loaded only in hotspot mode.
 - `mesh/envelope-worklet.js`: the envelope-peak timer and the clap-onset timer.
@@ -330,7 +367,9 @@ Tests use Playwright Chromium with a fake mic: `pip install playwright numpy && 
 - `python3 test/tripwire.py`: segment math and jitter. Then the demo with Alert only on crossing: silent at confirm, then one alert with an OUT crossing that is logged, reported and exported. Also checks a circle that never crosses (no alert, no beeps), a circle with the toggle off (normal alert plus a crossing alert), drawing, flip, delete and persistence on the plain map, and a line on the street map that keeps lat/lon.
 - `python3 test/linked.py`: two screens linked over the relay, each with 4 simulated phones 30 m apart. Checks each draws the other's drone in its own frame, and a hand-off keeps one drone id across both.
 - `python3 test/offline.py`: the dropout queue (cap, order, timestamps). Then a screen and an ear over the relay: the ear's link and relay are cut mid-stream, the screen shows "Ear A offline N s" counting up while the ear queues, and after reconnect the chip says "synced N points". The late points are merged in time order into the gap.
-- `python3 test/hotspot.py`: hotspot mode with PeerJS blocked: the screen and two ears pair by pasted codes (both QR codes decode back to the codes), the ears' simulated drone drives the screen to DRONE, a dropped link re-pairs and catches up, and the app shell plus the QR libraries load offline through the service worker.
+- `python3 test/hotspot.py`: hotspot mode with PeerJS blocked: the screen and two ears pair by pasted codes (both QR codes decode back to the codes), the ears' simulated drone drives the screen to DRONE, the two ears pair with each other through the screen and a dropped link carries on via the other ear, a link with no route re-pairs and catches up, and the app shell plus the QR libraries load offline through the service worker.
+- `python3 test/relay.py`: a screen and three ears over the relay. The ears link to each other on their own. Cutting C's links to the screen and A sends C's data via B. Cutting B's link to the screen too gives C → B → A → screen. Chips and the ear's status say "via", each tagged point arrives exactly once, and everything goes direct again when the links come back.
+- `python3 test/sealed.py`: in-page screen and two ears. What the middle ear carries is ciphertext, and it can't open it with its own private key, the screen's public key and the origin's name. A flipped bit in the payload, tag, id or origin is rejected. Replays are rejected, also after the screen reloads. The answers down the path are sealed too.
 - `python3 test/mesh.py circle 4 45 "&bias=30"`: mesh accuracy over the PeerJS relay. Add `CAL=full` or `CAL=quick` to calibrate in the sim and print before/after numbers. It needs a static server on port 5311, for example `python3 -m http.server 5311`.
 
 Serve this repository from the `main` branch root (GitHub Pages). `.nojekyll` keeps Pages from running Jekyll.
