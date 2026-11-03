@@ -17,7 +17,7 @@
 </header>
 <main>
   <section id="left">
-    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div><a id="attrib" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" hidden>© OpenStreetMap contributors</a>
+    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div><div id="blind" hidden></div><a id="attrib" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" hidden>© OpenStreetMap contributors</a>
       <div id="callout" hidden><div class="co-t"></div><div class="co-x"></div><button class="co-go pri">Continue ▶</button><div class="co-arrow"></div></div>
     </div>
     <div id="playbar">
@@ -52,6 +52,32 @@
         <label data-help="Bangalore-style range, 15 to 38 °C. A calm cold night traps sound near the ground so it carries far; a hot sunny day bends sound upward and gives the thermal camera a warm, shimmering background." style="grid-column:span 2">Temperature &amp; time <select id="tod"><option value="coldnight">Cold night · 15 °C, calm, humid</option><option value="mildnight">Mild night · 21 °C</option><option value="mildday" selected>Mild day · 27 °C</option><option value="hotday">Hot day · 38 °C, dry, sunny</option></select></label>
       </div>
       <div id="impact"></div>
+      <div class="row" style="margin-top:8px"><b data-help="ON: the hub works out how far each sense reaches in this weather (shaded circles on the map) and trusts each sense accordingly. In rain or wind it trusts the mics less and asks for a cleaner ladder (4 rungs, because wind makes guy wires sing 3 clean tones). In heat or dust it trusts thermal less. It leans more on radio: two towers that agree can now raise the alarm. OFF: it trusts every sense as on a clear day.">🧭 Weather-aware fusion</b><div class="seg" id="awareSeg"><button data-v="1" class="on">On</button><button data-v="0">Off</button></div></div>
+      <div class="muted small" id="wxpol"></div>
+    </div>
+    <div class="card" id="engcard">
+      <div class="row"><b data-help="New engine: each sense says how often it hears a real drone (Pd) and how often it cries wolf (Pfa) in this weather; the blender adds up the evidence, including 'looked and heard nothing'. Old engine: hand-set weights. Both run side by side so you can compare.">🧮 Fusion engine</b><div class="seg" id="engSeg"><button data-v="lr" class="on">Pd/Pfa (new)</button><button data-v="legacy">Weights (old)</button></div></div>
+      <div class="muted small" id="engp">new — · old —</div>
+      <div class="row" style="margin-top:6px"><b data-help="Record stretches of time when you know no drone is flying. The system counts how often each sense false-alarms here, per weather and day/night, and can use those rates instead of the defaults. A quiet session cancels itself if Remote ID or a confirmed drone shows up.">📒 No-drone log</b></div>
+      <div class="row"><button id="ndBtn">🤫 Mark quiet session</button><button id="ndRec">⏩ Record 10 quiet min</button></div>
+      <div class="row"><button id="ndFit">📊 Fit false-alarm rates</button><button id="ndUse">Use fitted rates</button><button id="ndDl">⬇ JSONL</button></div>
+      <div class="muted small" id="ndstat">0 records logged</div>
+      <div id="ndfit" class="small"></div>
+    </div>
+    <div class="card" id="learncard">
+      <div class="row"><b data-help="Each sound post learns what is normal for each hour of the day, separately for weekdays and weekends: loudness in 12 pitch bands and any steady ladders (an AC, a generator, temple bells). A sound that is normal for this hour stops counting; a new one counts fully. Anything heard during an alarm is never learned, so a drone that comes every night cannot teach itself in. It keeps adapting slowly.">🏠 Learns your place</b><div class="seg" id="learnSeg"><button data-v="1" class="on">On</button><button data-v="0">Off</button></div></div>
+      <div class="grid2">
+        <label data-help="Time of day when the flight starts. Local noise sources follow their schedules.">Flight time <select id="clk"><option value="21720">06:02 · temple bells</option><option value="37260" selected>10:21</option><option value="52200">14:30</option><option value="64920">18:02 · generator + bells</option><option value="84600">23:30 · night</option></select></label>
+        <label>Day <select id="day"><option value="0">Weekday</option><option value="1">Weekend</option></select></label>
+      </div>
+      <div class="muted small">Add local noise (drag it on the map):</div>
+      <div id="srcadd"><button data-s="ac">❄️ AC unit</button><button data-s="road">🛣 Highway</button><button data-s="temple">🔔 Temple bells</button><button data-s="gen">⚡ Generator</button><button data-s="build">🏗 Construction</button></div>
+      <div id="srclist"></div>
+      <div class="row" style="margin-top:8px"><button id="learnBtn" class="pri">🧠 Learning: fast-forward 7 days</button><label class="chk"><input id="heat" type="checkbox"> Normal noise map</label></div>
+      <label class="chk small"><input id="nightly" type="checkbox" checked> A test drone visits every night at 23:30 that week</label>
+      <div id="learnprog" hidden><i></i></div>
+      <div class="muted small" id="learnstat"></div>
+      <button id="try6pm">🕕 Try: drone past a generator + temple at 6 PM</button>
     </div>
     <div class="card" id="geocard">
       <div class="row"><b data-help="Places the 3 × 3 km model on a real map. Tiles come from OpenStreetMap only when Street map is on. Search sends your text once to OpenStreetMap's Nominatim; Use my location stays in this page. Nothing is stored.">📍 Location &amp; map</b>
@@ -115,6 +141,8 @@
 <div id="pop" hidden></div>
 <footer>SkyFuse sim · a toy model for thinking, borrowing Rotor Ear's harmonic-ladder detector. Not a certified system. Assumptions are documented in <code>physics.js</code>.</footer>
 <script src="physics.js"></script>
+<script src="core.js"></script>
+<script src="track.js"></script>
 <script src="sim.js"></script>
 </body>
 </html>

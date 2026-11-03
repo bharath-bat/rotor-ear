@@ -48,3 +48,9 @@ Weather changes apply live. A preset restarts the flight and explains its effect
 - **What happens next**: when fusion crosses 95 %: alert (phone notification mock), camera records, evidence log builds (downloadable JSON), and a checklist (cover, police 112, DGCA Digital Sky). Legal, non-kinetic steps only.
 
 Assumptions and numbers are commented in `physics.js`.
+
+## Engine v2 (quanta spec) — progress
+- **Fusion engine toggle**: Pd/Pfa likelihood-ratio blender (new, default) vs the old hand-set weights; both run side by side, the card shows both confidences and the per-sense evidence.
+- **No-drone log** (spec f, JSONL schema v1): 1 Hz records per sound post / RF tower / camera, weather every 10 s, sys events. *Mark quiet session* certifies no-drone time and auto-cancels if Remote ID or a confirmed track appears. *Fit false-alarm rates* runs `fitPfa` (Jeffreys CI, n_eff from autocorrelation) per weather/day bin; *Use fitted rates* loads bins with ≥ 1 h effective looks into `sensorModel`. *⬇ JSONL* downloads the log.
+- Hardware assumptions: ESP32-S3 nodes with PSRAM (8 s raw audio ring per mic for GCC-PHAT on request), GPS PPS on every node (TDOA on by default), hub T/RH sensor (`soundSpeed`).
+- New pure functions: core.js `parseLog, fitPfa, thresholdForPfa, loadPfaTable, sensorModel, newBlendState, lrBlend`; physics.js `soundSpeed`; track.js (`SkyTrack`) `fitSampleClock`.

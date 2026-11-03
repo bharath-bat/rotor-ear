@@ -1,15 +1,15 @@
 // SkyFuse sim: world, flying objects, fusion brain, key moments, guided tour, response timeline, rendering and UI.
 (function () {
   'use strict';
-  const P = window.SkyPhys, $ = id => document.getElementById(id), OB = P.OBJECTS;
-  const W = 3000, EVAL_DT = 0.5, ALARM = 0.95, clamp = P.clamp;
+  const P = window.SkyPhys, C = window.SkyCore, $ = id => document.getElementById(id), OB = P.OBJECTS;
+  const W = 3000, EVAL_DT = 0.5, ALARM = C.ALARM, clamp = P.clamp;
 
   // ---------- preset layout (metres, origin top-left, y grows south) ----------
   const HUB = { kind: 'hub', id: 'HUB', name: 'hub', x: 1500, y: 1500, h: 10 };
   const sensors = [];
   function buildLayout() {
     sensors.length = 0; let k = 1;
-    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) sensors.push({ kind: 'node', id: 'N' + k, name: 'sound node N' + (k++), x: 750 + c * 500, y: 750 + r * 500, h: 1.5 });
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) sensors.push({ kind: 'node', id: 'N' + k, name: 'sound node N' + k, x: 750 + c * 500, y: 750 + r * 500, h: 1.5, wireD: 0.006 + 0.0003 * (k++ % 10) }); // guy-wire thickness differs a little per post
     sensors.push({ kind: 'tower', id: 'A', name: 'tower A', x: 550, y: 650, h: 30 }, { kind: 'tower', id: 'B', name: 'tower B', x: 2450, y: 700, h: 30 }, { kind: 'tower', id: 'C', name: 'tower C', x: 1500, y: 2500, h: 30 });
     sensors.push({ kind: 'cam', id: 'CAM', name: 'thermal camera', x: 1450, y: 1350, h: 20, az: 45, fov: 7 });
     sensors.push({ kind: 'vib', id: 'VIB', name: 'vibration sensor', x: 1700, y: 1650, h: 12 });
@@ -41,7 +41,10 @@
     t: 0, acc: 0, playing: true, speed: 8, scen: 'suburb', wx: { wind: 3, windFrom: 270, dust: 0, rain: 0, tod: 'mildday' }, preset: null,
     mapMode: 'grid', geo: { lat: 12.9719, lon: 77.6412, name: 'Indiranagar, Bangalore' }, kind: 'small', second: 'jet', height: 60, rid: true, radio: true, route: 0, pauseAt: true,
     tog: { mics: true, lownoise: true, dish: true, ring: true, s3: true, height: true, longlisten: true, rf: true, rid: true, thermal: true, vib: true, fusion: true },
-    sel: null, objs: [], trail: [], done: false, focus: null
+    sel: null, objs: [], trail: [], done: false, focus: null,
+    clock0: 10 * 3600 + 21 * 60, weekend: false,                 // flight start time of day (s) and day type
+    wxAware: true, impact: null, policy: C.NEUTRAL, cov: null,    // 1. weather-aware fusion
+    engine: 'lr', learnOn: true, place: C.newPlace(), srcs: [], heat: false, nightly: true, protect: true, learnedAt: null, srcsAtLearn: '' // 2. place learning
   };
   const TOG = [
     ['mics', '🎙 Sound grid', 'The 16 listening posts. Each one looks for the drone\'s sound ladder.'], ['lownoise', 'Low-noise mics', 'Better microphones with less hiss: faint drones show up sooner.'],
@@ -63,7 +66,7 @@
   function reset() {
     S.t = 0; S.acc = 0; S.done = false; S.focus = null; hideCallout();
     S.objs = [makeObj(S.kind, 1)]; if (S.second) S.objs.push(makeObj(S.second, 2));
-    F = { B: {}, L: -5, p: 0.007, est: null, er: 0, hist: [], cue: false, loc: false, conf: false, alarmT: null, lastMeasT: -99, falseAlarms: 0 };
+    F = { B: {}, Bleg: {}, LR: C.newBlendState({ lambdaD: 1 / 8 }), pLeg: 0.007, pLR: 0.007, L: -5, p: 0.007, est: null, er: 0, hist: [], cue: false, loc: false, conf: false, alarmT: null, lastMeasT: -99, falseAlarms: 0, alarmFalse: null, alarmD: null, falseSnd: 0, fakeVib: 0, familiar: 0 };
     R = { step: 0, recStart: null };
     EV = { points: [], senses: {} };
     firsts = {}; lastState = {}; logLines = []; moments = {};
@@ -71,12 +74,16 @@
     ['r1', 'r2', 'r3', 'r4'].forEach(id => $(id).classList.remove('done'));
     $('dl').disabled = true; $('respstate').textContent = 'starts at 95% fusion confidence'; $('pnmsg').textContent = '—'; $('rectime').textContent = '00:00';
     document.querySelectorAll('#timeline input').forEach(i => i.checked = false);
-    for (const s of sensors) { s.det = false; s.conf = 0; s.hist = []; s.rep = null; s.spec = null; s.cls = null; }
+    for (const s of sensors) { s.det = false; s.conf = 0; s.hist = []; s.rep = null; s.spec = null; s.cls = null; s.sh = []; }
     cam().az = 45;
     moveObjs();
-    log('Flight starts: ' + S.objs.map(o => OB[o.kind].label).join(' + ') + ' · ' + sceneName() + ' · ' + wxName() + ' · map centre ' + llTxt(HUB) + ' (' + S.geo.name + ')', 'fus');
+    log('Flight starts: ' + S.objs.map(o => OB[o.kind].label).join(' + ') + ' · ' + sceneName() + ' · ' + wxName() + ' · map centre ' + llTxt(HUB) + ' (' + S.geo.name + ') · ' + dayTxt() + ' · weather-aware ' + (S.wxAware ? 'ON' : 'OFF') + ' · place learning ' + (S.learnOn ? (learned() ? 'ON' : 'ON (not learned yet)') : 'OFF') + (S.srcs.length ? ' · local noise: ' + S.srcs.map(x => P.SOURCES[x.type].label).join(', ') : ''), 'fus');
     for (const a of AIRPORTS) { const q = fromLL(a.lat, a.lon), d = Math.hypot(clamp(q.x, 0, W) - q.x, clamp(q.y, 0, W) - q.y); if (d < a.r) log('Note: area is within ~' + (a.r / 1000) + ' km of ' + a.name + ' (approx, check Digital Sky before any flying)', 'warn'); }
   }
+  const hourNow = () => ((S.clock0 + S.t) / 3600) % 24, slotNow = () => C.slotOf(hourNow(), S.weekend);
+  const liveDay = () => S.weekend ? 12 : 7;                          // the learning week is days 0-6 (Mon-Sun); "today" comes after
+  const dayTxt = () => S.weekend ? 'weekend' : 'weekday';
+  const learned = () => S.place.samples > 0;
   const envNow = () => ({ scen: S.scen, wind: S.wx.wind, wx: S.wx, tog: S.tog, objs: S.objs });
   const wxName = () => { const w = S.wx; return P.TOD[w.tod].label + ' ' + P.TOD[w.tod].T + ' °C, wind ' + w.wind + ' m/s from ' + P.compass(w.windFrom) + (w.rain ? ', ' + ['', 'drizzle', 'heavy rain'][w.rain] : '') + (w.dust ? ', ' + ['', 'light haze', 'heavy dust'][w.dust] : ''); };
   // ---------- GPS: the 3 x 3 km model is a local flat patch centred on S.geo (map centre = 1500,1500 m) ----------
@@ -124,7 +131,8 @@
 
   // ---------- one sensing + fusion step (every 0.5 s of sim time) ----------
   function evaluate() {
-    const env = envNow(), reps = [], T = S.tog;
+    const env = Object.assign(envNow(), P.activeSources(S.srcs, hourNow(), S.weekend)), reps = [], T = S.tog, pol = S.policy;
+    const slot = slotNow(), useL = S.learnOn && learned(), thr = T.s3 ? 6 : P.HIT_DB, busy = F.p >= 0.25 || F.alarmT != null;
     // sound grid
     for (const n of nodes()) {
       n.h = T.height ? 8 : 1.5;
@@ -132,17 +140,30 @@
       n.rep = null;
       if (!T.mics) { n.det = false; n.conf = 0; n.spec = null; continue; }
       const sp = P.synth(env, n, n.specBuf || (n.specBuf = new Float32Array(P.NB)));
-      const cb = P.comb(sp.db, T.s3 ? 6 : P.HIT_DB);
-      const hit = cb.hits >= 3;
-      n.hist.push(hit ? cb : null); if (n.hist.length > 3) n.hist.shift();
-      const good = n.hist.filter(Boolean);
+      const lads = ladders(sp.db, thr), bands = S.learnOn ? C.bandsOf(sp.db, P.BIN_HZ) : null;
+      let cb = lads[0] || P.comb(sp.db, thr), nov = null, famT = null;
+      if (useL) {                                                           // place learning: is each ladder normal here at this hour?
+        famT = C.familiarTones(S.place, n.id, slot, 0.5);
+        const scored = lads.map(l => ({ l, nv: C.novelty(S.place, n.id, slot, { bands, f0: l.f0 }) }));
+        const fresh = scored.find(x => x.nv.ladder >= 0.5);                 // the first NEW ladder under the familiar ones (generator, bells)
+        const pick = fresh || scored[0];
+        if (pick) { cb = pick.l; nov = pick.nv; } else nov = C.novelty(S.place, n.id, slot, { bands });
+      }
+      const hit = cb.hits >= pol.sndMinHits;                                // weather-aware: 4 rungs needed when wind makes wires sing
+      if (cb.hits >= 3 && !hit) n.rejected = (n.rejected || 0) + 1;
+      n.hist.push(hit ? { cb, nov: nov && nov.ladder != null ? nov.ladder : 1 } : null); if (n.hist.length > 3) n.hist.shift();
+      const good = n.hist.filter(Boolean), gnov = good.length ? good.reduce((a, g) => a + g.nov, 0) / good.length : 1;
       n.det = good.length >= 2;                                             // 2 of last 3 frames agree (stability)
-      n.cls = n.det ? (good.filter(c => c.dense >= 3).length * 2 > good.length ? 'heli' : 'drone') : null; // dense ladder = big slow rotor
-      n.conf = n.det ? clamp((good.reduce((a, c) => a + c.s, 0) / good.length - 2) / 8, 0.2, 1) : 0;
-      n.spec = { db: sp.db, floor: cb.floor, cb, roar: n._roarDb, src: nearestSrc(n, cb) };
+      n.cls = n.det ? (good.filter(g => g.cb.dense >= 3).length * 2 > good.length ? 'heli' : useL && gnov < 0.5 ? 'familiar' : 'drone') : null; // dense = big slow rotor
+      n.conf = n.det ? clamp((good.reduce((a, g) => a + g.cb.s, 0) / good.length - 2) / 8, 0.2, 1) : 0;
+      n.nov = nov; n.spec = { db: sp.db, floor: cb.floor, cb, roar: n._roarDb, src: nearestSrc(n, cb), fam: famT, nov };
+      if (S.learnOn && !useL) n.spec.fam = null;
+      if (S.debug) S.debug.push({ t: S.t, id: n.id, f0s: lads.map(l => Math.round(l.f0) + '/' + l.hits), pick: Math.round(cb.f0), nov: nov && nov.ladder, cls: n.cls, src: !!n.spec.src });
+      if (S.learnOn) C.learn(S.place, n.id, slot, liveDay(), { bands, f0s: lads.map(l => l.f0) }, { alarmActive: busy, protect: S.protect, rate: 0.0005 }); // slow drift
       if (n.det) {
         const src = n.spec.src;
-        n.rep = { kind: 'snd', id: n.id, conf: n.conf, f0: cb.f0, hits: cb.hits, w: cb.s, cls: n.cls, obj: src };
+        if (n.cls === 'drone' && !src) F.falseSnd = (F.falseSnd || 0) + 1;  // a 'drone' ladder no flying object made (wires, generator, bells)
+        n.rep = { kind: 'snd', id: n.id, conf: n.conf, snr: snr3(cb), f0: cb.f0, hits: cb.hits, w: cb.s, cls: n.cls, obj: src, novelty: useL ? gnov : null };
         if (T.ring && src) n.rep.brg = P.bearing(n, src) + P.gauss() * 8;     // ring gives a direction (±8°)
         reps.push(n.rep);
       }
@@ -170,14 +191,83 @@
     }
     c.det = !!c.rep; c.conf = c.rep ? c.rep.conf : 0;
     const v = vib(); v.rep = null;
-    if (T.vib) for (const o of S.objs) { const r = P.vibration(o, v); if (r) { v.rep = Object.assign({ kind: 'vib', id: 'VIB' }, r); reps.push(v.rep); break; } }
-    if (T.vib && !v.rep && Math.random() < P.vibFalseRate(S.wx)) { v.rep = { kind: 'vib', id: 'VIB', conf: 0.4, fake: true }; reps.push(v.rep); } // gust / rain drumming
+    let shake = null;
+    if (T.vib) for (const o of S.objs) { const r = P.vibration(o, v); if (r) { shake = Object.assign({ kind: 'vib', id: 'VIB' }, r); break; } }
+    if (T.vib && !shake && Math.random() < P.vibFalseRate(S.wx)) shake = { kind: 'vib', id: 'VIB', conf: 0.4, fake: true }; // gust / rain drumming
+    v.sh.push(shake ? 1 : 0); if (v.sh.length > 3) v.sh.shift();
+    if (shake && v.sh.reduce((a, b) => a + b, 0) >= pol.vibNeed) { v.rep = shake; reps.push(shake); if (shake.fake) F.fakeVib++; } // weather-aware: 2 shakes needed in gusty/rainy weather
     v.det = !!v.rep;
 
     fuse(reps);
     logTransitions(reps);
     recordEvidence(reps);
+    logSecond(reps);
     response();
+  }
+  // ---------- no-drone log (quanta spec f, JSONL schema v1) ----------
+  // 1 Hz records per sound post / RF tower / camera, weather every 10 s, sys events. Session "nd-…" = operator-certified quiet
+  // time; it auto-cancels (records re-tagged, note logged) the moment Remote ID or a confirmed track appears.
+  const LOG_MAX = 200000, DAY0 = Date.UTC(2026, 10, 2, 18, 30);   // 2026-11-03 00:00 IST
+  const LG = { recs: [], sess: null, n: 0, lastS: -1, lastWx: -99 };
+  const tsNow = () => DAY0 + Math.round((S.clock0 + S.t) * 1000), hodNow = () => Math.floor(hourNow());
+  function logRec(o) { if (LG.recs.length >= LOG_MAX) LG.recs.splice(0, 10000); LG.recs.push(Object.assign({ v: 1, ts: tsNow(), hod: hodNow(), session: LG.sess ? LG.sess.id : 'live', up: true }, o)); }
+  function logSys(event, detail) { logRec({ node: 'HUB', kind: 'sys', event, detail: detail || '' }); }
+  function logSecond(reps) {
+    const s = Math.floor(S.t); if (s === LG.lastS) return; LG.lastS = s;
+    if (LG.sess && (reps.some(r => r.kind === 'rid') || F.conf || F.alarmT != null)) cancelQuiet(reps.some(r => r.kind === 'rid') ? 'Remote ID heard' : 'confirmed track');
+    const T = S.tog, cl = { T: P.TOD[S.wx.tod].T, RH: S.wx.rain ? 92 : P.TOD[S.wx.tod].RH };
+    if (S.t - LG.lastWx >= 10) { LG.lastWx = S.t; logRec({ node: 'HUB', kind: 'wx', t_c: cl.T, rh_pct: cl.RH, p_hpa: 907.5, wind_ms: S.wx.wind, wind_from_deg: S.wx.windFrom, rain_mmh: [0, 2, 20][S.wx.rain || 0], sensor_ok: true }); }
+    const thr = T.s3 ? 6 : P.HIT_DB;
+    for (const n of nodes()) { const cb = n.spec && n.spec.cb;
+      logRec({ node: n.id, kind: 'snd', up: !!T.mics, score: cb ? +cb.s.toFixed(2) : 0, f0_hz: cb && cb.hits >= 3 ? +cb.f0.toFixed(1) : null, hits: cb ? cb.hits : 0, snr_db: cb && snr3(cb) != null ? +snr3(cb).toFixed(1) : null, fam: n.nov && n.nov.ladder != null ? +(1 - n.nov.ladder).toFixed(2) : 0, det: !!(n.rep && n.rep.cls === 'drone'), thr }); }
+    const fl = S.scen === 'city' ? -86 : S.scen === 'night' ? -96 : -93;
+    for (const tw of towers()) { const r = tw.rep;
+      logRec({ node: tw.id, kind: 'rf', up: !!T.rf, band: r ? r.band : '2.4', ch_mhz: r && r.band === '5.8' ? 5745 : 2437, bw_mhz: 5, rssi_max_dbm: r ? +r.rssi.toFixed(1) : +(fl + 4 + P.gauss()).toFixed(1), rssi_mean_dbm: r ? +(r.rssi - 6).toFixed(1) : fl + 1, floor_dbm: fl, occ: r ? 0.3 : 0.05, det: !!r }); }
+    const c = cam(); logRec({ node: 'CAM', kind: 'cam', up: !!T.thermal, cls: c.rep ? c.rep.cls : 'none', conf: c.rep ? +(+c.rep.conf).toFixed(2) : 0, n_obj: c.rep ? 1 : 0, looks: 2, det: !!(c.rep && c.rep.cls === 'drone'), thr: 0.5 });
+    if (LG.sess) LG.sess.secs++;
+    if (s % 2 === 0) logUI();
+  }
+  function startQuiet() { LG.n++; LG.sess = { id: 'nd-' + String(LG.n).padStart(4, '0'), secs: 0 }; logSys('start', 'operator: quiet session, no drones expected'); log('No-drone log: quiet session ' + LG.sess.id + ' started', 'fus'); logUI(); }
+  function stopQuiet() { if (!LG.sess) return; logSys('stop', 'operator ended quiet session'); log('No-drone log: quiet session ' + LG.sess.id + ' ended (' + LG.sess.secs + ' s certified)', 'fus'); LG.sess = null; logUI(); }
+  function cancelQuiet(why) {
+    const id = LG.sess.id, cutFrom = tsNow() - 5 * 60000;
+    for (const r of LG.recs) if (r.session === id) r.session = 'void-' + id.slice(3);   // whole session voided (covers the ±5 min cut)
+    LG.sess = null; logSys('operator_note', 'quiet session ' + id + ' auto-cancelled: ' + why + ' (records from ' + new Date(cutFrom).toISOString() + ' on voided)');
+    log('No-drone log: quiet session ' + id + ' AUTO-CANCELLED — ' + why + '; its records will not be used to fit false-alarm rates', 'warn'); logUI();
+  }
+  function fitFromLog() {
+    const recs = C.parseLog(LG.recs.map(r => JSON.stringify(r)).join('\n')).records, out = [];
+    for (const kind of ['snd', 'rf', 'cam']) for (const b of C.fitPfa(recs, { kind }).bins) out.push(Object.assign({ kind }, b));
+    return out;
+  }
+  function logUI() {
+    const el = $('ndstat'); if (!el) return; const nd = LG.recs.filter(r => typeof r.session === 'string' && r.session.startsWith('nd-') && r.kind === 'snd').length / Math.max(1, nodes().length);
+    $('ndBtn').textContent = LG.sess ? '⏹ End quiet session ' + LG.sess.id : '🤫 Mark quiet session';
+    el.textContent = LG.recs.length.toLocaleString() + ' records logged' + (LG.sess ? ' · ' + LG.sess.id + ' running, ' + LG.sess.secs + ' s' : '') + ' · ' + Math.round(nd) + ' s certified quiet';
+  }
+  function showFit() {
+    const bins = fitFromLog(), byK = {};
+    for (const b of bins) { const k = b.kind + '|' + b.key; (byK[k] = byK[k] || { kind: b.kind, key: b.key, k: 0, n: 0, nEff: 0 }); byK[k].k += b.k; byK[k].n += b.n; byK[k].nEff += b.nEff; }
+    const rows = Object.values(byK).map(r => { const pf = (r.k * r.nEff / r.n + 0.5) / (r.nEff + 1), def = C.sensorModel(r.kind, { wx: S.wx, scen: S.scen }).pfa;
+      return '<tr><td>' + r.kind + '</td><td>' + r.key + '</td><td>' + Math.round(r.n) + '</td><td>' + Math.round(r.nEff) + '</td><td>' + pf.toFixed(4) + '</td><td>' + def.toFixed(3) + '</td></tr>'; });
+    $('ndfit').innerHTML = rows.length ? '<table class="small"><tr><th>sense</th><th>bin</th><th>looks</th><th>n_eff</th><th>fitted Pfa</th><th>default</th></tr>' + rows.join('') + '</table>' : 'No certified quiet records yet — mark a quiet session first.';
+    return bins;
+  }
+  function useFit() {
+    const bins = fitFromLog(), t = { v: 1, sensors: {} };
+    for (const b of bins) if (b.source === 'fit') { const s = t.sensors[b.kind] = t.sensors[b.kind] || {}; (s[b.node] = s[b.node] || []).push({ key: b.key, pfa: b.pfa, lo: b.lo, hi: b.hi, n: b.n, n_eff: b.nEff, k: b.k, source: 'fit' }); }
+    const n = Object.values(t.sensors).reduce((a, s) => a + Object.values(s).reduce((x, r) => x + r.length, 0), 0);
+    C.loadPfaTable(n ? t : null); log(n ? 'Fusion now uses ' + n + ' fitted false-alarm rates from the no-drone log' : 'Not enough certified quiet time per bin (need ≥ 1 h effective); using defaults', 'fus');
+  }
+  function downloadLog() {
+    const blob = new Blob([LG.recs.map(r => JSON.stringify(r)).join('\n') + '\n'], { type: 'application/x-ndjson' }), a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'nodrone-' + new Date(tsNow()).toISOString().slice(0, 10).replace(/-/g, '') + '.jsonl'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  // demo helper: a bird-only quiet stretch, run headless, then the fit table
+  function recordQuiet(mins) {
+    const keep = { kind: S.kind, second: S.second }; S.kind = 'bird'; S.second = ''; reset(); S.objs.forEach(o => o.path = Object.assign({}, o.path, { loop: true })); startQuiet();
+    for (let i = 0; i < mins * 60 / EVAL_DT; i++) { S.t += EVAL_DT; moveObjs(); evaluate(); if (!LG.sess) break; }
+    stopQuiet(); S.kind = keep.kind; S.second = keep.second; reset(); syncUI(); showFit();
   }
   // which object made the ladder this node found (to point the ring's direction arrow at it)
   function nearestSrc(n, cb) {
@@ -188,11 +278,26 @@
 
   // ---------- fusion brain: log-odds evidence, association by place, single-target track ----------
   // Weights = how much one report of that sense is trusted (log-odds units per 0.5 s at confidence 1).
-  const WEIGHT = { rid: 3, cam: 2.5, snd: 0.6, rf: 0.55, vib: 1.5 };
-  // Per-sense caps: RF alone can reach "likely" (~85%) but never the 95% alarm, because a radio blip can't tell a drone
-  // from a WiFi camera. Sound, Remote ID or thermal (or RF + any of them) can. Negative evidence: thermal says bird/aircraft.
-  const CAP = { rid: 12, cam: 12, snd: 9, rf: 6.7, vib: 6 };
+  // Weights, caps and the log-odds blender are in core.js (SkyCore.blend). RF alone can reach ~85% but not the alarm,
+  // unless weather-aware fusion is leaning on radio and 2+ towers agree. Negative evidence: thermal says bird/aircraft.
   const positive = r => r.kind === 'rf' ? true : r.kind === 'snd' ? r.cls === 'drone' : r.kind === 'cam' ? r.cls === 'drone' : true;
+  // sim reports -> likelihood-ratio reports (quanta spec a): SNR in, Pd/Pfa from core.sensorModel. Weak sound "miss": while a
+  // track exists and no post hears it, posts whose live coverage reaches the track say "looked, heard nothing" (area-mean Pd).
+  const snr3 = cb => { const e = (cb.rungs || []).map(r => r.e).sort((a, b) => b - a).slice(0, 3); return e.length ? e.reduce((a, b) => a + b, 0) / e.length : null; };
+  function lrReps(reps) {
+    const fl = S.scen === 'city' ? -86 : S.scen === 'night' ? -96 : -93, out = [];
+    for (const r of reps) {
+      if (r.kind === 'snd') out.push({ kind: 'snd', detected: true, cls: r.cls, snr: r.snr, familiarity: r.novelty != null ? 1 - r.novelty : 0, mismatch: r.mismatch, explain: r.explain });
+      else if (r.kind === 'rf') out.push({ kind: 'rf', detected: true, snr: r.rssi != null ? r.rssi - fl - 6 : null, band: r.band, tower: r.id, mismatch: r.mismatch });
+      else if (r.kind === 'cam') out.push({ kind: 'cam', detected: true, cls: r.cls, explain: r.explain });
+      else out.push({ kind: r.kind, detected: true });
+    }
+    if (F.est && S.tog.mics && !reps.some(r => r.kind === 'snd')) {
+      const reach = (S.policy.cover && S.policy.cover.snd) || 600, ns = nodes(), k = ns.filter(n => Math.hypot(n.x - F.est.x, n.y - F.est.y) < reach).length;
+      if (k) out.push({ kind: 'snd', detected: false, pd: 0.5 * k / ns.length });
+    }
+    return out;
+  }
   function fuse(reps) {
     const T = S.tog;
     const pos = reps.filter(r => positive(r));
@@ -205,26 +310,18 @@
     if (cm) { const c = cam(), rr = cm.r * (1 + P.gauss() * 0.05), b = cm.brg * Math.PI / 180; if (!meas || meas.er > 30) meas = { x: c.x + Math.sin(b) * rr, y: c.y - Math.cos(b) * rr, er: 30, by: 'thermal' }; }
     const rfs = pos.filter(r => r.kind === 'rf');
     if (!meas && rfs.length) {
-      let pts = rfs.map(r => { const t = byId(r.id), rg = clamp(P.rfRange(r.rssi, { scen: S.scen }), 100, 4000), b = r.brg * Math.PI / 180; return { x: t.x + Math.sin(b) * rg, y: t.y - Math.cos(b) * rg, w: r.conf }; });
+      let pts = rfs.map(r => { const t = byId(r.id), rg = clamp(P.rfRange(r.rssi, { scen: S.scen }, r.band), 100, 4000), b = r.brg * Math.PI / 180; return { x: t.x + Math.sin(b) * rg, y: t.y - Math.cos(b) * rg, w: r.conf }; });
       if (F.est && F.p > 0.3) pts = pts.filter(p => Math.hypot(p.x - F.est.x, p.y - F.est.y) < F.er * 2 + 900);
       if (pts.length) { const sw = pts.reduce((a, p) => a + p.w, 0); meas = { x: pts.reduce((a, p) => a + p.x * p.w, 0) / sw, y: pts.reduce((a, p) => a + p.y * p.w, 0) / sw, er: rfs.length > 1 ? 450 : 700, by: 'radio towers' }; }
     }
-    // evidence buckets with decay
-    const B = F.B;
-    for (const k in B) B[k] *= Math.exp(-EVAL_DT / 8);
-    let nS = 0;
-    for (const r of reps) {
-      if (r.kind === 'snd' && r.cls !== 'drone') continue;                  // helicopter-like ladder: no drone evidence
-      if (r.kind === 'cam' && r.cls !== 'drone') { B.cam = Math.max(-4, (B.cam || 0) - 1.5 * r.conf); continue; } // camera says bird/aircraft
-      let w = WEIGHT[r.kind] * r.conf;
-      if (r.kind === 'snd' && ++nS > 4) continue;
-      if (F.est && F.p > 0.3 && r.kind === 'rf' && rayDist(byId(r.id), r.brg, F.est) > F.er + 600) { w *= 0.15; r.mismatch = true; }
-      B[r.kind] = Math.min(CAP[r.kind], (B[r.kind] || 0) + w);
-    }
-    F.L = -5 + Object.values(B).reduce((a, b) => a + b, 0);
-    const pF = 1 / (1 + Math.exp(-F.L));
-    // no fusion: the alarm is simply the most confident single sensor (so false blips / birds raise alarms)
-    F.p = T.fusion ? pF : reps.reduce((a, r) => Math.max(a, r.conf), 0);
+    // evidence: the blender lives in core.js (pure). Geometry checks stay here: does an RF bearing fit the track? do 2+ towers agree?
+    for (const r of rfs) if (F.est && F.p > 0.3 && rayDist(byId(r.id), r.brg, F.est) > F.er + 600) r.mismatch = true;
+    const okRf = rfs.filter(r => !r.mismatch && !r.fake), rfAgree = okRf.length >= 2 && !!triangulate(okRf.map(r => ({ s: byId(r.id), b: r.brg, w: r.conf })));
+    const leg = C.blend(F.Bleg, reps, { dt: EVAL_DT, policy: S.policy, fusion: T.fusion, rfAgree }); F.pLeg = leg.p; // old ad-hoc blender, kept for comparison
+    const lr = C.lrBlend(F.LR, lrReps(reps), { dt: EVAL_DT, wx: S.wx, scen: S.scen }); F.pLR = lr.p;
+    const out = S.engine === 'legacy' ? leg : { L: lr.L, p: T.fusion === false ? leg.p : lr.p };
+    F.B = S.engine === 'legacy' ? F.Bleg : lr.contrib;
+    F.L = out.L; F.p = out.p;                                               // no fusion: the most confident single sensor (false blips raise alarms)
     if (!T.fusion && reps.some(r => r.fake || (r.kind === 'cam' && r.cls !== 'drone') || (r.kind === 'snd' && r.cls !== 'drone'))) F.falseAlarms++;
     // track
     if (meas) {
@@ -241,8 +338,30 @@
       moment('confirm', cam(), '📷 Camera confirms', 'Fusion told the thermal camera where to look. It turned and sees a warm, drone-shaped dot ' + km(cm.r) + ' away. Now it\'s certain.'); }
     if (F.p >= ALARM && F.alarmT == null) {
       F.alarmT = S.t; mark('alarm', T.fusion ? 'Fusion ≥95%' : 'single-sensor alarm');
+      // ground truth check (the sim knows; a real hub doesn't): is a drone anywhere near the guess?
+      const ds = drones(), gp = F.est || HUB; F.alarmD = dh(refObj());
+      F.alarmFalse = !ds.length || Math.min(...ds.map(o => Math.hypot(o.x - gp.x, o.y - gp.y))) > 1200;
+      if (F.alarmFalse) log('⚠ (sim truth) FALSE ALARM: no drone near the guess. Caused by ' + falseCause(reps) + '.', 'warn');
+      // place-learning rule: ladders tied to an alarm are never learned as normal
+      if (S.learnOn) for (const r of snd) if ((r.novelty == null || r.novelty >= 0.5) && !commonHere(r.f0) && C.quarantine(S.place, r.f0, 'alarm at ' + clock(S.t) + ' ' + dayTxt())) log('Place learning: ' + Math.round(r.f0) + ' Hz ladder is tied to this alarm, so it will never be learned as "normal"', 'fus');
       moment('alarm', HUB, '🚨 Alarm: ' + Math.round(F.p * 100) + '% sure', T.fusion ? 'Several different senses agree, so their "maybes" add up past the 95% line. The response steps start now (see the "What happens next" panel).' : 'Fusion is OFF, so one sensor alone set off the alarm.');
     }
+  }
+  // all rotor-like ladders in one spectrum (strongest first): find one, notch it out, look again (max 3)
+  function ladders(db, thr) {
+    const out = []; let d = db;
+    for (let i = 0; i < 3; i++) { const cb = P.comb(d, thr); if (cb.hits < 3) break; out.push(cb); d = C.notch(d, [cb.f0], P.BIN_HZ); }
+    return out;
+  }
+  // a pitch that 2+ posts already know as normal at this hour (bells, generator) was a bystander, not the alarm's cause
+  function commonHere(f0) { const sl = slotNow(); return nodes().filter(n => C.familiarity(S.place, n.id, sl, f0) >= 0.5).length >= 2; }
+  function falseCause(reps) {
+    const s = reps.filter(r => r.kind === 'snd' && r.cls === 'drone');
+    const srcNear = s.map(r => { const n = byId(r.id); return S.srcs.filter(x => P.SOURCES[x.type].snd).sort((a, b) => Math.hypot(a.x - n.x, a.y - n.y) - Math.hypot(b.x - n.x, b.y - n.y))[0]; }).filter(Boolean);
+    if (s.length && srcNear.length) return 'a ' + P.SOURCES[srcNear[0].type].label.toLowerCase() + ' ladder (' + Math.round(s[0].f0) + ' Hz) heard as a drone';
+    if (s.length && S.wx.wind >= 6) return 'wind singing in guy wires (' + Math.round(s[0].f0) + ' Hz, 3 rungs)';
+    if (s.length) return 'a ladder-like sound (' + Math.round(s[0].f0) + ' Hz)';
+    return reps.some(r => r.fake) ? 'clutter / gusts' : 'the evidence mix';
   }
   function triangulate(L) {
     let a = 0, b = 0, c = 0, bx = 0, by = 0;
@@ -266,7 +385,7 @@
   }
 
   // ---------- event log ----------
-  function clock(t) { const s = Math.floor(10 * 3600 + 21 * 60 + t); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map(v => String(v).padStart(2, '0')).join(':'); }
+  function clock(t) { const s = Math.floor(S.clock0 + t) % 86400; return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map(v => String(v).padStart(2, '0')).join(':'); }
   function log(msg, cls) {
     const line = clock(S.t) + ' ' + msg; logLines.push(line);
     const div = document.createElement('div'); div.className = cls || ''; div.textContent = line;
@@ -286,6 +405,8 @@
       else if (r.kind === 'snd') {
         if (r.cls === 'drone') { log('Sound ' + r.id + ' (' + llTxt(s) + '): rotor ladder f0 ' + Math.round(r.f0) + ' Hz, ' + r.hits + ' rungs' + (r.brg != null ? ', from ' + P.compass(r.brg) : ''), 'snd'); mark('snd', 'sound post', r.id);
           moment('snd', s, '🎙 Sound post ' + r.id + ' hears a ladder', 'A hum at ' + Math.round(r.f0) + ' Hz plus exact multiples (' + r.hits + ' rungs) — the fingerprint of spinning propellers. A jet\'s roar or a bird\'s chirp never makes this neat ladder.'); }
+        else if (r.cls === 'familiar') { F.familiar++; const what = srcName(s, r.f0); log('Sound ' + r.id + ': ' + Math.round(r.f0) + ' Hz ladder is NORMAL here at ' + clock(S.t).slice(0, 5) + ' (novelty ' + (r.novelty || 0).toFixed(2) + (what ? ', probably the ' + what : '') + ') → not counted', 'snd');
+          moment('familiar', s, '🏠 Normal for this place', 'Post ' + r.id + ' hears a ' + Math.round(r.f0) + ' Hz ladder' + (what ? ' (the ' + what + ')' : '') + ', but it learned that this sound is here most ' + dayTxt() + 's at this hour. Novelty ' + (r.novelty || 0).toFixed(2) + ', so the blender ignores it and keeps listening underneath for anything new.'); }
         else { log('Sound ' + r.id + ': rotor ladder too dense → big slow rotor (helicopter), NOT counted as a drone', 'warn');
           moment('heli', s, '🚁 Not a drone: helicopter', 'Post ' + r.id + ' hears rotor sound, but the rungs are packed too close (extra peaks between them). That means a huge, slow rotor — a helicopter. Fusion ignores it.'); }
       } else if (r.kind === 'cam') {
@@ -299,6 +420,7 @@
     lastState = now;
   }
 
+  function srcName(n, f0) { let best = null, bd = 1e9; for (const x of S.srcs) { const sp = P.SOURCES[x.type].snd; if (!sp) continue; const b = sp.ladder ? sp.ladder.f0 : sp.partials.hum, d = Math.hypot(x.x - n.x, x.y - n.y); if (Math.abs(b - f0) / b < 0.06 && d < bd) { bd = d; best = x; } } return best ? P.SOURCES[best.type].label.toLowerCase() : ''; }
   // ---------- key moments: pause + callout bubble pointing at the sensor ----------
   function moment(key, sensor, title, text) {
     if (moments[key]) return; moments[key] = { t: S.t, sensor, title, text };
@@ -366,7 +488,8 @@
     if (!drones().length) {
       if (F.alarmT == null) { el.textContent = '✅ Correct: no alarm. It was only ' + S.objs.map(o => OB[o.kind].label.toLowerCase()).join(' + ') + '.'; el.className = 'ok'; log('Flight over: no drone, and no alarm. Correct.', 'ok'); }
       else { el.textContent = '❌ False alarm: no drone was flying.'; el.className = 'bad'; log('Flight over: FALSE ALARM (no drone was flying).', 'warn'); }
-    } else if (real.length) log('Flight over. First detected ' + km(firsts[real[0]].d) + ' out by ' + firsts[real[0]].label + (firsts[real[0]].who ? ' ' + firsts[real[0]].who : '') + (F.alarmT == null ? ', but never reached the alarm line.' : '.'), F.alarmT == null ? 'warn' : 'ok');
+    } else if (F.alarmFalse) { el.textContent = '❌ False alarm first: the alarm went off before the drone was near, because of ' + falseCause([]).replace('the evidence mix', 'local sounds') + '.'; el.className = 'bad'; log('Flight over: the alarm was a FALSE alarm (raised away from the drone).', 'warn'); }
+    else if (real.length) log('Flight over. First detected ' + km(firsts[real[0]].d) + ' out by ' + firsts[real[0]].label + (firsts[real[0]].who ? ' ' + firsts[real[0]].who : '') + (F.alarmT == null ? ', but never reached the alarm line.' : '.'), F.alarmT == null ? 'warn' : 'ok');
     else { log('Flight over: the drone was never detected. Try more senses or a quieter scene.', 'warn'); el.textContent = '❌ Missed: the drone was never detected.'; el.className = 'bad'; }
     if (!S.tog.fusion) log('Without fusion: ' + F.falseAlarms + ' moments where a decoy or clutter alone looked like a drone.', 'warn');
   }
@@ -418,6 +541,9 @@
     c.font = 'bold 13px sans-serif'; c.fillText('N ↑', w - 30, 18);
     const v = vib(); c.fillStyle = '#26324a'; c.fillRect(X(v.x) - 10, X(v.y) - 8, 20, 16);
     drawAirports(c, w, big);
+    drawHeat(c, w, big);
+    drawCoverage(c, w, big);
+    drawSources(c, w, big);
     drawWeather(c, w, big);
     // roar footprint of jets / helicopters
     for (const o of S.objs) if (o.spec.snd.roar) { const x = X(o.x), y = X(o.y), R = X(o.kind === 'jet' ? 1500 : 900); const g = c.createRadialGradient(x, y, 2, x, y, R); g.addColorStop(0, '#9aa5b830'); g.addColorStop(1, '#9aa5b800'); c.fillStyle = g; c.beginPath(); c.arc(x, y, R, 0, 7); c.fill(); }
@@ -428,11 +554,11 @@
       const x = X(s.x), y = X(s.y);
       if (s.kind === 'node') {
         if (s === S.sel && S.tog.mics && S.tog.dish) { c.fillStyle = '#7fd38c18'; wedge(c, x, y, 34, s.dishAz, 44); }
-        if (s.det) { ring(c, x, y, s.cls === 'drone' ? '#7fd38c' : '#ffb86b', pulse); if (s.rep && s.rep.brg != null && s.cls === 'drone') ray(c, x, y, s.rep.brg, X(700), '#7fd38c66'); }
+        if (s.det) { ring(c, x, y, s.cls === 'drone' ? '#7fd38c' : s.cls === 'familiar' ? '#8fb3ff' : '#ffb86b', pulse); if (s.rep && s.rep.brg != null && s.cls === 'drone') ray(c, x, y, s.rep.brg, X(700), '#7fd38c66'); }
         c.fillStyle = S.tog.mics ? (s.det ? (s.cls === 'drone' ? '#a6ffb4' : '#ffb86b') : '#4f8f5a') : '#33465f'; c.beginPath(); c.arc(x, y, s === S.sel ? 6 : 5, 0, 7); c.fill();
         if (s === S.sel) { c.strokeStyle = '#fff'; c.lineWidth = 1.5; c.beginPath(); c.arc(x, y, 9, 0, 7); c.stroke(); c.lineWidth = 1; }
       } else if (s.kind === 'tower') {
-        if (s.rep) { ring(c, x, y, s.rep.fake ? '#ff8a8a' : '#b48cff', pulse); c.fillStyle = s.rep.fake ? '#ff8a8a12' : '#b48cff1a'; wedge(c, x, y, X(Math.min(1300, P.rfRange(s.rep.rssi, { scen: S.scen }))), s.rep.brg, 44); }
+        if (s.rep) { ring(c, x, y, s.rep.fake ? '#ff8a8a' : '#b48cff', pulse); c.fillStyle = s.rep.fake ? '#ff8a8a12' : '#b48cff1a'; wedge(c, x, y, X(Math.min(1300, P.rfRange(s.rep.rssi, { scen: S.scen }, s.rep.band))), s.rep.brg, 44); }
         if (s.ridRep) { ring(c, x, y, '#ffffff', (pulse + 0.5) % 1); c.strokeStyle = '#ffffff30'; c.beginPath(); c.arc(x, y, X(S.scen === 'city' ? 700 : 1000), 0, 7); c.stroke(); }
         c.fillStyle = (S.tog.rf || S.tog.rid) ? '#b48cff' : '#3b3355'; c.beginPath(); c.moveTo(x, y - 10); c.lineTo(x + 8, y + 7); c.lineTo(x - 8, y + 7); c.fill();
         c.fillStyle = '#e6dcff'; c.font = 'bold ' + (14 * big) + 'px sans-serif'; c.fillText(s.id, x + 10, y - 4);
@@ -514,6 +640,60 @@
       for (const [t, dy] of [[t1, 0], [t2, 13 * big]]) { const tw = c.measureText(t).width; c.fillText(t, clamp(lx - tw / 2, 4, w - tw - 4), ly + dy); }
     }
   }
+  // note lines at the bottom-right of the map (row 0 = lowest), above the OSM credit
+  function mapNote(c, w, text, row, col) {
+    c.font = (10.5 * (w > 500 ? 1 : 0.9)) + 'px sans-serif'; const tw = c.measureText(text).width, y = w - 30 - row * 15;
+    c.fillStyle = '#0b1220cc'; c.fillRect(w - tw - 10, y - 11, tw + 7, 14); c.fillStyle = col || '#cfe3ff'; c.fillText(text, w - tw - 6, y);
+  }
+  // 1. live coverage: how far each sense reaches NOW (small quad). Circles ease toward the new size when the weather changes.
+  const covC = document.createElement('canvas');
+  function drawCoverage(c, w) {
+    if (!S.wxAware || !S.policy.cover) return;
+    const tg = S.policy.cover, cv = S.cov || (S.cov = Object.assign({}, tg));
+    for (const k in tg) cv[k] += (tg[k] - cv[k]) * 0.08;
+    const to = ((S.wx.windFrom + 180) % 360) * Math.PI / 180, r = (cv.sndUp + cv.sndDn) / 2, off = (cv.sndDn - cv.sndUp) / 2; // shifted downwind
+    if (S.tog.mics) {
+      if (covC.width !== map.width) { covC.width = map.width; covC.height = map.height; }
+      const k = covC.getContext('2d'); k.setTransform(dpr, 0, 0, dpr, 0, 0); k.clearRect(0, 0, w, w); k.fillStyle = '#7fd38c';
+      for (const n of nodes()) { k.beginPath(); k.arc(X(n.x + Math.sin(to) * off), X(n.y - Math.cos(to) * off), Math.max(2, X(r)), 0, 7); k.fill(); }
+      c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 0.09; c.drawImage(covC, 0, 0); c.restore();
+    }
+    c.lineWidth = 1.2; c.setLineDash([4, 5]);
+    if (S.tog.rid) { c.strokeStyle = '#ffffff30'; for (const t of towers()) { c.beginPath(); c.arc(X(t.x), X(t.y), X(cv.rid), 0, 7); c.stroke(); } }
+    if (S.tog.thermal) { const m = cam(); c.strokeStyle = '#ffb34766'; c.beginPath(); c.arc(X(m.x), X(m.y), X(cv.cam), 0, 7); c.stroke(); }
+    c.setLineDash([]); c.lineWidth = 1;
+    mapNote(c, w, 'reach now (small quad): sound ' + km(r) + ' · Remote ID ' + km(cv.rid) + ' · thermal ' + km(cv.cam) + ' · radio ' + km(cv.rf24), 0, '#b9f5c9');
+  }
+  // 2. "Normal noise heat map": what the posts learned is normal at this hour (inverse-distance blend of the 16 posts)
+  const heatC = document.createElement('canvas'); heatC.width = heatC.height = 40;
+  function drawHeat(c, w) {
+    if (!S.heat) return;
+    const slot = slotNow(), pts = nodes().map(n => ({ n, L: C.normalLevel(S.place, n.id, slot) })).filter(p => p.L != null);
+    if (!pts.length) { mapNote(c, w, 'Normal noise map: nothing learned yet. Tap 🧠 Learning first.', 1, '#ffe48a'); return; }
+    const lo = Math.min(...pts.map(p => p.L)), hi = Math.max(lo + 6, ...pts.map(p => p.L)), k = heatC.getContext('2d'), img = k.createImageData(40, 40);
+    for (let j = 0; j < 40; j++) for (let i = 0; i < 40; i++) {
+      const x = (i + 0.5) * W / 40, y = (j + 0.5) * W / 40; let sw = 0, sv = 0;
+      for (const p of pts) { const d2 = (p.n.x - x) ** 2 + (p.n.y - y) ** 2 + 4e4, wt = 1 / d2; sw += wt; sv += wt * p.L; }
+      const v = clamp((sv / sw - lo) / (hi - lo), 0, 1), o = (j * 40 + i) * 4;
+      img.data[o] = 40 + 215 * v; img.data[o + 1] = 90 + 120 * (1 - Math.abs(v - 0.5) * 2); img.data[o + 2] = 230 * (1 - v); img.data[o + 3] = 150;
+    }
+    k.putImageData(img, 0, 0); c.save(); c.imageSmoothingEnabled = true; c.globalAlpha = 0.5; c.drawImage(heatC, 0, 0, w, w); c.restore();
+    c.font = '10px sans-serif'; c.fillStyle = '#fff';
+    for (const p of pts) { const ft = C.familiarTones(S.place, p.n.id, slot, 0.5); if (ft.length) c.fillText('♪ ' + ft.map(t => Math.round(t.f0)).join(', ') + ' Hz', X(p.n.x) - 18, X(p.n.y) + 17); }
+    mapNote(c, w, 'Normal noise at ' + C.slotName(slot) + ' (learned): blue quiet → red loud, ' + lo.toFixed(0) + '–' + hi.toFixed(0) + ' dB · ♪ = normal ladders', 1, '#ffe48a');
+  }
+  const srcOn = (type, h, we) => type === 'temple' ? (h >= 6 && h < 6.34) || (h >= 18 && h < 18.34) : type === 'build' ? !we && ((h >= 9 && h < 13) || (h >= 14 && h < 18)) : P.srcGain(type, h, we) != null;
+  function drawSources(c, w, big) {
+    const h = hourNow(), pulse = (Date.now() % 1400) / 1400;
+    for (const x of S.srcs) {
+      const sp = P.SOURCES[x.type], on = srcOn(x.type, h, S.weekend), px = X(x.x), py = X(x.y);
+      if (sp.road) { c.strokeStyle = on ? '#c9a46a77' : '#c9a46a33'; c.lineWidth = 7; c.beginPath(); c.moveTo(0, py); c.lineTo(w, py); c.stroke(); c.lineWidth = 1; }
+      if (on) ring(c, px, py, '#ffd34d', pulse);
+      c.globalAlpha = on ? 1 : 0.5; c.fillStyle = '#0b1220cc'; c.beginPath(); c.arc(px, py, 12, 0, 7); c.fill();
+      c.font = (15 * big) + 'px sans-serif'; c.fillText(sp.icon, px - 9, py + 6);
+      c.font = (10.5 * big) + 'px sans-serif'; c.fillStyle = '#ffe9a8'; c.fillText(sp.label + (on ? ' · on' : ' · off now'), px + 14, py + 4); c.globalAlpha = 1;
+    }
+  }
   function drawWeather(c, w, big) {
     const wx = S.wx;
     if (wx.dust) { c.fillStyle = wx.dust === 2 ? '#c8a36a26' : '#c8a36a12'; c.fillRect(0, 0, w, w); }
@@ -542,16 +722,21 @@
     if (sp.roar) { c.fillStyle = '#9aa5b840'; c.beginPath(); c.moveTo(0, h - 14); for (let i = 1; i < nb; i++) c.lineTo(xx(i * P.BIN_HZ), yy(sp.roar[i])); c.lineTo(w, h - 14); c.fill(); }
     c.strokeStyle = '#2b82e8'; c.beginPath(); for (let i = 1; i < nb; i++) { const x = xx(i * P.BIN_HZ), y = yy(sp.db[i]); i > 1 ? c.lineTo(x, y) : c.moveTo(x, y); } c.stroke();
     c.strokeStyle = '#ffffff44'; c.setLineDash([3, 3]); c.beginPath(); for (let i = 1; i < nb; i++) { const x = xx(i * P.BIN_HZ), y = yy(sp.floor[i] + (S.tog.s3 ? 6 : 9)); i > 1 ? c.lineTo(x, y) : c.moveTo(x, y); } c.stroke(); c.setLineDash([]);
+    if (sp.fam) { c.strokeStyle = '#8fb3ff'; c.setLineDash([2, 3]); for (const t of sp.fam) for (let k = 1; k * t.f0 < FM; k++) { c.beginPath(); c.moveTo(xx(k * t.f0), 6); c.lineTo(xx(k * t.f0), h - 14); c.stroke(); } c.setLineDash([]); }
     const cb = sp.cb, ok = cb && cb.hits >= 3, dense = ok && cb.dense >= 3;
     if (ok) for (const r of cb.rungs) if (r.f < FM) { c.fillStyle = dense ? (r.hit ? '#ffb86b' : '#ffb86b33') : (r.hit ? '#ffd34d' : '#ffd34d33'); c.fillRect(xx(r.f) - 2, yy(sp.floor[Math.round(r.f / P.BIN_HZ)] || 0), 4, -Math.max(4, r.e / (hi - lo) * (h - 20))); }
     $('spttl').firstChild.textContent = 'Sound at post ' + n.id + (S.selPinned ? ' (pinned)' : '');
-    $('spinfo').textContent = ok ? (dense ? 'ladder too dense → helicopter, not a drone' : 'drone ladder ' + Math.round(cb.f0) + ' Hz · ' + cb.hits + ' rungs') : 'no ladder' + (S.objs.some(o => o.spec.snd.roar) ? ' (roar only)' : '');
+    const nv = sp.nov && sp.nov.learned ? ' · novelty ' + (sp.nov.ladder != null ? sp.nov.ladder : sp.nov.loud || 0).toFixed(2) : '';
+    $('spinfo').textContent = (ok ? (dense ? 'ladder too dense → helicopter, not a drone' : (n.cls === 'familiar' ? 'normal here: ' : 'drone ladder ') + Math.round(cb.f0) + ' Hz · ' + cb.hits + ' rungs' + (cb.hits < S.policy.sndMinHits ? ' (needs ' + S.policy.sndMinHits + ')' : '')) : 'no ladder' + (S.objs.some(o => o.spec.snd.roar) ? ' (roar only)' : '')) + nv;
   }
   function drawPanel() {
     const p = F.p, st = $('pstate'); $('mfill').style.width = (p * 100).toFixed(1) + '%';
     let cls = '', txt;
     if (p >= ALARM) { cls = 'alarm'; txt = (S.tog.fusion ? 'DRONE ' : 'ALARM ') + Math.round(p * 100) + '%'; } else if (p >= 0.7) { cls = 'likely'; txt = 'Likely ' + Math.round(p * 100) + '%'; } else if (p >= 0.25) { cls = 'maybe'; txt = 'Maybe ' + Math.round(p * 100) + '%'; } else txt = 'Clear ' + Math.round(p * 100) + '%';
     st.className = 'state ' + cls; st.textContent = txt;
+    if ($('engp')) { const nm = { snd: 'sound', rf: 'radio', cam: 'camera', rid: 'Remote ID', vib: 'vibration' }, E = F.LR ? F.LR.E : {};
+      const why = Object.keys(E).filter(k => Math.abs(E[k]) > 0.05).map(k => nm[k] + ' ' + (E[k] > 0 ? '+' : '') + E[k].toFixed(1)).join(', ');
+      $('engp').textContent = 'new ' + Math.round(F.pLR * 100) + '% · old ' + Math.round(F.pLeg * 100) + '%' + (why ? ' · evidence (log-odds): ' + why : ''); }
     $('stCue').classList.toggle('on', F.cue); $('stLoc').classList.toggle('on', F.loc); $('stConf').classList.toggle('on', F.conf);
     $('clock').textContent = clock(S.t) + (S.done ? ' · flight over' : !S.playing ? ' · paused' : '');
   }
@@ -595,11 +780,12 @@
     { t: 'Fusion adds up the maybes', wait: 'alarm', x: 'Each sense gives a score. Fusion adds them up: two different senses agreeing (radio + sound) beat one loud sensor. Scores that point to a different place are mostly ignored, and old evidence fades. When the total crosses <b>95%</b>, the alarm goes off. Below the map the cyan circle is fusion\'s <b>guess</b> of where the drone is.' },
     { t: 'The camera confirms', wait: 'confirm', x: 'Fusion told the thermal camera where to look, so it <b>turned</b> to the guess instead of searching the whole sky. It sees a warm, drone-shaped dot. Shape and motion also let it say "that\'s a bird" or "that\'s a plane", which would <b>lower</b> the score.' },
     { t: 'What happens next', x: 'Look at the <b>What happens next</b> panel: ① an alert goes to phones and a siren/light, ② the camera records, ③ an evidence log builds that you can <b>download</b>, ④ a checklist: go indoors, don\'t approach it, report to <b>police (112)</b> and <b>DGCA Digital Sky</b> with the evidence. All legal, nothing is jammed or shot down.' },
+    { t: 'Knows the weather and your street', x: '<b>Weather-aware:</b> the hub works out how far each sense reaches right now (faint shaded circles). In rain or wind it trusts the mics less, asks for a cleaner ladder, and leans on radio. A red <b>Blind spot</b> banner says so.<br><b>Learns your place:</b> each sound post learns what is normal at each hour, like the evening generator or temple bells. Those stop counting, but a new sound such as a drone still counts fully. Anything tied to an alarm is never learned, so a drone that comes every night can\'t become "normal".<br><button data-try="dusty">🌪 Dusty windy day</button><button data-try="sixpm">🕕 6 PM generator + temple</button>' },
     { t: 'Your turn', x: 'Try a decoy and see fusion stay calm:<br><button data-try="bird">🐦 Bird only</button><button data-try="heli">🚁 Helicopter + small quad</button><button data-try="fpv">⚡ Silent FPV racer</button><br><b>Weather</b> matters too: rain hiss buries the sound ladder, heat and dust blind the thermal camera, radio barely cares.<br><button data-try="monsoon">🌧 Small quad in monsoon rain</button><button data-try="coldnight">🌙 Clear cold night</button><br>Or pick anything from <b>What\'s flying in?</b> Tap any <b>?</b> for help.' }
   ];
   const tour = { on: false, i: 0, waiting: null };
   function startTour() {
-    tour.on = true; tour.i = 0; tour.waiting = null; S.wx = Object.assign({}, PRESETS.clear.wx, { wind: 3 }); S.preset = null; updateImpact(); S.kind = 'small'; S.second = 'jet'; S.route = 0; S.scen = 'suburb'; S.rid = false; S.radio = true; S.height = 60;
+    tour.on = true; tour.i = 0; tour.waiting = null; S.clock0 = 10 * 3600 + 21 * 60; S.weekend = false; S.wx = Object.assign({}, PRESETS.clear.wx, { wind: 3 }); S.preset = null; updateImpact(); S.kind = 'small'; S.second = 'jet'; S.route = 0; S.scen = 'suburb'; S.rid = false; S.radio = true; S.height = 60;
     for (const k in S.tog) S.tog[k] = true; syncUI(); reset(); S.playing = false; setPlay(); showTour();
   }
   function showTour() {
@@ -613,7 +799,7 @@
       const m = st.wait && moments[st.wait]; if (m) showCallout(m.sensor, m.title, m.text, false); else if (tour.i === 0) { hideCallout(); } else if (tour.i === 5) { hideCallout(); document.getElementById('resp').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     }
     $('tourBack').disabled = tour.i === 0; $('tourNext').textContent = tour.i === TOUR.length - 1 ? 'Finish ✓' : 'Next ▶';
-    $('tourText').querySelectorAll('[data-try]').forEach(b => b.onclick = () => { endTour(); const k = b.dataset.try; if (PRESETS[k]) { S.kind = 'small'; S.second = ''; S.height = 60; applyPreset(k); return; } S.kind = k === 'heli' ? 'small' : k; S.second = k === 'heli' ? 'heli' : ''; S.radio = k !== 'fpv'; S.rid = false; S.height = OB[S.kind].h; syncUI(); reset(); S.playing = true; setPlay(); });
+    $('tourText').querySelectorAll('[data-try]').forEach(b => b.onclick = () => { endTour(); const k = b.dataset.try; if (k === 'sixpm') { demo6pm(); return; } if (PRESETS[k]) { S.kind = 'small'; S.second = ''; S.height = 60; applyPreset(k); return; } S.kind = k === 'heli' ? 'small' : k; S.second = k === 'heli' ? 'heli' : ''; S.radio = k !== 'fpv'; S.rid = false; S.height = OB[S.kind].h; syncUI(); reset(); S.playing = true; setPlay(); });
   }
   function tourMoment(key) { if (tour.waiting === key) { tour.waiting = null; showTour(); } }
   function endTour() { tour.on = false; tour.waiting = null; $('tour').hidden = true; hideCallout(); setSpeed(8); }
@@ -631,11 +817,20 @@
   function applyPreset(k) {
     const pr = PRESETS[k]; S.wx = Object.assign({}, pr.wx); S.scen = pr.scen; S.preset = k; syncUI(); reset(); updateImpact();
     const im = P.weatherImpact(envNow()), f = v => (v > 0 ? '+' : '') + v + '%';
-    WXPT.x = 36 / scale; WXPT.y = (map.clientWidth - 106) / scale; S.playing = false; setPlay(); showCallout(WXPT, pr.t, pr.x + ' Estimated vs clear mild day: sound ' + f(im.sound.pct) + ', thermal ' + f(im.thermal.pct) + ', radio ' + f(im.rf24.pct) + '.', true);
+    WXPT.x = 36 / scale; WXPT.y = (map.clientWidth - 106) / scale; S.playing = false; setPlay(); const t = S.policy.trust;
+    showCallout(WXPT, pr.t, pr.x + ' Estimated vs clear mild day: sound ' + f(im.sound.pct) + ', thermal ' + f(im.thermal.pct) + ', radio ' + f(im.rf24.pct) + '.' + (S.wxAware && k !== 'clear' ? ' Weather-aware fusion now trusts sound ×' + t.snd.toFixed(1) + ' and thermal ×' + t.cam.toFixed(1) + ', and leans on radio. The shaded circles show how far each sense reaches now.' : ''), true);
   }
   function wxChanged(full) { S.preset = null; $('wv').textContent = S.wx.wind + ' m/s'; if (full) syncUI(); updateImpact(); }
+  function updatePolicy(im) {
+    S.impact = im; const old = S.policy;
+    S.policy = C.weatherPolicy(im, S.wx, { on: S.wxAware, micWind: S.wx.wind * (S.tog.height ? 1.25 : 1), ridOn: S.objs.some(o => o.ridOn) });
+    const b = $('blind'); b.hidden = !S.policy.banner; b.textContent = S.policy.banner ? '⚠ Blind spot · ' + S.policy.banner : ''; b.classList.toggle('off', !S.wxAware);
+    const t = S.policy.trust, txt = S.wxAware ? 'Weather-aware fusion: trust sound ×' + t.snd.toFixed(2) + ', thermal ×' + t.cam.toFixed(2) + ', vibration ×' + t.vib.toFixed(2) + ', radio ×' + t.rf.toFixed(2) + (S.policy.sndMinHits > 3 ? '; posts need 4 rungs (wind makes wires sing)' : '') + (S.policy.vibNeed > 1 ? '; vibration needs 2 shakes' : '') : 'Weather-aware fusion OFF: every sense trusted as on a clear day';
+    if (logLines && txt !== updatePolicy.last) { updatePolicy.last = txt; if (old !== C.NEUTRAL || S.wxAware) log(txt, 'fus'); }
+    $('wxpol').textContent = txt;
+  }
   function updateImpact() {
-    const im = P.weatherImpact(envNow()), row = (name, m, pct, extra) => {
+    const im = P.weatherImpact(envNow()); updatePolicy(im); const row = (name, m, pct, extra) => {
       const cls = pct > 3 ? 'up' : pct < -3 ? 'dn' : 'eq', w = clamp(100 + pct, 0, 200) / 2;
       return '<span>' + name + '</span><div class="bar" title="' + (extra || '') + '"><i style="width:' + w + '%"></i></div><span class="' + cls + '">' + (pct > 0 ? '+' : '') + pct + '%' + (m != null ? ' · ' + km(m) : '') + '</span>';
     };
@@ -646,6 +841,81 @@
       (() => { const st = P.droneStrain(OB[S.kind], S.wx); return st.wobble ? '<span class="hd">✈ ' + OB[S.kind].label + ' fights the weather: path wobbles ±' + Math.round(st.wobble) + ' m, motors ~' + st.loud.toFixed(1) + ' dB louder</span>' : ''; })();
     document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', b.dataset.p === S.preset));
   }
+  // ---------- place learning UI ----------
+  const SRC_SPOT = { ac: [850, 950], road: [1500, 2700], temple: [1250, 2000], gen: [1900, 1350], build: [2600, 2350] };
+  let srcN = 0;
+  function addSource(type, x, y) {
+    const sp = SRC_SPOT[type], o = { type, id: type + (++srcN), name: P.SOURCES[type].label, x: x != null ? x : sp[0] + (S.srcs.filter(z => z.type === type).length * 160), y: y != null ? y : sp[1] };
+    S.srcs.push(o); renderSrcs(); log('Placed ' + o.name + ' at ' + llTxt(o) + ' (' + P.SOURCES[type].sched + ')', 'fus'); return o;
+  }
+  function renderSrcs() {
+    $('srclist').innerHTML = S.srcs.map((x, i) => '<div><span>' + P.SOURCES[x.type].icon + ' ' + x.name + '</span><span class="muted">' + P.SOURCES[x.type].sched + '</span><button data-i="' + i + '" aria-label="Remove">✕</button></div>').join('');
+    $('srclist').querySelectorAll('button').forEach(b => b.onclick = () => { const x = S.srcs.splice(+b.dataset.i, 1)[0]; log('Removed ' + x.name, 'fus'); renderSrcs(); learnStat(); });
+    learnStat();
+  }
+  const srcKey = () => JSON.stringify(S.srcs.map(x => [x.type, Math.round(x.x / 50), Math.round(x.y / 50)]));
+  function learnStat(extra) {
+    if (!learned()) { $('learnstat').textContent = 'Not learned yet: every sound counts as new. Tap 🧠 Learning to listen to a simulated week first.'; return; }
+    const agg = {};
+    for (const n of nodes()) for (let h = 0; h < 24; h++) for (const t of C.familiarTones(S.place, n.id, h, 0.6)) { const b = C.toneBin(t.f0), a = agg[b] || (agg[b] = { f0: t.f0, nodes: new Set(), hours: new Set() }); a.nodes.add(n.id); a.hours.add(h); }
+    const list = Object.values(agg).sort((a, b) => b.nodes.size - a.nodes.size).slice(0, 4).map(a => Math.round(a.f0) + ' Hz at ' + a.nodes.size + ' posts (' + [...a.hours].sort((x, y) => x - y).map(h => h + 'h').slice(0, 4).join(' ') + ')');
+    const q = S.place.quar.map(z => Math.round(z.f0) + ' Hz (' + z.why + ')');
+    $('learnstat').textContent = 'Learned ' + (S.learnedDays || 7) + ' days, 16 posts, 48 hour-slots. Normal ladders: ' + (list.join('; ') || 'none') + '. Never learned (tied to an alarm): ' + (q.join('; ') || 'none') + '.' + (extra || S.learnNote || '') + (S.srcsAtLearn !== srcKey() ? ' ⚠ Noise sources changed since learning: run it again, or let it drift in over days.' : '');
+  }
+  // Fast-forward a simulated week (every 10 min, all 16 posts) through the real physics: builds each post's normal.
+  // Nightly test drone (optional): hovers between N6 and N7 at 23:30-23:50. The live hub would alarm on it (new ladder at
+  // 2+ posts + radio), and the rule keeps it out of "normal". With the rule off (test API only) it teaches itself in.
+  function learnWeek(opts) {
+    opts = opts || {};
+    return new Promise(res => {
+      const place = C.newPlace(), STEP = 600, total = 7 * 86400 / STEP, ns = nodes(), bufs = ns.map(() => new Float32Array(P.NB)), protect = opts.protect != null ? opts.protect : S.protect;
+      const nightly = opts.nightly != null ? opts.nightly : S.nightly, drone = { kind: 'small', spec: OB.small, x: 1500, y: 1250, h: 60, rpm: 1, loud: 0, phase: 0 }, nights = [];
+      let i = 0; $('learnBtn').disabled = true; $('learnprog').hidden = false; const T = Object.assign({}, S.tog), thr = T.s3 ? 6 : P.HIT_DB;
+      for (const n of ns) n.h = T.height ? 8 : 1.5;
+      function chunk() {
+        const t0 = performance.now();
+        while (i < total && performance.now() - t0 < 30) {
+          const ts = i * STEP, day = Math.floor(ts / 86400), hour = (ts % 86400) / 3600, we = day >= 5, slot = C.slotOf(hour, we), night = hour >= 22 || hour < 6;
+          const visit = nightly && hour >= 23.5 && hour < 23.84; drone.rpm = 1 + 0.03 * Math.sin(i);
+          const env = Object.assign({ scen: night ? 'night' : (S.scen === 'city' ? 'city' : 'suburb'), wx: { wind: 2, windFrom: 270, dust: 0, rain: 0, tod: night ? 'mildnight' : 'mildday' }, tog: T, objs: visit ? [drone] : [] }, P.activeSources(S.srcs, hour, we));
+          const obs = ns.map((n, k) => { const sp = P.synth(env, n, bufs[k]), l = ladders(sp.db, thr); return { n, bands: C.bandsOf(sp.db, P.BIN_HZ), f0s: l.map(x => x.f0) }; });
+          let alarm = false;
+          if (visit) {
+            const nov = obs.map(o => ({ o, f: o.f0s.find(f => Math.abs(f / OB.small.snd.ladder.f0 - 1) < 0.08) })).filter(x => x.f && C.novelty(place, x.o.n.id, slot, { f0: x.f }).ladder >= 0.5);
+            alarm = nov.length >= 2; nights[day] = nights[day] || alarm;
+            if (alarm && protect) for (const x of nov) C.quarantine(place, x.f, 'test drone alarm, night ' + (day + 1));
+          }
+          for (const o of obs) C.learn(place, o.n.id, slot, day, o, { alarmActive: alarm, protect });
+          i++;
+        }
+        $('learnprog').firstChild.style.width = (100 * i / total).toFixed(1) + '%';
+        const d = Math.min(6, Math.floor(i * STEP / 86400));
+        $('learnstat').textContent = 'Listening… day ' + (d + 1) + '/7 (' + ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][d] + ') ' + String(Math.floor((i * STEP % 86400) / 3600)).padStart(2, '0') + ':00';
+        if (i < total) { setTimeout(chunk, 0); return; }
+        S.place = place; S.learnedDays = 7; S.srcsAtLearn = srcKey(); $('learnBtn').disabled = false; $('learnprog').hidden = true;
+        const nA = nights.filter(Boolean).length;
+        S.learnNote = nightly ? ' Test drone at 23:30: alarm on ' + nA + ' of 7 nights' + (protect ? ' (the never-learn-alarms rule kept it new every night).' : ' (rule OFF: it taught itself in).') : '';
+        learnStat(); log('Place learning: listened to a simulated week (' + place.samples + ' samples).' + S.learnNote, 'fus');
+        res({ samples: place.samples, nightsAlarmed: nA, nights: nights.map(Boolean), quarantine: place.quar.map(q => Math.round(q.f0)) });
+        if (!opts.quiet) { let best = null, bn = 0; for (const n of ns) { const k = C.familiarTones(place, n.id, 18, 0.5).length + C.familiarTones(place, n.id, slotNow(), 0.5).length; if (k > bn) { bn = k; best = n; } }
+          S.playing = false; setPlay(); showCallout(best || HUB, '🏠 Learned your place', 'Each post now knows what is normal at each hour: ' + (bn ? 'e.g. post ' + best.id + ' hears a steady ladder most evenings (a generator or bells), so it stops counting. ' : 'nothing ladder-like is regular here. ') + 'A new sound, like a drone, still counts fully. Sounds tied to an alarm are never learned.' + (nightly ? ' The test drone that came every night at 23:30 set off the alarm ' + nA + '/7 nights.' : ''), true); }
+      }
+      chunk();
+    });
+  }
+  function demo6pm() {
+    S.srcs = []; addSource('gen'); addSource('temple'); addSource('ac');
+    S.clock0 = 18 * 3600 + 120; S.weekend = false; S.kind = 'small'; S.second = ''; S.rid = false; S.radio = true; S.route = 0; S.height = 60;
+    S.wx = Object.assign({}, PRESETS.clear.wx); S.scen = 'suburb'; S.preset = null; syncUI(); reset(); updateImpact();
+    S.playing = false; setPlay();
+    showCallout(S.srcs[0], '🕕 6 PM: generator + temple bells', 'The evening power cut starts a generator, and the temple rings its bells. Both make neat sound ladders, just like a drone. A small quad (Remote ID off) will fly past. Place learning is ' + (S.learnOn ? 'ON' : 'OFF') + '. ' + (S.learnOn && (!learned() || S.srcsAtLearn !== srcKey()) ? 'Tap 🧠 Learning first so the posts learn these sounds, then Restart.' : 'Compare with learning ' + (S.learnOn ? 'OFF' : 'ON') + '.'), true);
+  }
+  // headless helpers for tests: run the flight to the end without drawing, and summarise
+  function summary() {
+    return { alarm: F.alarmT != null, alarmFalse: F.alarmFalse, alarmDist: F.alarmD != null ? Math.round(F.alarmD) : null, firsts: Object.fromEntries(Object.entries(firsts).map(([k, v]) => [k, Math.round(v.d)])),
+      falseSnd: F.falseSnd, fakeVib: F.fakeVib, familiar: F.familiar, rejected: nodes().reduce((a, n) => a + (n.rejected || 0), 0) };
+  }
+  function runToEnd(max) { S.pauseAt = false; hideCallout(); for (const n of nodes()) n.rejected = 0; let k = 0; while (!S.done && k++ < (max || 3000)) { S.t += EVAL_DT; moveObjs(); if (S.done) break; evaluate(); } return summary(); }
   // ---------- location UI ----------
   let geoBusy = false;
   function geoStat(msg) { $('geostat').textContent = msg || (S.geo.name + ' · ' + llTxt(HUB) + (S.mapMode === 'street' ? (tiles.failed ? ' · street map unavailable, plain grid' : ' · street map from OpenStreetMap') : '')); }
@@ -693,11 +963,15 @@
       b.onclick = () => { S.tog[k] = !S.tog[k]; b.className = S.tog[k] ? 'on' : ''; updateImpact(); log((S.tog[k] ? 'ON: ' : 'OFF: ') + label.replace(/^\S+ /, ''), 'fus'); }; box.appendChild(b); }
   }
   function syncUI() {
+    document.querySelectorAll('#engSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === S.engine));
     document.querySelectorAll('#picker button').forEach(b => b.classList.toggle('on', b.dataset.k === S.kind));
     $('second').value = S.second; $('route').value = S.route; $('scen').value = S.scen; $('height').value = S.height; $('hv').textContent = S.height + ' m';
     $('wind').value = S.wx.wind; $('wv').textContent = S.wx.wind + ' m/s'; $('wdir').value = S.wx.windFrom; $('dust').value = S.wx.dust; $('rain').value = S.wx.rain; $('tod').value = S.wx.tod;
     $('rid').checked = S.rid; $('radio').checked = S.radio; const dr = OB[S.kind].drone; $('rid').disabled = !dr; $('radio').disabled = !dr;
     document.querySelectorAll('#toggles button').forEach(b => b.className = S.tog[b.dataset.k] ? 'on' : '');
+    $('clk').value = String(S.clock0); $('day').value = S.weekend ? '1' : '0'; $('heat').checked = S.heat; $('nightly').checked = S.nightly;
+    document.querySelectorAll('#awareSeg button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === S.wxAware));
+    document.querySelectorAll('#learnSeg button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === S.learnOn));
   }
   // small "?" next to every control that has data-help
   function buildHelp() {
@@ -727,6 +1001,22 @@
     ['wdir', 'dust', 'rain'].forEach(id => $(id).onchange = e => { S.wx[{ wdir: 'windFrom', dust: 'dust', rain: 'rain' }[id]] = +e.target.value; wxChanged(true); });
     $('tod').onchange = e => { S.wx.tod = e.target.value; const night = P.TOD[S.wx.tod].night; if (night !== (S.scen === 'night')) { S.scen = night ? 'night' : 'suburb'; } wxChanged(true); };
     document.querySelectorAll('#presets button').forEach(b => b.onclick = () => applyPreset(b.dataset.p));
+    // 1. weather-aware fusion on/off (live)   2. place learning
+    document.querySelectorAll('#awareSeg button').forEach(b => b.onclick = () => { S.wxAware = b.dataset.v === '1'; S.cov = null; syncUI(); updateImpact(); });
+    document.querySelectorAll('#engSeg button').forEach(b => b.onclick = () => { S.engine = b.dataset.v; syncUI(); log('Fusion engine: ' + (S.engine === 'lr' ? 'Pd/Pfa evidence (new)' : 'hand-set weights (old)'), 'fus'); });
+    $('ndBtn').onclick = () => LG.sess ? stopQuiet() : startQuiet();
+    $('ndRec').onclick = () => { S.playing = false; setPlay(); recordQuiet(10); };
+    $('ndFit').onclick = () => showFit();
+    $('ndUse').onclick = () => useFit();
+    $('ndDl').onclick = () => downloadLog();
+    document.querySelectorAll('#learnSeg button').forEach(b => b.onclick = () => { S.learnOn = b.dataset.v === '1'; syncUI(); log('Place learning ' + (S.learnOn ? 'ON' : 'OFF'), 'fus'); reset(); S.playing = true; setPlay(); });
+    $('clk').onchange = e => { S.clock0 = +e.target.value; reset(); S.playing = true; setPlay(); };
+    $('day').onchange = e => { S.weekend = e.target.value === '1'; reset(); S.playing = true; setPlay(); };
+    document.querySelectorAll('#srcadd button').forEach(b => b.onclick = () => addSource(b.dataset.s));
+    $('learnBtn').onclick = () => learnWeek();
+    $('heat').onchange = e => S.heat = e.target.checked;
+    $('nightly').onchange = e => S.nightly = e.target.checked;
+    $('try6pm').onclick = demo6pm;
     // map + location
     document.querySelectorAll('#mapSeg button').forEach(b => b.onclick = () => { S.mapMode = b.dataset.v; if (S.mapMode === 'street') { tiles.failed = false; tiles.errors = 0; }
       document.querySelectorAll('#mapSeg button').forEach(x => x.classList.toggle('on', x === b)); geoStat(); });
@@ -743,15 +1033,15 @@
     // drag sensors / tap posts
     let drag = null, moved = false;
     const pos = e => { const r = map.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
-    map.addEventListener('pointerdown', e => { const p = pos(e); let best = null, bd = 24 / scale; for (const s of sensors) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < bd) { bd = d; best = s; } }
+    map.addEventListener('pointerdown', e => { const p = pos(e); let best = null, bd = 24 / scale; for (const s of sensors.concat(S.srcs)) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < bd) { bd = d; best = s; } }
       if (best) { drag = best; S.drag = best; moved = false; map.setPointerCapture(e.pointerId); e.preventDefault(); } });
     map.addEventListener('pointermove', e => { if (!drag) return; const p = pos(e); moved = true; drag.x = clamp(p.x, 0, W); drag.y = clamp(p.y, 0, W); if (drag.kind === 'node' || drag.kind === 'hub') aimDishes(); });
-    const up = () => { if (drag && moved) log('Moved ' + drag.name + ' to ' + llTxt(drag), 'fus'); S.drag = null; if (drag && !moved && drag.kind === 'node') { if (S.sel === drag && S.selPinned) S.selPinned = false; else { S.sel = drag; S.selPinned = true; } } drag = null; };
+    const up = () => { if (drag && moved) { log('Moved ' + drag.name + ' to ' + llTxt(drag), 'fus'); if (!drag.kind) learnStat(); } S.drag = null; if (drag && !moved && drag.kind === 'node') { if (S.sel === drag && S.selPinned) S.selPinned = false; else { S.sel = drag; S.selPinned = true; } } drag = null; };
     map.addEventListener('pointerup', up); map.addEventListener('pointercancel', up);
     window.addEventListener('resize', resize);
   }
 
-  buildLayout(); buildPicker(); buildLegend(); buildToggles(); buildHelp(); bind(); syncUI(); resize(); reset(); updateImpact(); geoStat();
-  window.SkyFuse = { applyPreset, setGeo, toLL, fromLL, tiles, updateImpact, S, F: () => F, firsts: () => firsts, moments: () => moments, tour, evidenceReport, reset, startTour, syncUI, setSpeed };
+  buildLayout(); buildPicker(); buildLegend(); buildToggles(); buildHelp(); bind(); syncUI(); resize(); reset(); updateImpact(); geoStat(); renderSrcs();
+  window.SkyFuse = { learnWeek, demo6pm, addSource, runToEnd, summary, policy: () => S.policy, place: () => S.place, applyPreset, setGeo, toLL, fromLL, tiles, updateImpact, S, F: () => F, firsts: () => firsts, moments: () => moments, tour, evidenceReport, reset, startTour, syncUI, setSpeed };
   requestAnimationFrame(frame);
 })();
