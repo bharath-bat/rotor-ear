@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SkyFuse sim · passive drone-detection fusion simulator</title>
+<meta name="description" content="Browser simulator of a passive, multi-sensor drone detection fusion system: sound grid, RF listeners, Remote ID, thermal camera, vibration sensor.">
+<meta name="theme-color" content="#0b1220">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🛡️%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="banner">🛡️ <b>Passive only:</b> every sensor here only <i>listens</i>. Nothing transmits at the drone, nothing is jammed or decoded. Ranges are rough model estimates, not measurements.</div>
+<header><h1>SkyFuse <span>sim</span></h1><div class="sub">3 × 3 km · sound grid + RF + Remote ID + thermal + vibration → fusion</div></header>
+<main>
+  <section id="left">
+    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div><div id="hint">Drag any sensor · tap a sound node to hear/see its spectrum</div></div>
+    <div id="playbar">
+      <button id="play" class="pri">⏸ Pause</button>
+      <button id="restart">↺ Restart</button>
+      <label>Speed <select id="speed"><option>1</option><option>5</option><option selected>10</option><option>20</option><option>40</option></select>×</label>
+      <button id="listen" title="Hear the synthetic sound at the selected node">🔊 Listen</button>
+    </div>
+    <div id="legend"><span><i class="lg node"></i>sound node</span><span><i class="lg tower"></i>RF + Remote ID tower</span><span><i class="lg cam"></i>thermal cam</span><span><i class="lg vib"></i>vibration</span><span><i class="lg hub"></i>hub</span><span><i class="lg drone"></i>true drone</span><span><i class="lg est"></i>fusion estimate</span><span><i class="lg jet"></i>jet</span></div>
+  </section>
+  <section id="right">
+    <div class="card" id="fusioncard">
+      <div class="row"><b>Fusion confidence</b><span id="pstate" class="state">Clear</span></div>
+      <div id="meter"><div id="mfill"></div><div id="mthr" title="alarm threshold 95%"></div></div>
+      <div id="stages"><span id="stCue">① Cue · RF / Remote ID</span><span id="stLoc">② Localise · sound grid</span><span id="stConf">③ Confirm · thermal</span></div>
+      <div id="first">Waiting for the drone…</div>
+      <div id="firsts"></div>
+    </div>
+    <div class="card" id="resp">
+      <div class="row"><b>What happens next</b><span class="muted" id="respstate">arms at 95% fusion confidence</span></div>
+      <ol id="timeline">
+        <li id="r1"><div class="dot"></div><div class="body"><div class="t">Alert goes out <span class="siren">🚨</span></div>
+          <div class="phone"><div class="pn-app">SkyFuse · now</div><div class="pn-msg" id="pnmsg">—</div></div></div></li>
+        <li id="r2"><div class="dot"></div><div class="body"><div class="t">Camera slews &amp; records <span class="rec" id="rec">● REC <span id="rectime">00:00</span></span></div><div class="muted" id="camtxt">Camera on standby</div></div></li>
+        <li id="r3"><div class="dot"></div><div class="body"><div class="t">Evidence log builds</div><div class="muted" id="evtxt">0 track points</div>
+          <button id="dl" disabled>⬇ Download evidence report</button></div></li>
+        <li id="r4"><div class="dot"></div><div class="body"><div class="t">Checklist</div>
+          <label><input type="checkbox"> Take cover / go indoors, keep people away</label>
+          <label><input type="checkbox"> Don't approach, touch or try to bring it down</label>
+          <label><input type="checkbox"> Report to local police (112) with the evidence report</label>
+          <label><input type="checkbox"> Report to DGCA via Digital Sky with the same evidence</label>
+          <label><input type="checkbox"> Keep the recording &amp; log unedited</label></div></li>
+      </ol>
+      <div class="muted small">Legal, non-kinetic steps only: no jamming, no spoofing, no takedown.</div>
+    </div>
+    <div class="card">
+      <div class="row"><b id="spttl">Spectrum</b><span class="muted" id="spinfo"></span></div>
+      <canvas id="spec"></canvas>
+      <div class="muted small">Rotor Ear's ladder check: yellow bars = harmonic rungs standing ≥ threshold above the local floor. Grey haze = jet roar.</div>
+    </div>
+    <details class="card" open>
+      <summary><b>Drone &amp; scene</b></summary>
+      <div class="grid2">
+        <label>Drone <select id="dtype"><option value="toy">Toy / micro</option><option value="small" selected>Small quad</option><option value="large">Large quad</option></select></label>
+        <label>Route <select id="route"><option value="0">NE → SW over the hub</option><option value="1">East → West, low over the building</option><option value="2">North → South, edge skim</option></select></label>
+        <label>Height <input id="height" type="range" min="10" max="120" value="60"><span id="hv">60 m</span></label>
+        <label>Scene <select id="scen"><option value="night">Quiet night</option><option value="city">City day</option><option value="jet" selected>Passing jet overhead</option></select></label>
+        <label>Wind <input id="wind" type="range" min="0" max="12" value="3"><span id="wv">3 m/s</span></label>
+        <label class="chk"><input id="rid" type="checkbox"> Broadcasts Remote ID</label>
+        <label class="chk"><input id="radio" type="checkbox" checked> Radio link on (off = silent pre-programmed flight)</label>
+      </div>
+    </details>
+    <details class="card" open>
+      <summary><b>Senses &amp; upgrades</b> <span class="muted">(tap to toggle)</span></summary>
+      <div id="toggles"></div>
+    </details>
+    <div class="card"><div class="row"><b>Event log</b><span class="muted">numbers only, no audio leaves a node</span></div><div id="log"></div></div>
+  </section>
+</main>
+<footer>SkyFuse sim · a toy model for thinking, borrowing Rotor Ear's harmonic-ladder detector. Not a certified system. Assumptions are documented in <code>physics.js</code>.</footer>
+<script src="physics.js"></script>
+<script src="sim.js"></script>
+</body>
+</html>
