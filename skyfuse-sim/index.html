@@ -11,32 +11,49 @@
 </head>
 <body>
 <div id="banner">🛡️ <b>Passive only:</b> every sensor here only <i>listens</i>. Nothing transmits at the drone, nothing is jammed or decoded. Ranges are rough model estimates, not measurements.</div>
-<header><h1>SkyFuse <span>sim</span></h1><div class="sub">3 × 3 km · sound grid + RF + Remote ID + thermal + vibration → fusion</div></header>
+<header>
+  <div><h1>SkyFuse <span>sim</span></h1><div class="sub">3 × 3 km · sound grid + radio + Remote ID + thermal + vibration → fusion</div></div>
+  <button id="tourBtn" class="pri big">❓ How it works</button>
+</header>
 <main>
   <section id="left">
-    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div><div id="hint">Drag any sensor · tap a sound node to hear/see its spectrum</div></div>
+    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div>
+      <div id="callout" hidden><div class="co-t"></div><div class="co-x"></div><button class="co-go pri">Continue ▶</button><div class="co-arrow"></div></div>
+    </div>
     <div id="playbar">
       <button id="play" class="pri">⏸ Pause</button>
       <button id="restart">↺ Restart</button>
-      <label>Speed <select id="speed"><option>1</option><option>5</option><option selected>10</option><option>20</option><option>40</option></select>×</label>
-      <button id="listen" title="Hear the synthetic sound at the selected node">🔊 Listen</button>
+      <div class="seg" id="speedSeg" data-help="Slow = real time (1 second = 1 second). Normal = 8× faster. Fast = 30×. A whole flight takes ~5 min in Slow, ~40 s in Normal.">
+        <button data-v="1">🐢 Slow 1×</button><button data-v="8" class="on">Normal 8×</button><button data-v="30">⏩ Fast 30×</button>
+      </div>
+      <label class="chk" data-help="Stops the clock at each key moment (first radio blip, first rotor sound, alarm, camera confirm, decoys spotted) and points at the sensor that fired. Tap Continue to go on."><input id="pauseAt" type="checkbox" checked> Pause at key moments</label>
+      <button id="listen" data-help="Plays a synthetic version of what the selected sound node hears: the rotor ladder, chirps, and roar.">🔊 Listen</button>
     </div>
-    <div id="legend"><span><i class="lg node"></i>sound node</span><span><i class="lg tower"></i>RF + Remote ID tower</span><span><i class="lg cam"></i>thermal cam</span><span><i class="lg vib"></i>vibration</span><span><i class="lg hub"></i>hub</span><span><i class="lg drone"></i>true drone</span><span><i class="lg est"></i>fusion estimate</span><span><i class="lg jet"></i>jet</span></div>
+    <div id="legend"></div>
   </section>
   <section id="right">
+    <div class="card" id="pickcard">
+      <div class="row"><b>What's flying in?</b><span class="muted">tap one · restarts the flight</span></div>
+      <div id="picker"></div>
+      <div class="row2">
+        <label data-help="Add a second thing in the sky at the same time, e.g. a bird or a jet, to see if fusion still picks out the real drone.">Also in the sky
+          <select id="second"><option value="">nothing else</option></select></label>
+        <label data-help="Which way the main object comes in.">Route <select id="route"><option value="0">NE → SW over the hub</option><option value="1">East → West, low over the building</option><option value="2">North → South, edge skim</option></select></label>
+      </div>
+    </div>
     <div class="card" id="fusioncard">
-      <div class="row"><b>Fusion confidence</b><span id="pstate" class="state">Clear</span></div>
+      <div class="row"><b data-help="The fusion brain adds up every sensor's 'maybe'. Agreeing maybes from different senses add up fast; a single radio blip can't reach the alarm line on its own.">Fusion confidence</b><span id="pstate" class="state">Clear</span></div>
       <div id="meter"><div id="mfill"></div><div id="mthr" title="alarm threshold 95%"></div></div>
-      <div id="stages"><span id="stCue">① Cue · RF / Remote ID</span><span id="stLoc">② Localise · sound grid</span><span id="stConf">③ Confirm · thermal</span></div>
-      <div id="first">Waiting for the drone…</div>
+      <div id="stages"><span id="stCue">① Cue · radio / Remote ID</span><span id="stLoc">② Locate · sound grid</span><span id="stConf">③ Confirm · thermal</span></div>
+      <div id="first">Waiting…</div>
       <div id="firsts"></div>
     </div>
     <div class="card" id="resp">
-      <div class="row"><b>What happens next</b><span class="muted" id="respstate">arms at 95% fusion confidence</span></div>
+      <div class="row"><b>What happens next</b><span class="muted" id="respstate">starts at 95% fusion confidence</span></div>
       <ol id="timeline">
         <li id="r1"><div class="dot"></div><div class="body"><div class="t">Alert goes out <span class="siren">🚨</span></div>
           <div class="phone"><div class="pn-app">SkyFuse · now</div><div class="pn-msg" id="pnmsg">—</div></div></div></li>
-        <li id="r2"><div class="dot"></div><div class="body"><div class="t">Camera slews &amp; records <span class="rec" id="rec">● REC <span id="rectime">00:00</span></span></div><div class="muted" id="camtxt">Camera on standby</div></div></li>
+        <li id="r2"><div class="dot"></div><div class="body"><div class="t">Camera turns &amp; records <span class="rec" id="rec">● REC <span id="rectime">00:00</span></span></div><div class="muted" id="camtxt">Camera on standby</div></div></li>
         <li id="r3"><div class="dot"></div><div class="body"><div class="t">Evidence log builds</div><div class="muted" id="evtxt">0 track points</div>
           <button id="dl" disabled>⬇ Download evidence report</button></div></li>
         <li id="r4"><div class="dot"></div><div class="body"><div class="t">Checklist</div>
@@ -49,29 +66,35 @@
       <div class="muted small">Legal, non-kinetic steps only: no jamming, no spoofing, no takedown.</div>
     </div>
     <div class="card">
-      <div class="row"><b id="spttl">Spectrum</b><span class="muted" id="spinfo"></span></div>
+      <div class="row"><b id="spttl" data-help="A drone's propellers make one hum plus exact multiples of it, like rungs of a ladder (yellow bars). A jet is a smeared roar (grey haze), a bird is a lone high chirp, a helicopter's ladder is far too dense. Only a clean ladder counts as a drone.">Sound at a node</b><span class="muted" id="spinfo"></span></div>
       <canvas id="spec"></canvas>
-      <div class="muted small">Rotor Ear's ladder check: yellow bars = harmonic rungs standing ≥ threshold above the local floor. Grey haze = jet roar.</div>
+      <div class="muted small">Yellow bars = ladder rungs (Rotor Ear's check). Grey haze = jet/helicopter roar. Dashed line = detection threshold.</div>
     </div>
-    <details class="card" open>
-      <summary><b>Drone &amp; scene</b></summary>
+    <details class="card">
+      <summary><b>Scene &amp; drone settings</b> <span class="muted">(tap to open)</span></summary>
       <div class="grid2">
-        <label>Drone <select id="dtype"><option value="toy">Toy / micro</option><option value="small" selected>Small quad</option><option value="large">Large quad</option></select></label>
-        <label>Route <select id="route"><option value="0">NE → SW over the hub</option><option value="1">East → West, low over the building</option><option value="2">North → South, edge skim</option></select></label>
-        <label>Height <input id="height" type="range" min="10" max="120" value="60"><span id="hv">60 m</span></label>
-        <label>Scene <select id="scen"><option value="night">Quiet night</option><option value="city">City day</option><option value="jet" selected>Passing jet overhead</option></select></label>
-        <label>Wind <input id="wind" type="range" min="0" max="12" value="3"><span id="wv">3 m/s</span></label>
-        <label class="chk"><input id="rid" type="checkbox"> Broadcasts Remote ID</label>
-        <label class="chk"><input id="radio" type="checkbox" checked> Radio link on (off = silent pre-programmed flight)</label>
+        <label data-help="Background noise. Quiet night lets sound travel far; a busy city day drowns it and fills the air with WiFi.">Scene <select id="scen"><option value="night">Quiet night</option><option value="city">City day</option><option value="suburb" selected>Suburb, daytime</option></select></label>
+        <label data-help="Flying height of the main object. Low drones are harder for radio (buildings block) but can shake a roof.">Height <input id="height" type="range" min="10" max="150" value="60"><span id="hv">60 m</span></label>
+        <label data-help="Wind noise on the mics. A fur windshield is assumed.">Wind <input id="wind" type="range" min="0" max="12" value="3"><span id="wv">3 m/s</span></label>
+        <span></span>
+        <label class="chk" data-help="Remote ID is a public 'here I am' broadcast many new drones send by law. Towers can read it openly within about 1 km.">  <input id="rid" type="checkbox"> Broadcasts Remote ID</label>
+        <label class="chk" data-help="Off = the drone flies a pre-programmed route with its radio silent, so the radio towers can't hear it."><input id="radio" type="checkbox" checked> Radio link on</label>
       </div>
     </details>
-    <details class="card" open>
-      <summary><b>Senses &amp; upgrades</b> <span class="muted">(tap to toggle)</span></summary>
+    <details class="card">
+      <summary><b>Sensors &amp; upgrades</b> <span class="muted">(tap to open, tap a chip to switch)</span></summary>
       <div id="toggles"></div>
     </details>
     <div class="card"><div class="row"><b>Event log</b><span class="muted">numbers only, no audio leaves a node</span></div><div id="log"></div></div>
   </section>
 </main>
+<div id="tour" hidden>
+  <div class="tour-step" id="tourStep"></div>
+  <div class="tour-t" id="tourTitle"></div>
+  <div class="tour-x" id="tourText"></div>
+  <div class="tour-nav"><button id="tourBack">◀ Back</button><button id="tourClose">✕ Exit tour</button><button id="tourNext" class="pri">Next ▶</button></div>
+</div>
+<div id="pop" hidden></div>
 <footer>SkyFuse sim · a toy model for thinking, borrowing Rotor Ear's harmonic-ladder detector. Not a certified system. Assumptions are documented in <code>physics.js</code>.</footer>
 <script src="physics.js"></script>
 <script src="sim.js"></script>
