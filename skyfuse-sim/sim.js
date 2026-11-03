@@ -40,7 +40,8 @@
   const S = {
     t: 0, acc: 0, playing: true, speed: 8, scen: 'suburb', wx: { wind: 3, windFrom: 270, dust: 0, rain: 0, tod: 'mildday' }, preset: null,
     mapMode: 'grid', geo: { lat: 12.9719, lon: 77.6412, name: 'Indiranagar, Bangalore' }, kind: 'small', second: 'jet', height: 60, rid: true, radio: true, route: 0, pauseAt: true,
-    tog: { mics: true, lownoise: true, dish: true, ring: true, s3: true, height: true, longlisten: true, rf: true, rid: true, thermal: true, vib: true, fusion: true },
+    tog: { mics: true, lownoise: true, dish: true, ring: true, s3: true, height: true, longlisten: true, rf: true, rid: true, thermal: true, vib: true, adsb: true, temp: true, pps: true, fusion: true },
+    tracker: true, adsbMissing: 0.2, count: 1, formation: 'spread',
     sel: null, objs: [], trail: [], done: false, focus: null,
     clock0: 10 * 3600 + 21 * 60, weekend: false,                 // flight start time of day (s) and day type
     wxAware: true, impact: null, policy: C.NEUTRAL, cov: null,    // 1. weather-aware fusion
@@ -53,6 +54,9 @@
     ['height', 'Posts on 8 m poles', 'Lifts the mics above walls and street noise.'], ['longlisten', 'Long listening 3 s', 'Averages 3 seconds of sound: a faint steady hum builds up above random noise.'],
     ['rf', '📡 Radio listener', 'Measures how strong drone radio signals are at 2.4/5.8 GHz. Never decodes or transmits.'], ['rid', '🆔 Remote ID', 'Reads the public "here I am" broadcast that many drones send.'],
     ['thermal', '🌡 Thermal cam', 'Sees warm motors against the cool sky, and tells drone vs bird vs aircraft by shape and motion.'], ['vib', '〰 Vibration', 'Feels a big drone flying very low over the building.'],
+    ['adsb', '✈ ADS-B receiver', 'Receive-only 1090 MHz: public position broadcasts from crewed aircraft. Only explains away aircraft sound/heat; never touches drone radio.'],
+    ['temp', '🌡 Hub temp + humidity', 'A shaded temperature/humidity sensor at the hub sets the speed of sound for timing (±0.3 °C). Off: a time-of-day guess (±4 °C).'],
+    ['pps', '🛰 GPS time sync (PPS)', 'Each post timestamps its audio to GPS time (about 1 µs), so arrival-time differences between posts (TDOA) pin the drone down.'],
     ['fusion', '🧠 Fusion', 'Combines all sensors. Off = any single sensor sets off the alarm (expect false alarms).']
   ];
   const PICK = ['toy', 'small', 'large', 'fixed', 'fpv', 'bird', 'jet', 'heli'];
@@ -61,11 +65,24 @@
   function makeObj(kind, role) {
     const sp = OB[kind], path = pathFor(kind, role, S.route);
     return { kind, spec: sp, role, path, x: 0, y: 0, h: role === 1 ? S.height : sp.h, rpm: 1, phase: Math.random() * 6,
-      radioOn: sp.eirp != null && (role === 1 ? S.radio : true), ridOn: role === 1 ? (S.rid && sp.drone) : sp.rid, done: false, trail: [] };
+      radioOn: sp.eirp != null && (role === 1 ? S.radio : true), ridOn: role === 1 ? (S.rid && sp.drone) : sp.rid, done: false, trail: [],
+      adsbOn: !!sp.adsb && Math.random() >= S.adsbMissing, callsign: sp.adsb ? (kind === 'heli' ? 'VT-H' : 'AI') + (100 + Math.floor(Math.random() * 900)) : null, rpm0: 1, idx: 0 };
+  }
+  // multi-drone: extra copies of the main drone. Spread = staggered on the three routes; swarm = one tight formation (5 x 4, 30 m)
+  function makeFleet() {
+    const out = [], n = clamp(S.count | 0, 1, 20);
+    for (let i = 0; i < n; i++) {
+      const o = makeObj(S.kind, 1); o.idx = i; o.rpm0 = i ? 1 + (((i * 7919) % 17) - 8) * 0.006 : 1;      // airframes differ by a few % in rotor pitch
+      if (i) { o.ridOn = o.ridOn && i % 2 === 0;
+        if (S.formation === 'swarm') { const gx = (i % 5) - 2, gy = Math.floor(i / 5) - 1.5; o.path = Object.assign({}, o.path, { pts: o.path.pts.map(p => [p[0] + gx * 30, p[1] + gy * 30]) }); o.h = S.height + (i % 3) * 10; }
+        else { o.path = Object.assign({}, pathFor(S.kind, 1, (S.route + i) % 3), { phase: -i * 9 }); o.path.pts = o.path.pts.map(p => [p[0] + ((i * 37) % 7 - 3) * 60, p[1] + ((i * 53) % 7 - 3) * 60]); o.h = S.height + ((i * 13) % 5) * 10; } }
+      out.push(o);
+    }
+    return out;
   }
   function reset() {
-    S.t = 0; S.acc = 0; S.done = false; S.focus = null; hideCallout();
-    S.objs = [makeObj(S.kind, 1)]; if (S.second) S.objs.push(makeObj(S.second, 2));
+    S.t = 0; S.acc = 0; S.done = false; logNewRun(); S.focus = null; hideCallout();
+    S.objs = makeFleet(); if (S.second) S.objs.push(makeObj(S.second, 2)); TK = { tracks: [], next: 1, scans: 0 }; SB = { scans: 0, covered: 0, droneScans: 0, errSum: 0, errN: 0, falseScans: 0, swaps: 0, locT: 0, locG: 0, last: new Map() };
     F = { B: {}, Bleg: {}, LR: C.newBlendState({ lambdaD: 1 / 8 }), pLeg: 0.007, pLR: 0.007, L: -5, p: 0.007, est: null, er: 0, hist: [], cue: false, loc: false, conf: false, alarmT: null, lastMeasT: -99, falseAlarms: 0, alarmFalse: null, alarmD: null, falseSnd: 0, fakeVib: 0, familiar: 0 };
     R = { step: 0, recStart: null };
     EV = { points: [], senses: {} };
@@ -114,7 +131,7 @@
   const plen = pts => pts.slice(1).reduce((a, p, i) => a + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0);
   function moveObjs() {
     for (const o of S.objs) {
-      const pth = o.path, sp = o.spec; let s = (S.t + pth.phase) * sp.speed;
+      const pth = o.path, sp = o.spec; let s = Math.max(0, S.t + pth.phase) * sp.speed; const px = o.x, py = o.y;
       if (pth.loop) s = s % (plen(pth.pts) * 1.0);
       const p = along(pth.pts, s);
       o.x = p.x; o.y = p.y; o.hd = p.hd;
@@ -122,11 +139,12 @@
       else if (o.role === 1) o.h = S.height;
       const st = P.droneStrain(o.spec, S.wx); o.loud = st.loud;                // bad weather: louder motors, wobbly path
       if (st.wobble) { const t = (p.hd + 90) * Math.PI / 180, off = st.wobble * (0.6 * Math.sin(S.t / 2.3 + o.phase) + 0.4 * Math.sin(S.t / 0.9)); o.x += Math.sin(t) * off; o.y -= Math.cos(t) * off; }
-      o.rpm = 1 + 0.03 * Math.sin(S.t / 3 + o.phase);                     // rotor speed wobble: the whole ladder slides together
+      o.rpm = (o.rpm0 || 1) * (1 + 0.03 * Math.sin(S.t / 3 + o.phase));                     // rotor speed wobble: the whole ladder slides together
       if (sp.snd.chirp) { o.chirping = Math.random() < sp.snd.chirp.duty; o.chirpF = 2600 + Math.random() * 800; }
       if (p.end && !pth.loop) o.done = true;
+      o.vx = (o.x - px) / EVAL_DT; o.vy = (o.y - py) / EVAL_DT;
     }
-    if (S.objs[0].done && !S.done) { S.done = true; S.playing = false; setPlay(); finish(); }
+    if (S.objs.filter(o => o.role === 1).every(o => o.done) && !S.done) { S.done = true; S.playing = false; setPlay(); finish(); }
   }
 
   // ---------- one sensing + fusion step (every 0.5 s of sim time) ----------
@@ -138,7 +156,7 @@
       n.h = T.height ? 8 : 1.5;
       n._focus = S.objs.filter(o => o.spec.drone).sort((a, b) => Math.hypot(a.x - n.x, a.y - n.y) - Math.hypot(b.x - n.x, b.y - n.y))[0] || null;
       n.rep = null;
-      if (!T.mics) { n.det = false; n.conf = 0; n.spec = null; continue; }
+      if (!T.mics) { n.det = false; n.conf = 0; n.spec = null; n.lads = []; continue; }
       const sp = P.synth(env, n, n.specBuf || (n.specBuf = new Float32Array(P.NB)));
       const lads = ladders(sp.db, thr), bands = S.learnOn ? C.bandsOf(sp.db, P.BIN_HZ) : null;
       let cb = lads[0] || P.comb(sp.db, thr), nov = null, famT = null;
@@ -156,6 +174,10 @@
       n.det = good.length >= 2;                                             // 2 of last 3 frames agree (stability)
       n.cls = n.det ? (good.filter(g => g.cb.dense >= 3).length * 2 > good.length ? 'heli' : useL && gnov < 0.5 ? 'familiar' : 'drone') : null; // dense = big slow rotor
       n.conf = n.det ? clamp((good.reduce((a, g) => a + g.cb.s, 0) / good.length - 2) / 8, 0.2, 1) : 0;
+      n.lads = lads.filter(l => l.hits >= pol.sndMinHits).map(l => {          // every ladder this post hears, for the multi-target tracker
+        const nv = useL ? C.novelty(S.place, n.id, slot, { bands, f0: l.f0 }) : null, fam = nv && nv.ladder != null ? 1 - nv.ladder : 0, src = nearestSrc(n, l);
+        return { f0: l.f0, cls: l.dense >= 3 ? 'heli' : fam >= 0.5 ? 'familiar' : 'drone', fam, src, snr: snr3(l), brg: T.ring ? (src ? P.bearing(n, src) + P.gauss() * 8 : Math.random() * 360) : null };
+      }).filter(l => l.cls !== 'familiar');
       n.nov = nov; n.spec = { db: sp.db, floor: cb.floor, cb, roar: n._roarDb, src: nearestSrc(n, cb), fam: famT, nov };
       if (S.learnOn && !useL) n.spec.fam = null;
       if (S.debug) S.debug.push({ t: S.t, id: n.id, f0s: lads.map(l => Math.round(l.f0) + '/' + l.hits), pick: Math.round(cb.f0), nov: nov && nov.ladder, cls: n.cls, src: !!n.spec.src });
@@ -176,7 +198,7 @@
         if (!best && S.scen === 'city' && Math.random() < 0.025) best = { rssi: -79 - Math.random() * 3, band: '2.4', conf: 0.25, brg: Math.random() * 360, fake: true }; // WiFi clutter false blip
         if (best) { tw.rep = Object.assign({ kind: 'rf', id: tw.id }, best); reps.push(tw.rep); }
       }
-      if (T.rid) for (const o of S.objs) { const r = P.rid(o, env, tw); if (r) { tw.ridRep = Object.assign({ kind: 'rid', id: tw.id }, r); reps.push(tw.ridRep); break; } }
+      if (T.rid) for (const o of S.objs) { const r = P.rid(o, env, tw); if (r) { tw.ridRep = Object.assign({ kind: 'rid', id: tw.id, serial: '1596F3SIM' + o.role }, r); reps.push(tw.ridRep); break; } }
       tw.det = !!(tw.rep || tw.ridRep); tw.conf = Math.max(tw.rep ? tw.rep.conf : 0, tw.ridRep ? 1 : 0);
     }
     // thermal camera: patrols when uncued; turns to the fusion track when cued (30°/s)
@@ -207,16 +229,41 @@
   // ---------- no-drone log (quanta spec f, JSONL schema v1) ----------
   // 1 Hz records per sound post / RF tower / camera, weather every 10 s, sys events. Session "nd-…" = operator-certified quiet
   // time; it auto-cancels (records re-tagged, note logged) the moment Remote ID or a confirmed track appears.
-  const LOG_MAX = 200000, DAY0 = Date.UTC(2026, 10, 2, 18, 30);   // 2026-11-03 00:00 IST
-  const LG = { recs: [], sess: null, n: 0, lastS: -1, lastWx: -99 };
-  const tsNow = () => DAY0 + Math.round((S.clock0 + S.t) * 1000), hodNow = () => Math.floor(hourNow());
+  var LOG_MAX = 200000, DAY0 = Date.UTC(2026, 10, 2, 18, 30);   // 2026-11-03 00:00 IST
+  var LG = { recs: [], ss: { mode: 'IDLE', seq: 0 }, sess: null, lastS: -1, lastWx: -99, off: 0, lastWet: null };   // var: reset() may run first
+  // each flight restart moves the log clock forward by whole days, so ts stays increasing and hod stays true
+  function logNewRun() { if (!LG || !LG.recs.length) return; const last = LG.recs[LG.recs.length - 1].ts, start = DAY0 + Math.round(S.clock0 * 1000);
+    LG.off = Math.max(0, Math.ceil((last + 1000 - start) / 86400000)) * 86400000; LG.lastS = -1; LG.lastWx = -99; }
+  const tsNow = () => DAY0 + LG.off + Math.round((S.clock0 + S.t) * 1000), hodNow = () => Math.floor(hourNow());
   function logRec(o) { if (LG.recs.length >= LOG_MAX) LG.recs.splice(0, 10000); LG.recs.push(Object.assign({ v: 1, ts: tsNow(), hod: hodNow(), session: LG.sess ? LG.sess.id : 'live', up: true }, o)); }
-  function logSys(event, detail) { logRec({ node: 'HUB', kind: 'sys', event, detail: detail || '' }); }
+  function logSys(event, detail, extra) { logRec(Object.assign({ node: 'HUB', kind: 'sys', event, detail: detail || '' }, extra || {})); }
+  // rain state (g.6): operator flag + feed. Feed = live Open-Meteo (optional, cached 15 min, real clock) or the sim's own weather.
+  const OM_KEY = 'skyfuse.openmeteo';
+  function omCached() { try { return JSON.parse(localStorage.getItem(OM_KEY) || 'null'); } catch (e) { return null; } }
+  function omPoll(force) {
+    if (!$('omFeed') || !$('omFeed').checked) return; const c = omCached();
+    if (!force && c && Date.now() - c.fetchedAt < C.OPEN_METEO_POLL_MS && c.lat === S.geo.lat && c.lon === S.geo.lon) return;
+    fetch(C.openMeteoUrl(S.geo.lat, S.geo.lon)).then(r => r.json()).then(j => { const d = C.parseOpenMeteo(j); if (d) localStorage.setItem(OM_KEY, JSON.stringify({ d, fetchedAt: Date.now(), lat: S.geo.lat, lon: S.geo.lon })); rainUI(); })
+      .catch(() => { log('Open-Meteo feed unreachable; using the cached value until it is over 1 h old', 'warn'); rainUI(); });
+  }
+  function rainNow() {
+    const live = $('omFeed') && $('omFeed').checked, c = live ? omCached() : null, wf = $('wetFlag') ? $('wetFlag').value : '';
+    const now = live ? Date.now() : tsNow(), feed = live ? (c ? { rain_mmh: c.d.rain_mmh, ts: c.d.ts } : null) : { rain_mmh: [0, 2, 20][S.wx.rain || 0], ts: now };
+    const manual = wf === '' ? null : { wet: wf === '1', ts: (live ? LG.flagReal : LG.flagTs) || now };
+    const rs = C.rainState({ manual, feed, lastWetTs: LG.lastWet, now }); if (feed && feed.rain_mmh >= 0.5 && !rs.feedStale || manual && manual.wet) LG.lastWet = now;
+    return Object.assign(rs, { mmh: feed ? feed.rain_mmh : null, src: live ? 'Open-Meteo' : 'sim weather' });
+  }
+  function rainUI() { const el = $('rainstat'); if (!el) return; const r = rainNow();
+    el.textContent = 'Rain state: ' + r.state + ' (p wet ' + r.pWet.toFixed(2) + ') · feed: ' + r.src + (r.mmh != null ? ' ' + (+r.mmh).toFixed(1) + ' mm/h' : ' none') + (r.feedStale ? ' · feed stale, set the rain flag' : ''); }
   function logSecond(reps) {
     const s = Math.floor(S.t); if (s === LG.lastS) return; LG.lastS = s;
-    if (LG.sess && (reps.some(r => r.kind === 'rid') || F.conf || F.alarmT != null)) cancelQuiet(reps.some(r => r.kind === 'rid') ? 'Remote ID heard' : 'confirmed track');
+    if (LG.ss.mode === 'ARMED') { const rid = reps.find(r => r.kind === 'rid');
+      if (rid) sessEv({ type: 'rid', hash: C.idHash(rid.serial || rid.id) });         // serial stored only as a hash
+      else if (F.conf || F.alarmT != null) sessEv({ type: 'track', confirmed: true, pDrone: F.p, id: 1 });
+      else sessEv({ type: 'tick' }); }
     const T = S.tog, cl = { T: P.TOD[S.wx.tod].T, RH: S.wx.rain ? 92 : P.TOD[S.wx.tod].RH };
-    if (S.t - LG.lastWx >= 10) { LG.lastWx = S.t; logRec({ node: 'HUB', kind: 'wx', t_c: cl.T, rh_pct: cl.RH, p_hpa: 907.5, wind_ms: S.wx.wind, wind_from_deg: S.wx.windFrom, rain_mmh: [0, 2, 20][S.wx.rain || 0], sensor_ok: true }); }
+    if (S.t - LG.lastWx >= 10) { LG.lastWx = S.t; const rs = rainNow(), mmh = rs.mmh, now = tsNow();
+      logRec({ node: 'HUB', kind: 'wx', t_c: cl.T, rh_pct: cl.RH, p_hpa: 907.5, wind_ms: S.wx.wind, wind_from_deg: S.wx.windFrom, rain_mmh: mmh, rain_state: rs.state, p_wet: rs.pWet, feed_stale: rs.feedStale, sensor_ok: true }); }
     const thr = T.s3 ? 6 : P.HIT_DB;
     for (const n of nodes()) { const cb = n.spec && n.spec.cb;
       logRec({ node: n.id, kind: 'snd', up: !!T.mics, score: cb ? +cb.s.toFixed(2) : 0, f0_hz: cb && cb.hits >= 3 ? +cb.f0.toFixed(1) : null, hits: cb ? cb.hits : 0, snr_db: cb && snr3(cb) != null ? +snr3(cb).toFixed(1) : null, fam: n.nov && n.nov.ladder != null ? +(1 - n.nov.ladder).toFixed(2) : 0, det: !!(n.rep && n.rep.cls === 'drone'), thr }); }
@@ -227,14 +274,22 @@
     if (LG.sess) LG.sess.secs++;
     if (s % 2 === 0) logUI();
   }
-  function startQuiet() { LG.n++; LG.sess = { id: 'nd-' + String(LG.n).padStart(4, '0'), secs: 0 }; logSys('start', 'operator: quiet session, no drones expected'); log('No-drone log: quiet session ' + LG.sess.id + ' started', 'fus'); logUI(); }
-  function stopQuiet() { if (!LG.sess) return; logSys('stop', 'operator ended quiet session'); log('No-drone log: quiet session ' + LG.sess.id + ' ended (' + LG.sess.secs + ' s certified)', 'fus'); LG.sess = null; logUI(); }
-  function cancelQuiet(why) {
-    const id = LG.sess.id, cutFrom = tsNow() - 5 * 60000;
-    for (const r of LG.recs) if (r.session === id) r.session = 'void-' + id.slice(3);   // whole session voided (covers the ±5 min cut)
-    LG.sess = null; logSys('operator_note', 'quiet session ' + id + ' auto-cancelled: ' + why + ' (records from ' + new Date(cutFrom).toISOString() + ' on voided)');
-    log('No-drone log: quiet session ' + id + ' AUTO-CANCELLED — ' + why + '; its records will not be used to fit false-alarm rates', 'warn'); logUI();
+  // session marking follows core.sessionStep (spec g.5): IDLE/ARMED, auto-cancel on Remote ID or a confirmed drone track (p >= 0.5)
+  function sessEv(ev) {
+    const was = LG.ss.mode; LG.ss = C.sessionStep(LG.ss, Object.assign({ ts: tsNow() }, ev));
+    if (was === 'IDLE' && LG.ss.mode === 'ARMED') {
+      LG.sess = { id: LG.ss.session, secs: 0 };
+      logSys('nd_start', '', { operator: 'operator', planned_h: ev.hours || 4, note: ev.note || '' });
+      log('No-drone log: quiet session ' + LG.sess.id + ' armed for ' + (ev.hours || 4) + ' h', 'fus');
+    } else if (was === 'ARMED' && LG.ss.mode === 'IDLE') {
+      const L = LG.ss.last; LG.sess = null;
+      logSys('nd_end', '', { session: L.session, reason: L.reason, trigger_ts: L.triggerTs, exclude_from_ts: L.excludeFromTs, trigger_detail: L.detail });
+      if (L.reason === 'rid' || L.reason === 'track') log('No-drone log: quiet session ' + L.session + ' AUTO-CANCELLED — ' + (L.reason === 'rid' ? 'Remote ID heard' : 'confirmed drone track') + '; data from 5 min before is excluded from the false-alarm fit', 'warn');
+      else log('No-drone log: quiet session ' + L.session + ' ended (' + L.reason + ')', 'fus');
+    }
+    logUI();
   }
+  const startQuiet = () => sessEv({ type: 'button', hours: 4, note: 'sim' }), stopQuiet = () => sessEv({ type: 'button_stop' });
   function fitFromLog() {
     const recs = C.parseLog(LG.recs.map(r => JSON.stringify(r)).join('\n')).records, out = [];
     for (const kind of ['snd', 'rf', 'cam']) for (const b of C.fitPfa(recs, { kind }).bins) out.push(Object.assign({ kind }, b));
@@ -269,6 +324,104 @@
     for (let i = 0; i < mins * 60 / EVAL_DT; i++) { S.t += EVAL_DT; moveObjs(); evaluate(); if (!LG.sess) break; }
     stopQuiet(); S.kind = keep.kind; S.second = keep.second; reset(); syncUI(); showFit();
   }
+  // ---------- multi-target tracker (quanta spec c, steps 4-5): NCV EKF per track, GNN (Hungarian) association with the
+  // pitch-signature cost, M-of-N confirm/delete, one LR blender per track, p_any = 1 - Π(1 - p_k). ENU: x east, y north (= -sim y), z AGL.
+  const K = window.SkyTrack, D2R = Math.PI / 180, F0_SIG = 0.015, SCAN = EVAL_DT;
+  var TK = { tracks: [], next: 1, scans: 0 }, SB = null;   // var: reset() may run before this line
+  const enu = s => [s.x, -s.y, s.h || 0];
+  const trkXY = t => ({ x: t.k.x[0], y: -t.k.x[1] });
+  function cNow(withSensor) {                                                // speed of sound the hub believes (c.3a): hub T/RH sensor or climatology
+    const cl = P.TOD[S.wx.tod], RH = S.wx.rain ? 92 : cl.RH;
+    return withSensor ? { c: P.soundSpeed(cl.T + P.gauss() * 0.3, RH, 907.5), sT: 0.6 } : { c: P.soundSpeed(cl.T - 4, null), sT: 4 };
+  }
+  // measurements this scan: sound bearings (one per node per ladder), RF bearings, RID / thermal positions
+  function trackMeas(reps) {
+    const M = [], T = S.tog, sEl = a => Math.max(8 * D2R / Math.max(Math.sin(a), 0.2), 8 * D2R);
+    for (const n of nodes()) for (const l of n.lads || []) {
+      if (l.brg == null) continue; const s = enu(n), el = l.src ? Math.atan2(l.src.h - s[2], Math.hypot(l.src.x - n.x, l.src.y - n.y)) + P.gauss() * 6 * D2R : null;
+      M.push({ kind: 'snd', node: n, f0: l.f0, cls: l.cls, src: l.src, rep: l.rep, snr: l.snr, fam: l.fam, z: { type: 'bearing', s, az: l.brg * D2R, el, sAz: 8 * D2R, sEl: el != null ? sEl(el) : null } });
+    }
+    for (const r of reps) {
+      if (r.kind === 'rf' && r.brg != null && !r.fake) M.push({ kind: 'rf', rep: r, z: { type: 'bearing', s: enu(byId(r.id)), az: r.brg * D2R, sAz: 22 * D2R } });
+      else if (r.kind === 'rf' && r.fake) M.push({ kind: 'rf', rep: r, z: { type: 'bearing', s: enu(byId(r.id)), az: (r.brg || 0) * D2R, sAz: 22 * D2R } });
+      if (r.kind === 'rid' && r.x != null) M.push({ kind: 'rid', rep: r, z: { type: 'pos', z: [r.x, -r.y, r.h != null ? r.h : S.height], R: [[400, 0, 0], [0, 400, 0], [0, 0, 100]] } });
+      if (r.kind === 'cam' && r.r != null) { const c = cam(), b = r.brg * D2R, rr = r.r; M.push({ kind: 'cam', rep: r, z: { type: 'pos', z: [c.x + Math.sin(b) * rr, -(c.y - Math.cos(b) * rr), r.obj ? r.obj.h : 60], R: [[900, 0, 0], [0, 900, 0], [0, 0, 900]] } }); }
+    }
+    return M;
+  }
+  function newTrack(p, sp, src, f0, t) {
+    const k = K.kfInit({ p, v: [0, 0, 0], sp: [sp, sp, 40], sv: 15 }); k.t = S.t;
+    return { id: TK.next++, k, f0, hist: [], conf: false, born: S.t, lastHit: S.t, B: C.newBlendState({ lambdaD: 1 / 8 }), p: 0.0067, why: {}, explain: null, by: t };
+  }
+  function trackScan(reps) {
+    const T = S.tog; TK.scans++;
+    for (const t of TK.tracks) K.kfPredict(t.k, S.t - t.k.t, 2.0, 0.5), t.k.t = S.t;
+    const M = trackMeas(reps), used = new Array(M.length).fill(false), hit = new Map(), evid = new Map();
+    const addEv = (t, rep) => { if (!evid.has(t)) evid.set(t, []); evid.get(t).push(rep); };
+    // GNN per sensor (each node / tower / camera reports at most one measurement per target): Hungarian over tracks x its measurements
+    const groups = new Map(); M.forEach((m, i) => { const key = m.kind + ':' + (m.node ? m.node.id : m.rep ? m.rep.id : '?'); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(i); });
+    for (const idx of groups.values()) {
+      const tr = TK.tracks; if (!tr.length) break;
+      const cost = tr.map(t => idx.map(i => { const m = M[i], g = K.gate(t.k, m.z); if (!g.ok) return 1e12;
+        const df = m.f0 && t.f0 ? Math.log(m.f0 / t.f0) / F0_SIG : 0; return g.d2 + df * df; }));
+      const a = K.assign(cost, 9.21 + 9);                                   // miss = γ (χ²₂ 0.99) + a 3σ pitch budget; ln det(2πS) cancels between pair and miss
+      a.forEach((j, ti) => { if (j < 0) return; const i = idx[j], m = M[i], t = tr[ti]; const u = K.kfUpdate(t.k, m.z); if (!u.ok) return; used[i] = true; hit.set(t, true); t.lastHit = S.t;
+        if (m.f0) t.f0 = t.f0 ? t.f0 * 0.8 + m.f0 * 0.2 : m.f0;
+        if (m.kind === 'snd') addEv(t, { kind: 'snd', detected: true, cls: m.cls, snr: m.snr, familiarity: m.fam || 0, node: m.node, z: m.z });
+        else if (m.kind === 'rf') addEv(t, { kind: 'rf', detected: true, snr: m.rep.rssi != null ? m.rep.rssi - (S.scen === 'city' ? -86 : S.scen === 'night' ? -96 : -93) - 6 : null, band: m.rep.band, tower: m.rep.id });
+        else addEv(t, { kind: m.kind, detected: true, cls: m.rep.cls }); });
+    }
+    // TDOA (c.3b, every node has GPS PPS): pairs of nodes whose ladders this track took, against the strongest one
+    if (T.pps) { const cc = cNow(T.temp);
+      for (const t of TK.tracks) { const ev = (evid.get(t) || []).filter(e => e.kind === 'snd' && e.node), src = ev.length >= 2 ? ev.map(e => M.find(m => m.node === e.node && m.kind === 'snd' && used[M.indexOf(m)])).find(m => m && m.src) : null;
+        if (!src) continue; const o = src.src, ref = ev.slice().sort((a, b) => (b.snr || 0) - (a.snr || 0))[0].node, cTrue = cNow(true).c;
+        for (const e of ev) { if (e.node === ref) continue; const s1 = enu(e.node), s2 = enu(ref), op = [o.x, -o.y, o.h], r1 = Math.hypot(...op.map((v, i) => v - s1[i])), r2 = Math.hypot(...op.map((v, i) => v - s2[i]));
+          const sT = Math.hypot(60e-6, Math.abs(r1 - r2) * 0.59 * cc.sT / cc.c / cc.c, (S.wx.wind * 0.5) * Math.abs(r1 - r2) / cc.c / cc.c);
+          K.kfUpdate(t.k, { type: 'tdoa', s1, s2, tau: (r1 - r2) / cTrue + P.gauss() * 60e-6, sTau: sT, c: cc.c }); } } }
+    // initiation from unused sound bearings: 2+ posts, pitch within 2 %, crossing > 20° (c.4); RID / thermal positions start a track directly
+    const pool = M.map((m, i) => ({ m, i })).filter(({ m, i }) => !used[i]);
+    for (const { m, i } of pool) if (!used[i] && (m.kind === 'rid' || m.kind === 'cam')) { const t = newTrack(m.z.z, m.kind === 'rid' ? 20 : 40, null, null, m.kind); TK.tracks.push(t); used[i] = true; hit.set(t, true); addEv(t, { kind: m.kind, detected: true, cls: m.rep.cls }); }
+    const snd = pool.filter(({ m, i }) => !used[i] && m.kind === 'snd' && m.cls === 'drone');
+    for (const a of snd) { if (used[a.i]) continue;
+      const mates = snd.filter(b => !used[b.i] && b.m.node !== a.m.node && Math.abs(Math.log(b.m.f0 / a.m.f0)) < 0.02);
+      const sel = [a]; for (const b of mates) if (!sel.some(x => x.m.node === b.m.node)) sel.push(b); if (sel.length < 2) continue;
+      let maxX = 0; for (const x of sel) for (const y of sel) { const d = Math.abs(((x.m.z.az - y.m.z.az) / D2R + 540) % 360 - 180); maxX = Math.max(maxX, Math.min(d, 180 - d)); }
+      if (maxX < 20) continue;
+      const p = triangulate(sel.map(x => ({ s: x.m.node, b: x.m.z.az / D2R, w: 1 }))); if (!p) continue;
+      const t = newTrack([p.x, -p.y, 60], 120, null, a.m.f0, 'sound'); TK.tracks.push(t); hit.set(t, true);
+      for (const x of sel) { used[x.i] = true; K.kfUpdate(t.k, x.m.z); addEv(t, { kind: 'snd', detected: true, cls: 'drone', snr: x.m.snr, familiarity: x.m.fam || 0, node: x.m.node }); }
+    }
+    // M-of-N, deletion, per-track evidence
+    const ctx = { dt: SCAN, wx: S.wx, scen: S.scen }, reach = (S.policy.cover && S.policy.cover.snd) || 600, ns = nodes();
+    for (const t of TK.tracks) {
+      t.hist.push(hit.get(t) ? 1 : 0); if (t.hist.length > 8) t.hist.shift();
+      if (!t.conf && t.hist.slice(-5).reduce((a, b) => a + b, 0) >= 3) t.conf = true;
+      const ev = (evid.get(t) || []).slice(), xy = trkXY(t);
+      // one sound report per track per scan into the blender (n_eff handled by the blender's node cap); miss evidence from posts that should hear it
+      if (!ev.some(e => e.kind === 'snd') && T.mics) { const k = ns.filter(n => Math.hypot(n.x - xy.x, n.y - xy.y) < reach).length; if (k) ev.push({ kind: 'snd', detected: false, pd: 0.5 * k / ns.length }); }
+      if (vib().rep && Math.hypot(xy.x - vib().x, xy.y - vib().y) < 300) ev.push({ kind: 'vib', detected: true });
+      if (T.adsb) for (const e of ev) if (e.kind === 'snd' && e.detected && e.z) { const x = C.adsbExplain({ kind: 'snd', node: e.z.s, az: e.z.az, el: e.z.el, sAz: e.z.sAz, sEl: e.z.sEl, t: S.t, h: t.k.x[2], sH: Math.sqrt(t.k.P[2][2]) }, adsbFeed(), { c: cNow(T.temp).c }); if (x.id) { e.explain = x.factor; t.explain = x; } }
+      const o = C.lrBlend(t.B, ev, ctx); t.p = o.p; t.why = o.contrib;
+    }
+    TK.tracks = TK.tracks.filter(t => { const pos = Math.sqrt(t.k.P[0][0] + t.k.P[1][1]); const h = t.hist.reduce((a, b) => a + b, 0);
+      return !((t.hist.length >= 8 && h <= 1) || S.t - t.lastHit > 10 || pos > 300 || !t.conf && S.t - t.born > 4 && h < 2); });
+    const conf = TK.tracks.filter(t => t.conf), pAny = 1 - conf.reduce((a, t) => a * (1 - t.p), 1);
+    return { pAny, best: conf.slice().sort((a, b) => b.p - a.p)[0] || null };
+  }
+  // scoreboard (sim truth): how much drone-time a confirmed track covers, its error, false tracks, track swaps
+  function scoreScan() {
+    if (!SB) return; SB.scans++; const conf = TK.tracks.filter(t => t.conf), inPlay = drones().filter(o => !o.done && o.x > -200 && o.x < W + 200 && o.y > -200 && o.y < W + 200);
+    // one-to-one (Hungarian, 150 m): a track that sits between two drones covers only one of them
+    const tq = conf.map(trkXY), a = K.assign(inPlay.map(o => tq.map(q => Math.hypot(q.x - o.x, q.y - o.y))), 150);
+    if (F.estG) { const o = inPlay.slice().sort((p, q) => Math.hypot(p.x - F.estG.x, p.y - F.estG.y) - Math.hypot(q.x - F.estG.x, q.y - F.estG.y))[0]; if (o && Math.hypot(o.x - F.estG.x, o.y - F.estG.y) < 150) SB.locG++; }
+    inPlay.forEach((o, i) => { SB.droneScans++; const j = a[i]; if (j == null || j < 0) return; const best = conf[j], bd = Math.hypot(tq[j].x - o.x, tq[j].y - o.y);
+      if (best.p >= ALARM) SB.locT++; SB.covered++; SB.errSum += bd; SB.errN++; const prev = SB.last.get(o); if (prev != null && prev !== best.id) SB.swaps++; SB.last.set(o, best.id); });
+    for (const t of conf) { const q = trkXY(t); if (!drones().some(o => Math.hypot(q.x - o.x, q.y - o.y) < 300)) SB.falseScans++; }
+    SB.maxConf = Math.max(SB.maxConf || 0, conf.length);
+  }
+  const trackStats = () => SB && SB.droneScans ? { locTrk: Math.round(100 * SB.locT / SB.droneScans), locOne: Math.round(100 * SB.locG / SB.droneScans), cover: Math.round(100 * SB.covered / SB.droneScans), err: SB.errN ? Math.round(SB.errSum / SB.errN) : null, falseTrackMin: +(SB.falseScans * EVAL_DT / 60).toFixed(2), swaps: SB.swaps, maxConf: SB.maxConf || 0, drones: drones().length } : null;
+  // passive ADS-B receive feed (synthetic): crewed aircraft that carry a transponder; S.adsbMissing of them do not
+  function adsbFeed() { return S.objs.filter(o => o.adsbOn).map(o => ({ id: o.callsign, x: o.x, y: -o.y, z: o.h, vx: o.vx || 0, vy: -(o.vy || 0), vz: 0, t: S.t })); }
   // which object made the ladder this node found (to point the ring's direction arrow at it)
   function nearestSrc(n, cb) {
     if (!cb || cb.hits < 3) return null; let best = null, be = 1;
@@ -287,7 +440,10 @@
   function lrReps(reps) {
     const fl = S.scen === 'city' ? -86 : S.scen === 'night' ? -96 : -93, out = [];
     for (const r of reps) {
-      if (r.kind === 'snd') out.push({ kind: 'snd', detected: true, cls: r.cls, snr: r.snr, familiarity: r.novelty != null ? 1 - r.novelty : 0, mismatch: r.mismatch, explain: r.explain });
+      if (r.kind === 'snd' && r.cls === 'familiar' && S.famSkip !== false) continue;           // a ladder this place makes every day at this hour: no evidence either way
+      if (r.kind === 'snd') { const ex = S.tog.adsb && r.brg != null ? C.adsbExplain({ kind: 'snd', node: enu(byId(r.id)), az: r.brg * D2R, sAz: 8 * D2R, t: S.t }, adsbFeed(), { c: 343 }) : null;
+        if (ex && ex.id) { F.adsbN = (F.adsbN || 0) + 1; F.adsbWhy = Object.assign({ t: S.t }, ex); }
+        out.push({ kind: 'snd', detected: true, cls: r.cls, snr: r.snr, familiarity: r.novelty != null ? 1 - r.novelty : 0, mismatch: r.mismatch, explain: ex && ex.id ? ex.factor : r.explain }); }
       else if (r.kind === 'rf') out.push({ kind: 'rf', detected: true, snr: r.rssi != null ? r.rssi - fl - 6 : null, band: r.band, tower: r.id, mismatch: r.mismatch });
       else if (r.kind === 'cam') out.push({ kind: 'cam', detected: true, cls: r.cls, explain: r.explain });
       else out.push({ kind: r.kind, detected: true });
@@ -321,6 +477,12 @@
     const lr = C.lrBlend(F.LR, lrReps(reps), { dt: EVAL_DT, wx: S.wx, scen: S.scen }); F.pLR = lr.p;
     const out = S.engine === 'legacy' ? leg : { L: lr.L, p: T.fusion === false ? leg.p : lr.p };
     F.B = S.engine === 'legacy' ? F.Bleg : lr.contrib;
+    // multi-target tracker (needs ring bearings): one blender per confirmed track, p_any; the global blender stays as a comparison readout
+    F.pGlob = lr.p; F.pGlobMax = Math.max(F.pGlobMax || 0, lr.p); F.tr = null;
+    if (T.fusion) { F.tr = trackScan(reps); F.pAny = F.tr.pAny; }
+    const useTrk = S.tracker && T.fusion && T.ring && S.engine === 'lr';
+    // alarm rule: any-drone from the tracks, or the one-blender answer if it is already sure (a single post hearing a far drone makes no track yet)
+    if (useTrk) { out.p = Math.max(F.tr.pAny, lr.p); out.L = Math.log(out.p / (1 - out.p)); F.B = F.tr.best ? F.tr.best.why : lr.contrib; }
     F.L = out.L; F.p = out.p;                                               // no fusion: the most confident single sensor (false blips raise alarms)
     if (!T.fusion && reps.some(r => r.fake || (r.kind === 'cam' && r.cls !== 'drone') || (r.kind === 'snd' && r.cls !== 'drone'))) F.falseAlarms++;
     // track
@@ -330,6 +492,9 @@
       F.by = meas.by; F.lastMeasT = S.t;
       F.hist.push({ t: S.t, x: F.est.x, y: F.est.y }); if (F.hist.length > 400) F.hist.shift();
     } else if (F.est) { F.er = Math.min(1500, F.er + 8 * EVAL_DT); if (S.t - F.lastMeasT > 25) F.est = null; }
+    F.estG = F.est && F.pGlob >= ALARM ? { x: F.est.x, y: F.est.y } : null;   // one-blender answer: one spot, one confidence
+    if (useTrk && F.tr.best) { const b = F.tr.best, e = K.ellipse(b.k, 0.95); F.est = trkXY(b); F.er = Math.max(10, e.a); F.by = 'track T' + b.id; }
+    scoreScan();
     // stages + key moments
     const realRf = rfs.filter(r => !r.mismatch && !r.fake);
     if ((realRf.length || rid) && !F.cue) { F.cue = true; log('Fusion: CUE from ' + (rid ? 'Remote ID' : 'radio tower ' + realRf[0].id) + ' → sound posts listen harder, camera told where to look', 'fus'); }
@@ -574,8 +739,13 @@
     }
     // focus highlight (key moment)
     if (S.focus) { const x = X(S.focus.x), y = X(S.focus.y); c.strokeStyle = '#fff7d6'; c.lineWidth = 3; c.globalAlpha = 1 - pulse * 0.7; c.beginPath(); c.arc(x, y, 12 + pulse * 22, 0, 7); c.stroke(); c.globalAlpha = 1; c.lineWidth = 1; }
+    // tracks: 95 % ellipses (solid = confirmed, dashed = tentative), id and confidence
+    if (S.tog.fusion) for (const t of TK.tracks) { const q = trkXY(t), e = K.ellipse(t.k, 0.95), x = X(q.x), y = X(q.y);
+      c.save(); c.translate(x, y); c.rotate(-e.theta); c.setLineDash(t.conf ? [] : [4, 4]); c.strokeStyle = t.p >= ALARM ? '#ff5d5d' : t.conf ? '#7dffb0' : '#7dffb088';
+      c.beginPath(); c.ellipse(0, 0, Math.max(4, X(e.a)), Math.max(3, X(e.b)), 0, 0, 7); c.stroke(); c.restore(); c.setLineDash([]);
+      if (t.conf) { c.fillStyle = '#7dffb0'; c.font = (11 * big) + 'px sans-serif'; c.fillText('T' + t.id + ' ' + Math.round(t.p * 100) + '%', x + 8, y - 8); } }
     // estimate
-    if (F.est && F.p > 0.15) { const x = X(F.est.x), y = X(F.est.y); c.strokeStyle = '#4fe3ff'; c.fillStyle = '#4fe3ff14'; c.beginPath(); c.arc(x, y, Math.max(7, X(F.er)), 0, 7); c.fill(); c.stroke();
+    if (F.est && F.p > 0.15 && !(S.tracker && S.tog.ring && S.engine === 'lr')) { const x = X(F.est.x), y = X(F.est.y); c.strokeStyle = '#4fe3ff'; c.fillStyle = '#4fe3ff14'; c.beginPath(); c.arc(x, y, Math.max(7, X(F.er)), 0, 7); c.fill(); c.stroke();
       c.beginPath(); c.moveTo(x - 9, y); c.lineTo(x + 9, y); c.moveTo(x, y - 9); c.lineTo(x, y + 9); c.stroke(); c.fillStyle = '#4fe3ff'; c.font = 'bold ' + (12 * big) + 'px sans-serif'; c.fillText('guess ' + Math.round(F.p * 100) + '%', x + 10, y + 16); }
     // objects + trails
     for (const o of S.objs) {
@@ -734,9 +904,11 @@
     let cls = '', txt;
     if (p >= ALARM) { cls = 'alarm'; txt = (S.tog.fusion ? 'DRONE ' : 'ALARM ') + Math.round(p * 100) + '%'; } else if (p >= 0.7) { cls = 'likely'; txt = 'Likely ' + Math.round(p * 100) + '%'; } else if (p >= 0.25) { cls = 'maybe'; txt = 'Maybe ' + Math.round(p * 100) + '%'; } else txt = 'Clear ' + Math.round(p * 100) + '%';
     st.className = 'state ' + cls; st.textContent = txt;
-    if ($('engp')) { const nm = { snd: 'sound', rf: 'radio', cam: 'camera', rid: 'Remote ID', vib: 'vibration' }, E = F.LR ? F.LR.E : {};
+    if ($('engp')) { const nm = { snd: 'sound', rf: 'radio', cam: 'camera', rid: 'Remote ID', vib: 'vibration' }, E = S.engine === "lr" && F.B ? F.B : F.LR ? F.LR.E : {};
       const why = Object.keys(E).filter(k => Math.abs(E[k]) > 0.05).map(k => nm[k] + ' ' + (E[k] > 0 ? '+' : '') + E[k].toFixed(1)).join(', ');
-      $('engp').textContent = 'new ' + Math.round(F.pLR * 100) + '% · old ' + Math.round(F.pLeg * 100) + '%' + (why ? ' · evidence (log-odds): ' + why : ''); }
+      const nT = TK.tracks.filter(t => t.conf).length, bx = (F.tr && F.tr.best && F.tr.best.explain) || (F.adsbWhy && S.t - F.adsbWhy.t < 3 ? F.adsbWhy : null);
+      $('engp').textContent = (S.tracker && S.tog.ring && S.engine === 'lr' ? 'tracks ' + nT + ' confirmed, any-drone ' + Math.round((F.pAny || 0) * 100) + '% · ' : '') + 'one-blender ' + Math.round((F.pGlob != null ? F.pGlob : F.pLR) * 100) + '% · old ' + Math.round(F.pLeg * 100) + '%' + (why ? ' · evidence (log-odds): ' + why : '') +
+        (bx && bx.id ? ' · sound explained by aircraft ' + bx.id + ', ' + (bx.range / 1000).toFixed(1) + ' km, ' + Math.round(bx.agl) + ' m AGL (×' + bx.factor.toFixed(2) + ')' : ''); }
     $('stCue').classList.toggle('on', F.cue); $('stLoc').classList.toggle('on', F.loc); $('stConf').classList.toggle('on', F.conf);
     $('clock').textContent = clock(S.t) + (S.done ? ' · flight over' : !S.playing ? ' · paused' : '');
   }
@@ -913,7 +1085,7 @@
   // headless helpers for tests: run the flight to the end without drawing, and summarise
   function summary() {
     return { alarm: F.alarmT != null, alarmFalse: F.alarmFalse, alarmDist: F.alarmD != null ? Math.round(F.alarmD) : null, firsts: Object.fromEntries(Object.entries(firsts).map(([k, v]) => [k, Math.round(v.d)])),
-      falseSnd: F.falseSnd, fakeVib: F.fakeVib, familiar: F.familiar, rejected: nodes().reduce((a, n) => a + (n.rejected || 0), 0) };
+      falseSnd: F.falseSnd, fakeVib: F.fakeVib, familiar: F.familiar, track: trackStats(), adsbExplained: F.adsbN || 0, pGlobMax: F.pGlobMax, rejected: nodes().reduce((a, n) => a + (n.rejected || 0), 0) };
   }
   function runToEnd(max) { S.pauseAt = false; hideCallout(); for (const n of nodes()) n.rejected = 0; let k = 0; while (!S.done && k++ < (max || 3000)) { S.t += EVAL_DT; moveObjs(); if (S.done) break; evaluate(); } return summary(); }
   // ---------- location UI ----------
@@ -964,6 +1136,7 @@
   }
   function syncUI() {
     document.querySelectorAll('#engSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === S.engine));
+    if ($('fleetN')) { $('fleetN').value = S.count; $('fleetF').value = S.formation; $('trkOn').checked = S.tracker; $('adsbMiss').value = S.adsbMissing; }
     document.querySelectorAll('#picker button').forEach(b => b.classList.toggle('on', b.dataset.k === S.kind));
     $('second').value = S.second; $('route').value = S.route; $('scen').value = S.scen; $('height').value = S.height; $('hv').textContent = S.height + ' m';
     $('wind').value = S.wx.wind; $('wv').textContent = S.wx.wind + ' m/s'; $('wdir').value = S.wx.windFrom; $('dust').value = S.wx.dust; $('rain').value = S.wx.rain; $('tod').value = S.wx.tod;
@@ -1004,11 +1177,17 @@
     // 1. weather-aware fusion on/off (live)   2. place learning
     document.querySelectorAll('#awareSeg button').forEach(b => b.onclick = () => { S.wxAware = b.dataset.v === '1'; S.cov = null; syncUI(); updateImpact(); });
     document.querySelectorAll('#engSeg button').forEach(b => b.onclick = () => { S.engine = b.dataset.v; syncUI(); log('Fusion engine: ' + (S.engine === 'lr' ? 'Pd/Pfa evidence (new)' : 'hand-set weights (old)'), 'fus'); });
-    $('ndBtn').onclick = () => LG.sess ? stopQuiet() : startQuiet();
+    $('ndBtn').onclick = () => LG.ss.mode === 'ARMED' ? stopQuiet() : startQuiet();
     $('ndRec').onclick = () => { S.playing = false; setPlay(); recordQuiet(10); };
     $('ndFit').onclick = () => showFit();
     $('ndUse').onclick = () => useFit();
     $('ndDl').onclick = () => downloadLog();
+    $('fleetN').onchange = $('fleetF').onchange = () => { S.count = +$('fleetN').value; S.formation = $('fleetF').value; log('Drones: ' + S.count + (S.count > 1 ? ' (' + S.formation + ')' : ''), 'fus'); reset(); S.playing = true; setPlay(); };
+    $('trkOn').onchange = () => { S.tracker = $('trkOn').checked; syncUI(); };
+    $('adsbMiss').onchange = () => { S.adsbMissing = +$('adsbMiss').value; reset(); S.playing = true; setPlay(); };
+    $('swarmBtn').onclick = () => { S.kind = 'small'; S.count = 20; S.formation = 'swarm'; S.second = ''; S.rid = false; syncUI(); reset(); S.playing = true; setPlay(); log('Swarm: 20 small quads in a 5 x 4 formation, 30 m apart', 'fus'); };
+    $('omFeed').onchange = () => { omPoll(true); rainUI(); }; $('wetFlag').onchange = () => { LG.flagTs = tsNow(); LG.flagReal = Date.now(); logSys('wet_flag', '', { wet: $('wetFlag').value === '1' }); rainUI(); };
+    setInterval(() => { omPoll(false); rainUI(); }, 60000); rainUI();
     document.querySelectorAll('#learnSeg button').forEach(b => b.onclick = () => { S.learnOn = b.dataset.v === '1'; syncUI(); log('Place learning ' + (S.learnOn ? 'ON' : 'OFF'), 'fus'); reset(); S.playing = true; setPlay(); });
     $('clk').onchange = e => { S.clock0 = +e.target.value; reset(); S.playing = true; setPlay(); };
     $('day').onchange = e => { S.weekend = e.target.value === '1'; reset(); S.playing = true; setPlay(); };

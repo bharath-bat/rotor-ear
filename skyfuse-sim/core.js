@@ -250,7 +250,7 @@
     for (const r of recs) {
       if (r.kind === 'wx') { wx = r; continue; }
       if (r.kind === 'sys') continue;
-      r.wx = wx && r.ts - wx.ts <= WX_MAXAGE_MS && r.ts >= wx.ts ? { t_c: wx.t_c, rh_pct: wx.rh_pct, wind_ms: wx.wind_ms, wind_from_deg: wx.wind_from_deg, rain_mmh: wx.rain_mmh } : null;
+      r.wx = wx && r.ts - wx.ts <= WX_MAXAGE_MS && r.ts >= wx.ts ? { t_c: wx.t_c, rh_pct: wx.rh_pct, wind_ms: wx.wind_ms, wind_from_deg: wx.wind_from_deg, rain_mmh: wx.rain_mmh, rain_state: wx.rain_state, p_wet: wx.p_wet } : null;
     }
     return { records: recs, errors };
   }
@@ -260,8 +260,8 @@
     const dn = day ? 'day' : 'night';
     if (kind === 'rf') return dn;
     if (!wx) return 'unknown';
-    const w = wx.wind_ms != null ? wx.wind_ms : wx.wind || 0, wet = wx.rain_mmh != null ? wx.rain_mmh >= 0.5 : !!wx.rain;
-    return 'w' + (w < 3 ? 0 : w < 7 ? 1 : 2) + '|' + (wet ? 'wet' : 'dry') + '|' + dn;
+    const w = wx.wind_ms != null ? wx.wind_ms : wx.wind || 0, wet = wx.rain_state ? wx.rain_state : (wx.rain_mmh != null ? wx.rain_mmh >= 0.5 : !!wx.rain) ? 'wet' : 'dry';
+    return 'w' + (w < 3 ? 0 : w < 7 ? 1 : 2) + '|' + (wet === 'uncertain' ? 'unk' : wet) + '|' + dn;   // uncertain rain: kept out of wet/dry bins (g.6)
   }
   // log-gamma, regularized incomplete beta (Numerical Recipes betacf) and its inverse by bisection
   function lgam(x) { const c = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
@@ -281,8 +281,10 @@
   }
   // records: parsed log. Certified no-drone sessions ("nd-..."), up:true only. One bin per node x weather/hour key.
   function fitPfa(records, opts) {
-    const o = opts || {}, kind = o.kind, groups = new Map();
+    const o = opts || {}, kind = o.kind, groups = new Map(), excl = {};
+    for (const r of records || []) if (r.kind === 'sys' && r.event === 'nd_end' && r.exclude_from_ts != null) excl[r.session] = r.exclude_from_ts; // g.5
     for (const r of records || []) {
+      if (excl[r.session] != null && r.ts >= excl[r.session]) continue;
       if (r.kind !== kind || r.up !== true || !(typeof r.session === 'string' && r.session.startsWith('nd-'))) continue;
       const key = pfaKey(kind, r.wx, r.hod), g = (r.node || '*') + '\u0000' + key;
       if (!groups.has(g)) groups.set(g, { node: r.node || '*', key, recs: [] }); groups.get(g).recs.push(r);
@@ -302,6 +304,86 @@
     const s = Float64Array.from(scores || []).sort(), n = s.length; if (!n || n < 10 / target) return null;
     return s[Math.min(n - 1, Math.max(0, Math.floor((1 - target) * n)))];
   }
+  // ---------- g.5 no-drone session state machine (IDLE / ARMED) ----------
+  // event: {type:'button', ts, hours, operator, note} | {type:'rid'|'track'|'tick'|'button_stop'|'hub_restart', ts, ...}
+  function sessionStep(st, ev) {
+    const s = Object.assign({ mode: 'IDLE', seq: 0 }, st), ts = ev.ts;
+    const rej = (type, reason) => Object.assign(s, { rejected: { type, reason, ts } });
+    delete s.rejected;
+    if (s.mode === 'CAL') {                                                   // g.2a bring-up: claps/chirps allowed, detection off
+      if (ev.type === 'button') return rej('button', 'cal');
+      const endCal = reason => Object.assign(s, { mode: 'IDLE', last: { session: s.session, reason, triggerTs: ts, endTs: ts, excludeFromTs: ts } });
+      if (ev.type === 'cal_end') return endCal('cal_end');
+      if (ev.type === 'hub_restart') return endCal('hub_restart');
+      if (ev.type === 'tick' && ts >= s.endPlanned) return endCal('timeout');
+      return s;
+    }
+    if (ev.type === 'cal_start') {
+      if (s.mode === 'ARMED') return rej('cal_start', 'armed');
+      const seq = (s.seq || 0) + 1;
+      return Object.assign(s, { mode: 'CAL', seq, session: 'cal-' + String(seq).padStart(4, '0'), startTs: ts, endPlanned: ts + 2 * 3600000, operator: ev.operator || '' });
+    }
+    if (s.mode === 'IDLE') {
+      if (ev.type !== 'button') return s;
+      const h = Math.min(12, Math.max(1, ev.hours || 4)), seq = (s.seq || 0) + 1;
+      return Object.assign(s, { mode: 'ARMED', seq, session: 'nd-' + String(seq).padStart(4, '0'), startTs: ts, endPlanned: ts + h * 3600000, operator: ev.operator || '', note: ev.note || '', last: s.last });
+    }
+    const end = (reason, auto, detail) => Object.assign(s, { mode: 'IDLE', last: { session: s.session, reason, triggerTs: ts, endTs: ts, excludeFromTs: auto ? ts - 300000 : reason === 'timeout' ? s.endPlanned : ts, detail: detail || '' } });
+    if (ev.type === 'rid') return end('rid', true, ev.hash ? 'rid ' + ev.hash : '');
+    if (ev.type === 'track' && ev.confirmed && ev.pDrone >= 0.5) return end('track', true, ev.id != null ? 'track ' + ev.id : '');
+    if (ev.type === 'button_stop') return end('button', false);
+    if (ev.type === 'hub_restart') return end('hub_restart', false);
+    if (ev.type === 'tick' && ts >= s.endPlanned) return end('timeout', false);
+    return s;
+  }
+  // RID serials are logged only as a hash (FNV-1a 32-bit, hex)
+  function idHash(str) { let h = 0x811c9dc5; for (const ch of String(str)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0'); }
+  // ---------- g.6 rain state without a gauge: manual flag + weather feed ----------
+  function rainState(o) {
+    const now = o.now, H = 3600000; let p = null;
+    const feedOk = !!(o.feed && o.feed.rain_mmh != null && now - o.feed.ts <= H);   // stale feed (> 1 h, e.g. offline cache) is ignored entirely
+    if (o.manual && now - o.manual.ts <= 2 * H) { p = o.manual.wet ? 0.95 : 0.05; if (!o.manual.wet && feedOk && o.feed.rain_mmh >= 2) p = 0.5; }
+    else if (feedOk) p = o.feed.rain_mmh >= 0.5 ? 0.8 : 0.15;
+    if (o.lastWetTs != null && now - o.lastWetTs <= 30 * 60000 && !(o.manual && now - o.manual.ts <= 2 * H && !o.manual.wet)) p = Math.max(p == null ? 0 : p, 0.8);
+    if (p == null) p = 0.3;
+    return { state: p >= 0.8 ? 'wet' : p <= 0.2 ? 'dry' : 'uncertain', pWet: p, feedStale: !feedOk };
+  }
+  // Open-Meteo weather feed (g.6): public HTTPS read-only, polled every 10-15 min by the hub and cached; used only for rain state
+  const OPEN_METEO_POLL_MS = 15 * 60000;
+  const openMeteoUrl = (lat, lon) => 'https://api.open-meteo.com/v1/forecast?latitude=' + (+lat).toFixed(4) + '&longitude=' + (+lon).toFixed(4) +
+    '&current=precipitation,rain,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,surface_pressure&timezone=UTC';
+  // -> {rain_mmh, ts, t_c, rh_pct, p_hpa, wind_ms, wind_from_deg}; precipitation is mm per `interval` seconds (900 s), converted to mm/h
+  function parseOpenMeteo(j) {
+    const c = j && j.current; if (!c || !c.time) return null; const iv = c.interval || 900, mm = c.precipitation != null ? c.precipitation : c.rain;
+    const kmh = (j.current_units && j.current_units.wind_speed_10m) === 'km/h';
+    return { ts: Date.parse(c.time + (/[zZ]|[+-]\d\d:?\d\d$/.test(c.time) ? '' : 'Z')), rain_mmh: mm == null ? null : mm * 3600 / iv, t_c: c.temperature_2m, rh_pct: c.relative_humidity_2m,
+      p_hpa: c.surface_pressure, wind_ms: c.wind_speed_10m == null ? null : kmh ? c.wind_speed_10m / 3.6 : c.wind_speed_10m, wind_from_deg: c.wind_direction_10m };
+  }
+  const rainBinCorrect = (pObs, pDry, m) => (pObs - m * pDry) / (1 - m);
+  // ===================== (b) ADS-B explanation / veto (never a boost) =====================
+  // aircraft: ENU {id, x, y, z(AGL), vx, vy, vz, t, nacp?, sigma?}. det: {kind:'snd'|'cam', node:[3], az, el?, sAz, sEl?, t, h?, sH?}.
+  // Passive 1090 MHz receive only; public position squitters from crewed aircraft. Explains sound/heat only (not RF, RID, cam 'drone').
+  const ADSB_CFG = { max_range_km: 30, max_age_s: 10, sigma_pos_default_m: 50, f_min: 0.1, max_drone_agl_m: 150 };
+  const wrapPi = a => { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math.PI; return a - Math.PI; };
+  function adsbExplain(det, aircraft, ctx) {
+    const cfg = Object.assign({}, ADSB_CFG, ctx && ctx.adsb), c = (ctx && ctx.c) || 343.2, nd = det.node || [0, 0, 0];
+    let best = 0, id = null, info = null;
+    for (const a of aircraft || []) {
+      if (det.t - a.t > cfg.max_age_s) continue;
+      let te = det.t; const at = tt => [a.x + (a.vx || 0) * (tt - a.t), a.y + (a.vy || 0) * (tt - a.t), a.z + (a.vz || 0) * (tt - a.t)];
+      if (det.kind !== 'cam') for (let i = 0; i < 3; i++) { const q = at(te); te = det.t - Math.hypot(q[0] - nd[0], q[1] - nd[1], q[2] - nd[2]) / c; } // retarded time
+      const q = at(te), dx = q[0] - nd[0], dy = q[1] - nd[1], dz = q[2] - nd[2], rho = Math.hypot(dx, dy), r = Math.hypot(rho, dz);
+      if (r > cfg.max_range_km * 1000) continue;
+      const sp = a.sigma || cfg.sigma_pos_default_m, ang = (sp / Math.max(r, 1)) ** 2;
+      let d2 = wrapPi(det.az - Math.atan2(dx, dy)) ** 2 / (det.sAz ** 2 + ang), m = 1;
+      if (det.el != null && det.sEl) { d2 += wrapPi(det.el - Math.atan2(dz, rho)) ** 2 / (det.sEl ** 2 + ang); m = 2; }
+      if (d2 > (m === 2 ? 9.21 : 6.63)) continue;
+      let pA = Math.exp(-d2 / 2);
+      if (det.h != null && det.sH) pA *= Phi((det.h - cfg.max_drone_agl_m) / det.sH);   // a drone below 150 m cannot be an aircraft at 1500 m
+      if (pA > best) { best = pA; id = a.id; info = { range: r, agl: q[2] }; }
+    }
+    return { pAssoc: best, factor: 1 - best * (1 - cfg.f_min), id, range: info && info.range, agl: info && info.agl };
+  }
   let PFA_TABLE = null;
   function loadPfaTable(table) { PFA_TABLE = table && table.sensors ? table : null; }
   // fitted Pfa for this sensor/node/bin, or null (then the a.3 default is used). Wrong threshold -> null (fit invalid).
@@ -312,6 +394,6 @@
     return row.pfa;
   }
 
-  g.SkyCore = { RATE_S, MEMORY_S, WEIGHT, CAP, PRIOR, ALARM, NEUTRAL, blend, weatherPolicy, parseLog, pfaKey, fitPfa, thresholdForPfa, loadPfaTable, nEffOf, Phi, CH, sensorModel, newBlendState, lrBlend, newPlace, slotOf, slotName, bandsOf, learn, familiarity, novelty, familiarTones, notch, quarantine, quarantined, normalLevel, toneBin };
+  g.SkyCore = { RATE_S, MEMORY_S, WEIGHT, CAP, PRIOR, ALARM, NEUTRAL, blend, weatherPolicy, adsbExplain, ADSB_CFG, parseLog, pfaKey, sessionStep, idHash, rainState, rainBinCorrect, openMeteoUrl, parseOpenMeteo, OPEN_METEO_POLL_MS, fitPfa, thresholdForPfa, loadPfaTable, nEffOf, Phi, CH, sensorModel, newBlendState, lrBlend, newPlace, slotOf, slotName, bandsOf, learn, familiarity, novelty, familiarTones, notch, quarantine, quarantined, normalLevel, toneBin };
   if (typeof module !== 'undefined' && module.exports) module.exports = g.SkyCore;
 })(typeof window !== 'undefined' ? window : globalThis);

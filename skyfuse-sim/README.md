@@ -54,3 +54,10 @@ Assumptions and numbers are commented in `physics.js`.
 - **No-drone log** (spec f, JSONL schema v1): 1 Hz records per sound post / RF tower / camera, weather every 10 s, sys events. *Mark quiet session* certifies no-drone time and auto-cancels if Remote ID or a confirmed track appears. *Fit false-alarm rates* runs `fitPfa` (Jeffreys CI, n_eff from autocorrelation) per weather/day bin; *Use fitted rates* loads bins with ≥ 1 h effective looks into `sensorModel`. *⬇ JSONL* downloads the log.
 - Hardware assumptions: ESP32-S3 nodes with PSRAM (8 s raw audio ring per mic for GCC-PHAT on request), GPS PPS on every node (TDOA on by default), hub T/RH sensor (`soundSpeed`).
 - New pure functions: core.js `parseLog, fitPfa, thresholdForPfa, loadPfaTable, sensorModel, newBlendState, lrBlend`; physics.js `soundSpeed`; track.js (`SkyTrack`) `fitSampleClock`.
+
+### Steps 3–5: ADS-B, multi-target tracker, multi-drone (uncommitted → committed in this batch)
+- ✈ ADS-B receiver (receive only), 🌡 hub T/RH sensor, 🛰 GPS PPS/TDOA toggles, all on by default. ADS-B only scales sound/thermal evidence (adsbExplain); never radio, Remote ID or a camera 'drone'. "No ADS-B" share setting (default 20 %).
+- Tracker: NCV EKF per track, GNN (Hungarian, pitch-signature cost), initiation from pitch-matched crossing bearings or RID/thermal positions, M-of-N 3/5 confirm, deletion rules, TDOA updates when PPS is on, one LR blender per track with miss evidence, p_any. 95 % ellipses on the map (dashed = tentative).
+- Alarm rule with the tracker: max(p_any, one-blender p) — a far drone heard by one post makes no track yet, and the strict p_any rule cost 200–500 m of alarm range.
+- Drones 1–20, spread or swarm (5 × 4 at 30 m), 🐝 Swarm of 20 preset. Scoreboard in summary().track (one-to-one Hungarian, 150 m).
+- Limit: a 30 m swarm is not resolvable by sound bearings; it shows as 4–5 group tracks.

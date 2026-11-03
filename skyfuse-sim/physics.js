@@ -23,8 +23,8 @@
     fixed: { label: 'Fixed-wing drone', sub: 'single prop, fast', drone: true, snd: { ladder: { f0: 150, sl: 82, nh: 8, slope: 3.5 } }, eirp: 20, band: '2.4', rid: true, therm: 700, tcls: 'drone', speed: 22, h: 110, icon: 'wing', size: 1.2 },
     fpv:   { label: 'FPV racer', sub: 'loud, 5.8 GHz video', drone: true, snd: { ladder: { f0: 480, sl: 84, nh: 8, slope: 3 } }, eirp: 25, band: '5.8', rid: false, therm: 300, tcls: 'drone', speed: 30, h: 25, icon: 'fpv', size: 0.9 },
     bird:  { label: 'Bird', sub: 'decoy: crow / kite', drone: false, snd: { chirp: { f: 3000, sl: 74, duty: 0.3 } }, eirp: null, rid: false, therm: 200, tcls: 'bird', speed: 10, h: 35, icon: 'bird', size: 1 },
-    jet:   { label: 'Passing jet', sub: 'decoy: 1.5 km up', drone: false, snd: { roar: 142, whine: { f: 2200, sl: 112 } }, eirp: null, rid: false, therm: 2500, tcls: 'aircraft', speed: 120, h: 1500, icon: 'jet', size: 1.6 },
-    heli:  { label: 'Helicopter', sub: 'decoy: 300 m up', drone: false, snd: { ladder: { f0: 21, sl: 112, nh: 48, slope: 0.6 }, roar: 124 }, eirp: null, rid: false, therm: 2500, tcls: 'aircraft', speed: 55, h: 300, icon: 'heli', size: 1.5 }
+    jet:   { label: 'Passing jet', sub: 'decoy: 1.5 km up', drone: false, snd: { roar: 142, whine: { f: 2200, sl: 112 } }, eirp: null, rid: false, therm: 2500, tcls: 'aircraft', speed: 120, h: 1500, icon: 'jet', size: 1.6, adsb: true },
+    heli:  { label: 'Helicopter', sub: 'decoy: 300 m up', drone: false, snd: { ladder: { f0: 21, sl: 112, nh: 48, slope: 0.6 }, roar: 124 }, eirp: null, rid: false, therm: 2500, tcls: 'aircraft', speed: 55, h: 300, icon: 'heli', size: 1.5, adsb: true }
   };
 
   // ---------- WEATHER (all rough estimates; see README "Weather model") ----------
