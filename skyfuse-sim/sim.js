@@ -38,7 +38,8 @@
 
   // ---------- state ----------
   const S = {
-    t: 0, acc: 0, playing: true, speed: 8, scen: 'suburb', wind: 3, kind: 'small', second: 'jet', height: 60, rid: true, radio: true, route: 0, pauseAt: true,
+    t: 0, acc: 0, playing: true, speed: 8, scen: 'suburb', wx: { wind: 3, windFrom: 270, dust: 0, rain: 0, tod: 'mildday' }, preset: null,
+    mapMode: 'grid', geo: { lat: 12.9719, lon: 77.6412, name: 'Indiranagar, Bangalore' }, kind: 'small', second: 'jet', height: 60, rid: true, radio: true, route: 0, pauseAt: true,
     tog: { mics: true, lownoise: true, dish: true, ring: true, s3: true, height: true, longlisten: true, rf: true, rid: true, thermal: true, vib: true, fusion: true },
     sel: null, objs: [], trail: [], done: false, focus: null
   };
@@ -73,8 +74,19 @@
     for (const s of sensors) { s.det = false; s.conf = 0; s.hist = []; s.rep = null; s.spec = null; s.cls = null; }
     cam().az = 45;
     moveObjs();
-    log('Flight starts: ' + S.objs.map(o => OB[o.kind].label).join(' + ') + ' · ' + sceneName(), 'fus');
+    log('Flight starts: ' + S.objs.map(o => OB[o.kind].label).join(' + ') + ' · ' + sceneName() + ' · ' + wxName() + ' · map centre ' + llTxt(HUB) + ' (' + S.geo.name + ')', 'fus');
+    for (const a of AIRPORTS) { const q = fromLL(a.lat, a.lon), d = Math.hypot(clamp(q.x, 0, W) - q.x, clamp(q.y, 0, W) - q.y); if (d < a.r) log('Note: area is within ~' + (a.r / 1000) + ' km of ' + a.name + ' (approx, check Digital Sky before any flying)', 'warn'); }
   }
+  const envNow = () => ({ scen: S.scen, wind: S.wx.wind, wx: S.wx, tog: S.tog, objs: S.objs });
+  const wxName = () => { const w = S.wx; return P.TOD[w.tod].label + ' ' + P.TOD[w.tod].T + ' °C, wind ' + w.wind + ' m/s from ' + P.compass(w.windFrom) + (w.rain ? ', ' + ['', 'drizzle', 'heavy rain'][w.rain] : '') + (w.dust ? ', ' + ['', 'light haze', 'heavy dust'][w.dust] : ''); };
+  // ---------- GPS: the 3 x 3 km model is a local flat patch centred on S.geo (map centre = 1500,1500 m) ----------
+  const M_DEG = 111320, cosLat = () => Math.cos(S.geo.lat * Math.PI / 180);
+  const toLL = p => ({ lat: S.geo.lat - (p.y - W / 2) / M_DEG, lon: S.geo.lon + (p.x - W / 2) / (M_DEG * cosLat()) });
+  const fromLL = (lat, lon) => ({ x: W / 2 + (lon - S.geo.lon) * M_DEG * cosLat(), y: W / 2 - (lat - S.geo.lat) * M_DEG });
+  const llTxt = p => { const g = toLL(p); return Math.abs(g.lat).toFixed(5) + '°' + (g.lat >= 0 ? 'N' : 'S') + ', ' + Math.abs(g.lon).toFixed(5) + '°' + (g.lon >= 0 ? 'E' : 'W'); };
+  const llObj = p => { const g = toLL(p); return { lat: +g.lat.toFixed(6), lon: +g.lon.toFixed(6) }; };
+  // known airports: faint "no-fly" hint ring (approx; the real zones are on DGCA Digital Sky)
+  const AIRPORTS = [{ name: 'HAL Airport', lat: 12.9499, lon: 77.6682, r: 5000 }];
   const sceneName = () => ({ night: 'quiet night', city: 'city day', suburb: 'suburb, daytime' })[S.scen];
   const drones = () => S.objs.filter(o => o.spec.drone);
   // reference object for "how far out": the drone nearest the hub, or the main object if there is no drone
@@ -101,6 +113,8 @@
       o.x = p.x; o.y = p.y; o.hd = p.hd;
       if (pth.wavy) { const t = p.hd * Math.PI / 180, off = 70 * Math.sin(S.t / 4 + o.phase); o.x += Math.cos(t) * off; o.y += Math.sin(t) * off; o.h = (o.role === 1 ? S.height : sp.h) + 12 * Math.sin(S.t / 7 + o.phase); }
       else if (o.role === 1) o.h = S.height;
+      const st = P.droneStrain(o.spec, S.wx); o.loud = st.loud;                // bad weather: louder motors, wobbly path
+      if (st.wobble) { const t = (p.hd + 90) * Math.PI / 180, off = st.wobble * (0.6 * Math.sin(S.t / 2.3 + o.phase) + 0.4 * Math.sin(S.t / 0.9)); o.x += Math.sin(t) * off; o.y -= Math.cos(t) * off; }
       o.rpm = 1 + 0.03 * Math.sin(S.t / 3 + o.phase);                     // rotor speed wobble: the whole ladder slides together
       if (sp.snd.chirp) { o.chirping = Math.random() < sp.snd.chirp.duty; o.chirpF = 2600 + Math.random() * 800; }
       if (p.end && !pth.loop) o.done = true;
@@ -110,7 +124,7 @@
 
   // ---------- one sensing + fusion step (every 0.5 s of sim time) ----------
   function evaluate() {
-    const env = { scen: S.scen, wind: S.wind, tog: S.tog, objs: S.objs }, reps = [], T = S.tog;
+    const env = envNow(), reps = [], T = S.tog;
     // sound grid
     for (const n of nodes()) {
       n.h = T.height ? 8 : 1.5;
@@ -157,6 +171,7 @@
     c.det = !!c.rep; c.conf = c.rep ? c.rep.conf : 0;
     const v = vib(); v.rep = null;
     if (T.vib) for (const o of S.objs) { const r = P.vibration(o, v); if (r) { v.rep = Object.assign({ kind: 'vib', id: 'VIB' }, r); reps.push(v.rep); break; } }
+    if (T.vib && !v.rep && Math.random() < P.vibFalseRate(S.wx)) { v.rep = { kind: 'vib', id: 'VIB', conf: 0.4, fake: true }; reps.push(v.rep); } // gust / rain drumming
     v.det = !!v.rep;
 
     fuse(reps);
@@ -221,8 +236,8 @@
     // stages + key moments
     const realRf = rfs.filter(r => !r.mismatch && !r.fake);
     if ((realRf.length || rid) && !F.cue) { F.cue = true; log('Fusion: CUE from ' + (rid ? 'Remote ID' : 'radio tower ' + realRf[0].id) + ' → sound posts listen harder, camera told where to look', 'fus'); }
-    if ((snd.length >= 2 || rid) && !F.loc && F.est) { F.loc = true; log('Fusion: LOCATED by ' + (F.by || 'sound grid') + ', ±' + Math.round(F.er) + ' m', 'fus'); }
-    if (cm && !F.conf) { F.conf = true; log('Fusion: CONFIRMED by thermal camera at ' + km(cm.r), 'fus'); mark('confirm', 'Thermal confirm');
+    if ((snd.length >= 2 || rid) && !F.loc && F.est) { F.loc = true; log('Fusion: LOCATED by ' + (F.by || 'sound grid') + ' at ' + llTxt(F.est) + ', ±' + Math.round(F.er) + ' m', 'fus'); }
+    if (cm && !F.conf) { F.conf = true; log('Fusion: CONFIRMED by thermal camera at ' + km(cm.r) + ', drone at ' + llTxt(F.est || refObj()), 'fus'); mark('confirm', 'Thermal confirm');
       moment('confirm', cam(), '📷 Camera confirms', 'Fusion told the thermal camera where to look. It turned and sees a warm, drone-shaped dot ' + km(cm.r) + ' away. Now it\'s certain.'); }
     if (F.p >= ALARM && F.alarmT == null) {
       F.alarmT = S.t; mark('alarm', T.fusion ? 'Fusion ≥95%' : 'single-sensor alarm');
@@ -242,7 +257,7 @@
 
   // ---------- first detections ----------
   const SENSE_NAME = { rf: 'radio listener', rid: 'Remote ID', snd: 'sound grid', cam: 'thermal camera', vib: 'vibration sensor' };
-  function mark(k, label, who) { if (firsts[k]) return; firsts[k] = { t: S.t, d: dh(refObj()), label, who }; renderFirsts(); }
+  function mark(k, label, who) { if (firsts[k]) return; firsts[k] = { t: S.t, d: dh(refObj()), label, who, ll: llObj(refObj()) }; renderFirsts(); }
   function renderFirsts() {
     const order = ['rf', 'rid', 'snd', 'cam', 'vib', 'alarm', 'confirm'];
     const real = ['rf', 'rid', 'snd', 'cam', 'vib'].filter(k => firsts[k]).sort((a, b) => firsts[a].t - firsts[b].t);
@@ -264,20 +279,21 @@
     for (const k in now) if (!lastState[k] || lastState[k].cls !== now[k].cls) {
       const r = now[k], s = byId(r.id);
       if (r.kind === 'rf') {
-        log('Radio tower ' + r.id + ': ' + strength(r.conf) + ' ' + r.band + ' GHz blip, ' + P.compass(r.brg) + ' (' + r.rssi.toFixed(0) + ' dBm)' + (r.fake ? ' · WiFi clutter?' : '') + (r.mismatch ? ' · doesn\'t fit track, down-weighted' : ''), r.fake ? 'warn' : 'rf');
+        log('Radio tower ' + r.id + ' (' + llTxt(s) + '): ' + strength(r.conf) + ' ' + r.band + ' GHz blip, ' + P.compass(r.brg) + ' (' + r.rssi.toFixed(0) + ' dBm)' + (r.fake ? ' · WiFi clutter?' : '') + (r.mismatch ? ' · doesn\'t fit track, down-weighted' : ''), r.fake ? 'warn' : 'rf');
         if (!r.fake) { mark('rf', 'radio tower', r.id); moment('rf', s, '📡 Radio hears first', 'Tower ' + r.id + ' picked up a ' + strength(r.conf) + ' ' + r.band + ' GHz signal from the ' + P.compass(r.brg) + ', about ' + km(dh(refObj())) + ' out. Radio travels much farther than sound. It only measures strength, never decodes. One blip = "maybe".'); }
       } else if (r.kind === 'rid') { log('Remote ID @ tower ' + r.id + ': public broadcast received, position ' + Math.round(r.x) + ',' + Math.round(r.y), 'rid'); mark('rid', 'Remote ID @ tower', r.id);
         moment('rid', s, '🆔 Remote ID heard', 'The drone is broadcasting its public "here I am" message. Tower ' + r.id + ' reads its position openly. Drones that switch this off still get caught by the other senses.'); }
       else if (r.kind === 'snd') {
-        if (r.cls === 'drone') { log('Sound ' + r.id + ': rotor ladder f0 ' + Math.round(r.f0) + ' Hz, ' + r.hits + ' rungs' + (r.brg != null ? ', from ' + P.compass(r.brg) : ''), 'snd'); mark('snd', 'sound post', r.id);
+        if (r.cls === 'drone') { log('Sound ' + r.id + ' (' + llTxt(s) + '): rotor ladder f0 ' + Math.round(r.f0) + ' Hz, ' + r.hits + ' rungs' + (r.brg != null ? ', from ' + P.compass(r.brg) : ''), 'snd'); mark('snd', 'sound post', r.id);
           moment('snd', s, '🎙 Sound post ' + r.id + ' hears a ladder', 'A hum at ' + Math.round(r.f0) + ' Hz plus exact multiples (' + r.hits + ' rungs) — the fingerprint of spinning propellers. A jet\'s roar or a bird\'s chirp never makes this neat ladder.'); }
         else { log('Sound ' + r.id + ': rotor ladder too dense → big slow rotor (helicopter), NOT counted as a drone', 'warn');
           moment('heli', s, '🚁 Not a drone: helicopter', 'Post ' + r.id + ' hears rotor sound, but the rungs are packed too close (extra peaks between them). That means a huge, slow rotor — a helicopter. Fusion ignores it.'); }
       } else if (r.kind === 'cam') {
         if (r.cls === 'drone') { log('Thermal: warm drone-shaped dot in view, ' + km(r.r) + ' ' + P.compass(r.brg), 'cam'); mark('cam', 'thermal camera'); }
-        else { log('Thermal: warm dot ' + km(r.r) + ' ' + P.compass(r.brg) + ' → ' + (r.cls === 'bird' ? 'flapping, wobbly path: a BIRD' : 'big and fast: an AIRCRAFT') + ', not a drone (lowers confidence)', 'warn');
+        else { log('Thermal (' + llTxt(cam()) + '): warm dot ' + km(r.r) + ' ' + P.compass(r.brg) + ' → ' + (r.cls === 'bird' ? 'flapping, wobbly path: a BIRD' : 'big and fast: an AIRCRAFT') + ', not a drone (lowers confidence)', 'warn');
           moment(r.cls === 'bird' ? 'bird' : 'aircraft', cam(), r.cls === 'bird' ? '🐦 Camera: just a bird' : '✈ Camera: an aircraft', r.cls === 'bird' ? 'The camera sees something warm, but it flaps and wobbles like a bird. That counts AGAINST a drone, so fusion stays calm.' : 'Something big, hot and fast: an aircraft. That counts against a drone.'); }
-      } else if (r.kind === 'vib') { log('Vibration: roof sensor shaking, something heavy low overhead', 'vib'); mark('vib', 'vibration sensor');
+      } else if (r.kind === 'vib' && r.fake) { log('Vibration: a short shake, probably a wind gust or rain drumming (weak evidence)', 'warn'); }
+      else if (r.kind === 'vib') { log('Vibration: roof sensor shaking, something heavy low overhead' + ' @ ' + llTxt(s), 'vib'); mark('vib', 'vibration sensor');
         moment('vib', s, '〰 Roof is shaking', 'A heavy drone is flying very low over the building. Only big, low drones do this.'); }
     }
     lastState = now;
@@ -307,7 +323,7 @@
   // ---------- evidence + response timeline ----------
   function recordEvidence(reps) {
     const per = {}; for (const r of reps) { if (!positive(r) || (r.kind === 'snd' && r.cls !== 'drone') || (r.kind === 'cam' && r.cls !== 'drone')) continue; per[r.kind] = Math.max(per[r.kind] || 0, +r.conf.toFixed(2)); }
-    if (F.est) EV.points.push({ time: clock(S.t), est_x_m: Math.round(F.est.x), est_y_m: Math.round(F.est.y), err_m: Math.round(F.er), fusion_conf: +F.p.toFixed(3), per_sense: per });
+    if (F.est) EV.points.push({ time: clock(S.t), est_x_m: Math.round(F.est.x), est_y_m: Math.round(F.est.y), ...llObj(F.est), err_m: Math.round(F.er), fusion_conf: +F.p.toFixed(3), per_sense: per });
     for (const k in per) EV.senses[k] = (EV.senses[k] || 0) + 1;
   }
   function headingTxt() {
@@ -322,7 +338,7 @@
     const where = 'Drone ' + P.compass(P.bearing(HUB, est)) + ', ' + km(Math.hypot(est.x - HUB.x, est.y - HUB.y)) + ', ' + headingTxt() + '. Go indoors.';
     $('pnmsg').textContent = where;
     [0, 2, 4, 6].forEach((s, i) => { if (dt >= s && R.step <= i) { R.step = i + 1; $('r' + (i + 1)).classList.add('done');
-      if (i === 0) log('RESPONSE ① alert sent to phones + siren/light: "' + where + '"', 'rsp');
+      if (i === 0) log('RESPONSE ① alert sent to phones + siren/light: "' + where + '" · GPS ' + llTxt(est), 'rsp');
       if (i === 1) { R.recStart = S.t; log('RESPONSE ② camera turning to the track, recording started', 'rsp'); }
       if (i === 2) { $('dl').disabled = false; log('RESPONSE ③ evidence log building (time, path, confidence per sense)', 'rsp'); }
       if (i === 3) log('RESPONSE ④ checklist shown: cover, police 112, DGCA Digital Sky', 'rsp'); } });
@@ -336,13 +352,13 @@
     return {
       title: 'SkyFuse sim evidence report (SIMULATED DATA)', generated: new Date().toISOString(),
       note: 'Simulation only. Passive sensing: nothing transmitted at the drone, nothing jammed or decoded. Ranges are rough model estimates.',
-      scenario: { scene: sceneName(), wind_mps: S.wind, objects: S.objs.map(o => ({ type: OB[o.kind].label, height_m: Math.round(o.h), radio_link: o.radioOn, remote_id: o.ridOn })), route: $('route').selectedOptions[0].text },
+      scenario: { scene: sceneName(), weather: Object.assign({ summary: wxName() }, S.wx), wind_mps: S.wx.wind, objects: S.objs.map(o => ({ type: OB[o.kind].label, height_m: Math.round(o.h), radio_link: o.radioOn, remote_id: o.ridOn })), route: $('route').selectedOptions[0].text },
       senses_enabled: Object.keys(S.tog).filter(k => S.tog[k]),
       first_detected_by: real.length ? { sense: firsts[real[0]].label + (firsts[real[0]].who ? ' ' + firsts[real[0]].who : ''), time: clock(firsts[real[0]].t), distance_from_hub_m: Math.round(firsts[real[0]].d) } : null,
-      first_by_sense: Object.fromEntries(Object.entries(firsts).map(([k, v]) => [k, { time: clock(v.t), distance_from_hub_m: Math.round(v.d) }])),
+      first_by_sense: Object.fromEntries(Object.entries(firsts).map(([k, v]) => [k, { time: clock(v.t), distance_from_hub_m: Math.round(v.d), drone_lat_lon: v.ll }])),
       alarm_time: F.alarmT != null ? clock(F.alarmT) : null,
       track: EV.points, event_log: logLines.slice(),
-      map: { size_m: W, hub: { x: HUB.x, y: HUB.y }, sensors: sensors.map(s => ({ id: s.id, kind: s.kind, x: Math.round(s.x), y: Math.round(s.y) })) }
+      map: { size_m: W, centre: { name: S.geo.name, lat: S.geo.lat, lon: S.geo.lon }, coords_note: 'local flat-earth patch around the centre; lat/lon approx', hub: { x: HUB.x, y: HUB.y, ...llObj(HUB) }, sensors: sensors.map(s => ({ id: s.id, kind: s.kind, x: Math.round(s.x), y: Math.round(s.y), ...llObj(s) })) }
     };
   }
   function finish() {
@@ -392,12 +408,17 @@
   function drawMap() {
     const c = mctx, w = map.clientWidth, big = w > 500 ? 1 : 0.85; c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, w, w);
     c.fillStyle = '#0f1a2b'; c.fillRect(0, 0, w, w);
-    c.strokeStyle = '#18263c'; c.lineWidth = 1;
+    const street = S.mapMode === 'street' && !tiles.failed && drawTiles(c, w);
+    if (street) { c.fillStyle = '#0b1220a6'; c.fillRect(0, 0, w, w); }  // darken tiles so sensors stay readable
+    $('attrib').hidden = !(S.mapMode === 'street' && !tiles.failed);
+    c.strokeStyle = street ? '#2a3b5688' : '#18263c'; c.lineWidth = 1;
     for (let m = 1000; m < W; m += 1000) { c.beginPath(); c.moveTo(X(m), 0); c.lineTo(X(m), w); c.moveTo(0, X(m)); c.lineTo(w, X(m)); c.stroke(); }
     c.setLineDash([3, 6]); c.strokeStyle = '#2a3b56'; for (const r of [1000, 2000]) { c.beginPath(); c.arc(X(HUB.x), X(HUB.y), X(r), 0, 7); c.stroke(); } c.setLineDash([]);
     c.fillStyle = '#5d7391'; c.font = (12 * big) + 'px sans-serif'; c.fillText('1 km', X(HUB.x) + 4, X(HUB.y - 1000) + 14); c.fillText('2 km', X(HUB.x) + 4, X(HUB.y - 2000) + 14);
     c.font = 'bold 13px sans-serif'; c.fillText('N ↑', w - 30, 18);
     const v = vib(); c.fillStyle = '#26324a'; c.fillRect(X(v.x) - 10, X(v.y) - 8, 20, 16);
+    drawAirports(c, w, big);
+    drawWeather(c, w, big);
     // roar footprint of jets / helicopters
     for (const o of S.objs) if (o.spec.snd.roar) { const x = X(o.x), y = X(o.y), R = X(o.kind === 'jet' ? 1500 : 900); const g = c.createRadialGradient(x, y, 2, x, y, R); g.addColorStop(0, '#9aa5b830'); g.addColorStop(1, '#9aa5b800'); c.fillStyle = g; c.beginPath(); c.arc(x, y, R, 0, 7); c.fill(); }
     // main route (faint)
@@ -439,12 +460,15 @@
         c.fillStyle = '#0f1a2bcc'; c.beginPath(); c.arc(x, y, sz * 1.25, 0, 7); c.fill();
         drawIcon(c, o.spec.icon, x, y, sz, OBJCOL(o), o.spec.icon === 'bird' ? 0 : o.hd);
         c.fillStyle = OBJCOL(o); c.font = 'bold ' + (12 * big) + 'px sans-serif'; c.fillText(OB[o.kind].label + ' · ' + Math.round(o.h) + ' m', x + sz + 4, y - 6);
+        if (o.spec.drone) { c.font = (10 * big) + 'px ui-monospace,monospace'; c.fillStyle = OBJCOL(o) + 'cc'; c.fillText(llTxt(o), x + sz + 4, y + 7); }
       } else {
         const ex = clamp(x, 12, w - 12), ey = clamp(y, 34, w - 12);
         drawIcon(c, o.spec.icon, ex, ey, 9, OBJCOL(o), o.spec.icon === 'bird' ? 0 : o.hd);
         c.fillStyle = OBJCOL(o); c.font = (11 * big) + 'px sans-serif'; const tx = OB[o.kind].label + ' ' + km(dh(o)) + ' out'; c.fillText(tx, clamp(ex - c.measureText(tx).width / 2, 4, w - c.measureText(tx).width - 4), ey + (ey > w / 2 ? -14 : 22));
       }
     }
+    if (S.drag) { const x = X(S.drag.x), y = X(S.drag.y), t = S.drag.id + ' · ' + llTxt(S.drag); c.font = '11px ui-monospace,monospace'; const tw = c.measureText(t).width, lx = clamp(x - tw / 2, 4, w - tw - 4);
+      c.fillStyle = '#000c'; c.fillRect(lx - 3, y - 30, tw + 6, 15); c.fillStyle = '#fff'; c.fillText(t, lx, y - 19); }
     if (F.alarmT != null && S.t - F.alarmT < 8 && pulse < 0.5) { c.strokeStyle = '#ff4d4d'; c.lineWidth = 5; c.strokeRect(2, 2, w - 4, w - 4); c.lineWidth = 1; }
   }
   function star(c, x, y, r) { c.beginPath(); for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); } c.closePath(); c.fill(); }
@@ -452,6 +476,57 @@
   function wedge(c, x, y, r, az, fov) { const a = (az - 90) * Math.PI / 180, h = fov / 2 * Math.PI / 180; c.beginPath(); c.moveTo(x, y); c.arc(x, y, r, a - h, a + h); c.closePath(); c.fill(); }
   function ray(c, x, y, b, len, col) { const t = b * Math.PI / 180; c.strokeStyle = col; c.lineWidth = 1.5; c.beginPath(); c.moveTo(x, y); c.lineTo(x + Math.sin(t) * len, y - Math.cos(t) * len); c.stroke(); c.lineWidth = 1; }
 
+  // ---------- OpenStreetMap raster tiles (plain Web-Mercator tile math, no library). Only fetched when Street map is on. ----------
+  const tiles = { cache: new Map(), loaded: 0, failed: false, errors: 0 };
+  function tileImg(z, x, y) {
+    const n = 1 << z; x = ((x % n) + n) % n; if (y < 0 || y >= n) return null;
+    const k = z + '/' + x + '/' + y; let im = tiles.cache.get(k);
+    if (!im) {
+      im = new Image(); im.decoding = 'async';
+      im.onload = () => { im.ok = true; tiles.loaded++; };
+      im.onerror = () => { im.bad = true; if (++tiles.errors >= 1 && !tiles.loaded) { tiles.failed = true; geoStat('Street map tiles could not load (offline?), showing the plain grid'); } };
+      im.src = 'https://tile.openstreetmap.org/' + k + '.png'; tiles.cache.set(k, im);
+    }
+    return im;
+  }
+  function drawTiles(c, w) {
+    const mppMap = W / w, lat = S.geo.lat * Math.PI / 180, d = Math.min(1.5, window.devicePixelRatio || 1);
+    const z = clamp(Math.round(Math.log2(156543.03 * Math.cos(lat) / (mppMap / d))), 3, 18), mppT = 156543.03 * Math.cos(lat) / Math.pow(2, z);
+    const q = mppMap / mppT, n = 256 * Math.pow(2, z);                       // q = tile pixels per screen pixel
+    const cx = (S.geo.lon + 180) / 360 * n, cy = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n;
+    const tlx = cx - w / 2 * q, tly = cy - w / 2 * q; let any = false;
+    for (let ty = Math.floor(tly / 256); ty <= Math.floor((tly + w * q) / 256); ty++) for (let tx = Math.floor(tlx / 256); tx <= Math.floor((tlx + w * q) / 256); tx++) {
+      // politeness + offline: until one tile has loaded, only ask for the centre tile (1 request, not ~16)
+      if (!tiles.loaded && !(tx === Math.floor(cx / 256) && ty === Math.floor(cy / 256))) continue;
+      const im = tileImg(z, tx, ty); if (im && im.ok) { c.drawImage(im, (tx * 256 - tlx) / q, (ty * 256 - tly) / q, 256 / q + 0.6, 256 / q + 0.6); any = true; }
+    }
+    return any;
+  }
+  function drawAirports(c, w, big) {
+    for (const a of AIRPORTS) {
+      const q = fromLL(a.lat, a.lon), nx = clamp(q.x, 0, W), ny = clamp(q.y, 0, W);
+      if (Math.hypot(nx - q.x, ny - q.y) > a.r) continue;                    // zone doesn't reach the 3 km box
+      c.fillStyle = '#ff6b3510'; c.strokeStyle = '#ff6b3566'; c.setLineDash([8, 6]); c.lineWidth = 2;
+      c.beginPath(); c.arc(X(q.x), X(q.y), X(a.r), 0, 7); c.fill(); c.stroke(); c.setLineDash([]); c.lineWidth = 1;
+      const inside = q.x >= 0 && q.x <= W && q.y >= 0 && q.y <= W, lx = inside ? X(q.x) : X(clamp(q.x, 150, W - 150)), ly = Math.min(inside ? X(q.y) : X(clamp(q.y, 260, W - 260)), w - 30 - 13 * big); // keep clear of the OSM credit
+      c.font = 'bold ' + (11 * big) + 'px sans-serif'; c.fillStyle = '#ffab85';
+      const t1 = '✈ ' + a.name + (inside ? '' : ' ' + km(Math.hypot(q.x - HUB.x, q.y - HUB.y)) + ' ' + P.compass(P.bearing(HUB, q))), t2 = '~' + a.r / 1000 + ' km zone · approx, check Digital Sky';
+      for (const [t, dy] of [[t1, 0], [t2, 13 * big]]) { const tw = c.measureText(t).width; c.fillText(t, clamp(lx - tw / 2, 4, w - tw - 4), ly + dy); }
+    }
+  }
+  function drawWeather(c, w, big) {
+    const wx = S.wx;
+    if (wx.dust) { c.fillStyle = wx.dust === 2 ? '#c8a36a26' : '#c8a36a12'; c.fillRect(0, 0, w, w); }
+    if (wx.rain) { c.strokeStyle = '#9ec9ff' + (wx.rain === 2 ? '40' : '22'); c.beginPath(); const n = wx.rain === 2 ? 90 : 35, ph = (Date.now() / 6) % w;
+      for (let i = 0; i < n; i++) { const x = (i * 97.3 + ph * 0.3) % w, y = (i * 53.7 + ph) % w; c.moveTo(x, y); c.lineTo(x - 3, y + 9); } c.stroke(); }
+    // wind arrow (points where the wind blows TO)
+    const ax = 36, ay = w - 82, to = (wx.windFrom + 180) % 360, t = to * Math.PI / 180, L = 9 + Math.min(15, wx.wind * 1.2);
+    c.fillStyle = '#0b1220cc'; c.beginPath(); c.arc(ax, ay, 24, 0, 7); c.fill(); c.strokeStyle = '#cfe3ff'; c.lineWidth = 2.5;
+    const ex = ax + Math.sin(t) * L, ey = ay - Math.cos(t) * L; c.beginPath(); c.moveTo(ax - Math.sin(t) * L, ay + Math.cos(t) * L); c.lineTo(ex, ey); c.stroke();
+    c.beginPath(); c.moveTo(ex, ey); c.lineTo(ex - Math.sin(t - 0.5) * 7, ey + Math.cos(t - 0.5) * 7); c.lineTo(ex - Math.sin(t + 0.5) * 7, ey + Math.cos(t + 0.5) * 7); c.closePath(); c.fillStyle = '#cfe3ff'; c.fill(); c.lineWidth = 1;
+    c.font = (11 * big) + 'px sans-serif'; c.fillStyle = '#cfe3ff'; const lab = 'wind ' + wx.wind + ' m/s from ' + P.compass(wx.windFrom) + ' · ' + P.TOD[wx.tod].T + '°C' + (wx.rain ? ' 🌧' : '') + (wx.dust ? ' 🌫' : '');
+    const lw = c.measureText(lab).width; c.fillStyle = '#0b1220cc'; c.fillRect(3, ay + 27, lw + 7, 15); c.fillStyle = '#cfe3ff'; c.fillText(lab, 6, ay + 38);
+  }
   function pickSel() { // auto: follow the node with the strongest ladder (or the one nearest the main object)
     if (S.selPinned && S.sel) return S.sel;
     const o = refObj(); let best = null, bs = -1e9;
@@ -489,7 +564,7 @@
       S.acc += fdt * S.speed; let n = 0;
       while (S.acc >= EVAL_DT && n++ < 40) { S.acc -= EVAL_DT; S.t += EVAL_DT; moveObjs(); if (S.done) break; evaluate(); if (!S.playing) { S.acc = 0; break; } }
     }
-    pickSel(); drawMap(); drawSpec(); drawPanel(); audioUpdate(); placeCallout();
+    pickSel(); drawMap(); drawSpec(); drawPanel(); audioUpdate(); placeCallout(); if (now - (frame.g || 0) > 1000) { frame.g = now; renderGps(); }
     requestAnimationFrame(frame);
   }
 
@@ -505,9 +580,9 @@
   }
   function audioUpdate() {
     if (!AC || !S.sel) return;
-    const n = S.sel, env = { scen: S.scen, wind: S.wind, tog: S.tog, objs: S.objs }, now = AC.currentTime;
+    const n = S.sel, env = envNow(), now = AC.currentTime;
     const tones = S.objs.flatMap(o => P.objectTones(o, env, n).tones).filter(t => t.f > 60).sort((a, b) => b.L - a.L).slice(0, 10);
-    const nz = P.noiseParts(300, env, n), noiseDb = P.dbAdd(nz.self, nz.amb, nz.wind, nz.roar), amp = db => Math.min(0.25, Math.pow(10, (db - 60) / 20));
+    const nz = P.noiseParts(300, env, n), noiseDb = P.dbAdd(nz.self, nz.amb, nz.wind, nz.roar, nz.rain), amp = db => Math.min(0.25, Math.pow(10, (db - 60) / 20));
     osc.forEach((o, i) => { const t = tones[i]; o.o.frequency.setTargetAtTime(t ? t.f : 100, now, 0.05); o.g.gain.setTargetAtTime(t ? amp(t.L) : 0, now, 0.1); });
     noiseG.gain.setTargetAtTime(Math.min(0.4, Math.pow(10, (noiseDb - 45) / 20)), now, 0.1);
   }
@@ -520,11 +595,11 @@
     { t: 'Fusion adds up the maybes', wait: 'alarm', x: 'Each sense gives a score. Fusion adds them up: two different senses agreeing (radio + sound) beat one loud sensor. Scores that point to a different place are mostly ignored, and old evidence fades. When the total crosses <b>95%</b>, the alarm goes off. Below the map the cyan circle is fusion\'s <b>guess</b> of where the drone is.' },
     { t: 'The camera confirms', wait: 'confirm', x: 'Fusion told the thermal camera where to look, so it <b>turned</b> to the guess instead of searching the whole sky. It sees a warm, drone-shaped dot. Shape and motion also let it say "that\'s a bird" or "that\'s a plane", which would <b>lower</b> the score.' },
     { t: 'What happens next', x: 'Look at the <b>What happens next</b> panel: ① an alert goes to phones and a siren/light, ② the camera records, ③ an evidence log builds that you can <b>download</b>, ④ a checklist: go indoors, don\'t approach it, report to <b>police (112)</b> and <b>DGCA Digital Sky</b> with the evidence. All legal, nothing is jammed or shot down.' },
-    { t: 'Your turn', x: 'Try a decoy and see fusion stay calm:<br><button data-try="bird">🐦 Bird only</button><button data-try="heli">🚁 Helicopter + small quad</button><button data-try="fpv">⚡ Silent FPV racer</button><br>Or pick anything from <b>What\'s flying in?</b> Tap any <b>?</b> for help.' }
+    { t: 'Your turn', x: 'Try a decoy and see fusion stay calm:<br><button data-try="bird">🐦 Bird only</button><button data-try="heli">🚁 Helicopter + small quad</button><button data-try="fpv">⚡ Silent FPV racer</button><br><b>Weather</b> matters too: rain hiss buries the sound ladder, heat and dust blind the thermal camera, radio barely cares.<br><button data-try="monsoon">🌧 Small quad in monsoon rain</button><button data-try="coldnight">🌙 Clear cold night</button><br>Or pick anything from <b>What\'s flying in?</b> Tap any <b>?</b> for help.' }
   ];
   const tour = { on: false, i: 0, waiting: null };
   function startTour() {
-    tour.on = true; tour.i = 0; tour.waiting = null; S.kind = 'small'; S.second = 'jet'; S.route = 0; S.scen = 'suburb'; S.rid = false; S.radio = true; S.height = 60;
+    tour.on = true; tour.i = 0; tour.waiting = null; S.wx = Object.assign({}, PRESETS.clear.wx, { wind: 3 }); S.preset = null; updateImpact(); S.kind = 'small'; S.second = 'jet'; S.route = 0; S.scen = 'suburb'; S.rid = false; S.radio = true; S.height = 60;
     for (const k in S.tog) S.tog[k] = true; syncUI(); reset(); S.playing = false; setPlay(); showTour();
   }
   function showTour() {
@@ -538,12 +613,49 @@
       const m = st.wait && moments[st.wait]; if (m) showCallout(m.sensor, m.title, m.text, false); else if (tour.i === 0) { hideCallout(); } else if (tour.i === 5) { hideCallout(); document.getElementById('resp').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     }
     $('tourBack').disabled = tour.i === 0; $('tourNext').textContent = tour.i === TOUR.length - 1 ? 'Finish ✓' : 'Next ▶';
-    $('tourText').querySelectorAll('[data-try]').forEach(b => b.onclick = () => { endTour(); const k = b.dataset.try; S.kind = k === 'heli' ? 'small' : k; S.second = k === 'heli' ? 'heli' : ''; S.radio = k !== 'fpv'; S.rid = false; S.height = OB[S.kind].h; syncUI(); reset(); S.playing = true; setPlay(); });
+    $('tourText').querySelectorAll('[data-try]').forEach(b => b.onclick = () => { endTour(); const k = b.dataset.try; if (PRESETS[k]) { S.kind = 'small'; S.second = ''; S.height = 60; applyPreset(k); return; } S.kind = k === 'heli' ? 'small' : k; S.second = k === 'heli' ? 'heli' : ''; S.radio = k !== 'fpv'; S.rid = false; S.height = OB[S.kind].h; syncUI(); reset(); S.playing = true; setPlay(); });
   }
   function tourMoment(key) { if (tour.waiting === key) { tour.waiting = null; showTour(); } }
   function endTour() { tour.on = false; tour.waiting = null; $('tour').hidden = true; hideCallout(); setSpeed(8); }
 
   // ---------- UI ----------
+  // ---------- weather UI ----------
+  const PRESETS = {
+    clear:     { wx: { wind: 2, windFrom: 270, dust: 0, rain: 0, tod: 'mildday' }, scen: 'suburb', t: '☀️ Clear mild day', x: 'The reference day: 27 °C, light breeze, dry. Every "Weather impact" number is compared with this.' },
+    coldnight: { wx: { wind: 1, windFrom: 90, dust: 0, rain: 0, tod: 'coldnight' }, scen: 'night', t: '🌙 Clear cold night', x: 'Calm, 15 °C. The ground cools and traps a layer of cold air: sound bends back down and carries much farther. The cold sky also makes warm motors stand out for the thermal camera. Best case for detection.' },
+    hot:       { wx: { wind: 4, windFrom: 270, dust: 1, rain: 0, tod: 'hotday' }, scen: 'suburb', t: '🔥 Hot afternoon', x: '38 °C on sun-baked ground: sound bends UP and away, and heat shimmer makes the rotor ladder flicker, so sound range drops. The warm background washes out the thermal camera. Radio barely changes.' },
+    monsoon:   { wx: { wind: 7, windFrom: 225, dust: 0, rain: 2, tod: 'mildday' }, scen: 'suburb', t: '🌧 Monsoon rain', x: 'Raindrops drumming on mics and dishes make a hiss that buries the rotor ladder. Rain blurs thermal badly. Radio only loses a little (5.8 GHz more), so radio + Remote ID carry the load. Gusts and drumming can also shake the vibration sensor.' },
+    dusty:     { wx: { wind: 11, windFrom: 315, dust: 2, rain: 0, tod: 'hotday' }, scen: 'suburb', t: '🌪 Dusty windy day', x: 'Strong wind roars on the mics and bends sound away upwind. Dust scatters heat so the thermal camera sees much less. Light drones wobble and work their motors harder (a bit louder). Radio does not care about dust.' }
+  };
+  const WXPT = { id: 'WX', name: 'weather', x: 120, y: 330 };              // where the callout points: the wind badge on the map
+  function applyPreset(k) {
+    const pr = PRESETS[k]; S.wx = Object.assign({}, pr.wx); S.scen = pr.scen; S.preset = k; syncUI(); reset(); updateImpact();
+    const im = P.weatherImpact(envNow()), f = v => (v > 0 ? '+' : '') + v + '%';
+    WXPT.x = 36 / scale; WXPT.y = (map.clientWidth - 106) / scale; S.playing = false; setPlay(); showCallout(WXPT, pr.t, pr.x + ' Estimated vs clear mild day: sound ' + f(im.sound.pct) + ', thermal ' + f(im.thermal.pct) + ', radio ' + f(im.rf24.pct) + '.', true);
+  }
+  function wxChanged(full) { S.preset = null; $('wv').textContent = S.wx.wind + ' m/s'; if (full) syncUI(); updateImpact(); }
+  function updateImpact() {
+    const im = P.weatherImpact(envNow()), row = (name, m, pct, extra) => {
+      const cls = pct > 3 ? 'up' : pct < -3 ? 'dn' : 'eq', w = clamp(100 + pct, 0, 200) / 2;
+      return '<span>' + name + '</span><div class="bar" title="' + (extra || '') + '"><i style="width:' + w + '%"></i></div><span class="' + cls + '">' + (pct > 0 ? '+' : '') + pct + '%' + (m != null ? ' · ' + km(m) : '') + '</span>';
+    };
+    $('impact').innerHTML = '<span class="hd">Weather impact: estimated range vs a clear mild day (same scene &amp; sensors). Bar middle = no change.</span>' +
+      row('🎙 Sound (small quad)', im.sound.m, im.sound.pct) + '<span class="hd" style="margin-top:-2px">&nbsp;&nbsp;upwind ' + km(im.sound.up) + ' · downwind ' + km(im.sound.dn) + '</span>' +
+      row('📡 Radio 2.4 GHz', im.rf24.m, im.rf24.pct) + row('📡 Radio 5.8 GHz', im.rf58.m, im.rf58.pct) + row('🆔 Remote ID', im.rid.m, im.rid.pct) + row('🌡 Thermal (small quad)', im.thermal.m, im.thermal.pct) +
+      '<span>〰 Vibration</span><span></span><span class="' + (im.vib.falsePerMin > 0.1 ? 'dn' : 'eq') + '">' + (im.vib.falsePerMin > 0.1 ? '~' + im.vib.falsePerMin.toFixed(1) + ' false shakes/min' : 'no false shakes') + '</span>' +
+      (() => { const st = P.droneStrain(OB[S.kind], S.wx); return st.wobble ? '<span class="hd">✈ ' + OB[S.kind].label + ' fights the weather: path wobbles ±' + Math.round(st.wobble) + ' m, motors ~' + st.loud.toFixed(1) + ' dB louder</span>' : ''; })();
+    document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', b.dataset.p === S.preset));
+  }
+  // ---------- location UI ----------
+  let geoBusy = false;
+  function geoStat(msg) { $('geostat').textContent = msg || (S.geo.name + ' · ' + llTxt(HUB) + (S.mapMode === 'street' ? (tiles.failed ? ' · street map unavailable, plain grid' : ' · street map from OpenStreetMap') : '')); }
+  function setGeo(lat, lon, name) { S.geo = { lat, lon, name }; geoStat(); log('Map centre moved to ' + name + ' (' + llTxt(HUB) + '). Sensors keep their layout in metres.', 'fus'); renderGps(); }
+  function renderGps() {
+    const det = $('gpslist').parentElement; if (!det.open) return;
+    const rows = sensors.map(s => [s.id + ' ' + (s.kind === 'node' ? 'sound' : s.kind), s]).concat(S.objs.map(o => [OB[o.kind].label, o]));
+    if (F && F.est) rows.push(['fusion guess', F.est]);
+    $('gpslist').innerHTML = rows.map(([n, p]) => '<div><span>' + n + '</span><span>' + llTxt(p) + '</span></div>').join('');
+  }
   function setPlay() { $('play').textContent = S.playing ? '⏸ Pause' : '▶ Play'; }
   function setSpeed(v) { S.speed = v; document.querySelectorAll('#speedSeg button').forEach(b => b.classList.toggle('on', +b.dataset.v === v)); }
   function iconCanvas(kind, col, px) {
@@ -578,11 +690,12 @@
   function buildToggles() {
     const box = $('toggles'); box.innerHTML = '';
     for (const [k, label, help] of TOG) { const b = document.createElement('button'); b.textContent = label; b.className = S.tog[k] ? 'on' : ''; b.dataset.k = k; b.title = help;
-      b.onclick = () => { S.tog[k] = !S.tog[k]; b.className = S.tog[k] ? 'on' : ''; log((S.tog[k] ? 'ON: ' : 'OFF: ') + label.replace(/^\S+ /, ''), 'fus'); }; box.appendChild(b); }
+      b.onclick = () => { S.tog[k] = !S.tog[k]; b.className = S.tog[k] ? 'on' : ''; updateImpact(); log((S.tog[k] ? 'ON: ' : 'OFF: ') + label.replace(/^\S+ /, ''), 'fus'); }; box.appendChild(b); }
   }
   function syncUI() {
     document.querySelectorAll('#picker button').forEach(b => b.classList.toggle('on', b.dataset.k === S.kind));
     $('second').value = S.second; $('route').value = S.route; $('scen').value = S.scen; $('height').value = S.height; $('hv').textContent = S.height + ' m';
+    $('wind').value = S.wx.wind; $('wv').textContent = S.wx.wind + ' m/s'; $('wdir').value = S.wx.windFrom; $('dust').value = S.wx.dust; $('rain').value = S.wx.rain; $('tod').value = S.wx.tod;
     $('rid').checked = S.rid; $('radio').checked = S.radio; const dr = OB[S.kind].drone; $('rid').disabled = !dr; $('radio').disabled = !dr;
     document.querySelectorAll('#toggles button').forEach(b => b.className = S.tog[b.dataset.k] ? 'on' : '');
   }
@@ -606,10 +719,23 @@
     $('callout').querySelector('.co-go').onclick = () => { hideCallout(); S.playing = true; setPlay(); };
     $('listen').onclick = audioToggle;
     $('dl').onclick = () => { const blob = new Blob([JSON.stringify(evidenceReport(), null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'skyfuse-evidence-' + clock(S.t).replace(/:/g, '') + '.json'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
-    const restartOn = () => { S.second = $('second').value; S.route = +$('route').value; S.scen = $('scen').value; S.rid = $('rid').checked; S.radio = $('radio').checked; if (S.second === S.kind) S.second = ''; syncUI(); reset(); S.playing = true; setPlay(); };
+    const restartOn = () => { S.second = $('second').value; S.route = +$('route').value; if (S.scen !== $('scen').value) { S.scen = $('scen').value; const night = S.scen === 'night'; if (night !== P.TOD[S.wx.tod].night) S.wx.tod = night ? 'mildnight' : 'mildday'; updateImpact(); } S.rid = $('rid').checked; S.radio = $('radio').checked; if (S.second === S.kind) S.second = ''; syncUI(); reset(); S.playing = true; setPlay(); };
     ['second', 'route', 'scen', 'rid', 'radio'].forEach(id => $(id).onchange = restartOn);
     $('height').oninput = e => { S.height = +e.target.value; $('hv').textContent = S.height + ' m'; };
-    $('wind').oninput = e => { S.wind = +e.target.value; $('wv').textContent = S.wind + ' m/s'; };
+    // weather (live) + presets
+    $('wind').oninput = e => { S.wx.wind = +e.target.value; wxChanged(); };
+    ['wdir', 'dust', 'rain'].forEach(id => $(id).onchange = e => { S.wx[{ wdir: 'windFrom', dust: 'dust', rain: 'rain' }[id]] = +e.target.value; wxChanged(true); });
+    $('tod').onchange = e => { S.wx.tod = e.target.value; const night = P.TOD[S.wx.tod].night; if (night !== (S.scen === 'night')) { S.scen = night ? 'night' : 'suburb'; } wxChanged(true); };
+    document.querySelectorAll('#presets button').forEach(b => b.onclick = () => applyPreset(b.dataset.p));
+    // map + location
+    document.querySelectorAll('#mapSeg button').forEach(b => b.onclick = () => { S.mapMode = b.dataset.v; if (S.mapMode === 'street') { tiles.failed = false; tiles.errors = 0; }
+      document.querySelectorAll('#mapSeg button').forEach(x => x.classList.toggle('on', x === b)); geoStat(); });
+    $('geoform').onsubmit = e => { e.preventDefault(); const q = $('geoq').value.trim(); if (!q || geoBusy) return; geoBusy = true; $('geogo').disabled = true; geoStat('Searching OpenStreetMap for "' + q + '"…');
+      fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q), { headers: { 'Accept-Language': 'en' } })
+        .then(r => r.ok ? r.json() : Promise.reject(r.status)).then(j => { if (!j.length) { geoStat('No place found for "' + q + '"'); return; } setGeo(+j[0].lat, +j[0].lon, j[0].display_name.split(',').slice(0, 2).join(',')); })
+        .catch(() => geoStat('Search failed (offline?). Map centre unchanged.')).finally(() => { geoBusy = false; $('geogo').disabled = false; }); };
+    $('geome').onclick = () => { if (!navigator.geolocation) { geoStat('This browser has no location access'); return; } geoStat('Asking the browser for your location…');
+      navigator.geolocation.getCurrentPosition(p => setGeo(p.coords.latitude, p.coords.longitude, 'My location (±' + Math.round(p.coords.accuracy) + ' m)'), err => geoStat('Location not available: ' + err.message), { timeout: 10000, maximumAge: 60000 }); };
     $('tourBtn').onclick = startTour;
     $('tourNext').onclick = () => { if (tour.i >= TOUR.length - 1) { endTour(); return; } tour.i++; showTour(); };
     $('tourBack').onclick = () => { if (tour.i > 0) { tour.i--; tour.waiting = null; const st = TOUR[tour.i]; $('tourStep').textContent = 'HOW IT WORKS · ' + (tour.i + 1) + ' / ' + TOUR.length; $('tourTitle').textContent = st.t; $('tourText').innerHTML = st.x; $('tourNext').disabled = false; $('tourBack').disabled = tour.i === 0; $('tourNext').textContent = 'Next ▶'; S.playing = false; setPlay(); } };
@@ -618,14 +744,14 @@
     let drag = null, moved = false;
     const pos = e => { const r = map.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
     map.addEventListener('pointerdown', e => { const p = pos(e); let best = null, bd = 24 / scale; for (const s of sensors) { const d = Math.hypot(s.x - p.x, s.y - p.y); if (d < bd) { bd = d; best = s; } }
-      if (best) { drag = best; moved = false; map.setPointerCapture(e.pointerId); e.preventDefault(); } });
+      if (best) { drag = best; S.drag = best; moved = false; map.setPointerCapture(e.pointerId); e.preventDefault(); } });
     map.addEventListener('pointermove', e => { if (!drag) return; const p = pos(e); moved = true; drag.x = clamp(p.x, 0, W); drag.y = clamp(p.y, 0, W); if (drag.kind === 'node' || drag.kind === 'hub') aimDishes(); });
-    const up = () => { if (drag && !moved && drag.kind === 'node') { if (S.sel === drag && S.selPinned) S.selPinned = false; else { S.sel = drag; S.selPinned = true; } } drag = null; };
+    const up = () => { if (drag && moved) log('Moved ' + drag.name + ' to ' + llTxt(drag), 'fus'); S.drag = null; if (drag && !moved && drag.kind === 'node') { if (S.sel === drag && S.selPinned) S.selPinned = false; else { S.sel = drag; S.selPinned = true; } } drag = null; };
     map.addEventListener('pointerup', up); map.addEventListener('pointercancel', up);
     window.addEventListener('resize', resize);
   }
 
-  buildLayout(); buildPicker(); buildLegend(); buildToggles(); buildHelp(); bind(); syncUI(); resize(); reset();
-  window.SkyFuse = { S, F: () => F, firsts: () => firsts, moments: () => moments, tour, evidenceReport, reset, startTour, syncUI, setSpeed };
+  buildLayout(); buildPicker(); buildLegend(); buildToggles(); buildHelp(); bind(); syncUI(); resize(); reset(); updateImpact(); geoStat();
+  window.SkyFuse = { applyPreset, setGeo, toLL, fromLL, tiles, updateImpact, S, F: () => F, firsts: () => firsts, moments: () => moments, tour, evidenceReport, reset, startTour, syncUI, setSpeed };
   requestAnimationFrame(frame);
 })();

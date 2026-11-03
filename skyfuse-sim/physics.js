@@ -27,8 +27,44 @@
     heli:  { label: 'Helicopter', sub: 'decoy: 300 m up', drone: false, snd: { ladder: { f0: 21, sl: 112, nh: 48, slope: 0.6 }, roar: 124 }, eirp: null, rid: false, therm: 2500, tcls: 'aircraft', speed: 55, h: 300, icon: 'heli', size: 1.5 }
   };
 
+  // ---------- WEATHER (all rough estimates; see README "Weather model") ----------
+  // wx = { wind m/s, windFrom deg (meteorological: where it blows FROM), dust 0/1/2, rain 0/1/2, tod }
+  const TOD = {
+    coldnight: { label: 'Cold night', T: 15, RH: 85, night: true },  // Bangalore winter night, calm: ground inversion likely
+    mildnight: { label: 'Mild night', T: 21, RH: 75, night: true },
+    mildday:   { label: 'Mild day',   T: 27, RH: 55, night: false }, // the reference "clear mild day"
+    hotday:    { label: 'Hot day',    T: 38, RH: 25, night: false }  // April afternoon: sun-baked ground, upward refraction
+  };
+  const WX_REF = { wind: 2, windFrom: 270, dust: 0, rain: 0, tod: 'mildday' };
+  const wxOf = env => env.wx || WX_REF;
+  const climate = wx => { const t = TOD[wx.tod] || TOD.mildday; return { T: t.T, RH: wx.rain ? Math.max(t.RH, 92) : t.RH, night: t.night }; };
+
   // Air absorption (dB/km), rough ISO 9613-1 shape at ~20 °C, 70% RH: ~0.6 dB/km at 200 Hz, ~5 at 1 kHz, ~30 at 4 kHz.
-  const absorb = f => 5 * Math.pow(f / 1000, 1.3);
+  // Weather trend (simplified ISO 9613-1): drier air absorbs more in the 1-4 kHz range; warmer air a little more.
+  // Dust adds a tiny broadband scattering loss (minor for sound).
+  const absorb = (f, wx) => {
+    const base = 5 * Math.pow(f / 1000, 1.3); if (!wx) return base;
+    const c = climate(wx), hum = clamp(Math.pow(70 / c.RH, 0.5), 0.75, 1.7), temp = 1 + 0.012 * (c.T - 20);
+    return base * (f > 500 ? hum : 1 + (hum - 1) * f / 500) * temp + 0.15 * wx.dust;
+  };
+  // Weather propagation loss (dB, positive = quieter) over r metres, for a path whose direction is c = cos(angle between
+  // the sound path and where the wind blows TO): c = +1 downwind, -1 upwind.
+  //  - hot sunny day: air near the ground is hottest, sound bends UP -> shadow zone beyond a few hundred metres
+  //  - cold calm night: temperature inversion bends sound back DOWN -> carries much farther (wind breaks the inversion)
+  //  - wind gradient: upwind = refraction shadow (big loss), downwind = bent down (modest gain)
+  function wxLoss(r, wx, c, high) {
+    if (!wx) return 0;
+    const k = 1 - Math.exp(-r / 500), w = wx.wind;
+    let L = 0;
+    if (wx.tod === 'hotday') L += (high ? 7 : 10) * k;
+    if (wx.tod === 'coldnight' || wx.tod === 'mildnight') L -= (wx.tod === 'coldnight' ? 8 : 3) * k * clamp(1 - (w - 2) / 6, 0, 1) * (wx.rain ? 0.4 : 1);
+    if (c < 0) L += Math.min(15, -c * 0.9 * w * (1 - Math.exp(-r / 300)));
+    else L -= Math.min(5, c * 0.35 * w * (1 - Math.exp(-r / 400)));
+    return L;
+  }
+  // Turbulence: random level flicker per frame (dB, 1 sigma). Wind gusts and hot-day convection make the ladder flicker.
+  const turbSigma = wx => wx ? 0.25 * wx.wind + (wx.tod === 'hotday' ? 2 : 0) : 0;
+  const windTo = wx => (wx.windFrom + 180) % 360;
   // Extra loss beyond spherical spreading: ground effect, turbulence, refraction. A raised node (8 m pole) avoids most ground effect.
   const excess = (r, high) => 10 * Math.log10(1 + r / 150) + (high ? 0 : 5 * (1 - Math.exp(-r / 250)));
   const dist3 = (o, n) => Math.max(5, Math.hypot(o.x - n.x, o.y - n.y, o.h - n.h));
@@ -43,17 +79,20 @@
     else if (env.scen === 'city') amb = Math.max(8, 32 - 4 * Math.log2(Math.max(f, 100) / 100));
     else amb = Math.max(4, 16 - 3 * Math.log2(Math.max(f, 100) / 100));   // suburb
     if (high) amb -= 5;                                                   // above street-level noise
-    const v = env.wind * (high ? 1.25 : 1);                               // more wind up a pole...
-    const wind = v > 0.2 ? 20 * Math.log10(v) + 6 - 10 * Math.log2(Math.max(f, 50) / 50) : -40; // ...but a fur windshield is assumed
+    const wx = wxOf(env), v = wx.wind * (high ? 1.25 : 1);                // more wind up a pole...
+    // wind noise is low-frequency turbulence at the mic; a fur windshield is assumed (~-20 dB), so it bites mainly below ~300 Hz
+    const wind = v > 0.2 ? 20 * Math.log10(v) + 6 + (v > 8 ? 1.5 * (v - 8) : 0) - 10 * Math.log2(Math.max(f, 50) / 50) : -40;
+    // rain: broadband drop impacts on the mic, windshield and dish, fairly flat, slightly rising to ~2 kHz
+    const rain = wx.rain ? (wx.rain === 2 ? 27 : 12) + (T.dish ? 3 : 0) + 2 * clamp(Math.log2(f / 250), -2, 3) : -60;
     let roar = -60;
     for (const o of env.objs) {
       if (!o.spec.snd.roar) continue;
-      const r = dist3(o, node), total = o.spec.snd.roar - 20 * Math.log10(r) - absorb(500) * r / 1000;
+      const r = dist3(o, node), total = o.spec.snd.roar - 20 * Math.log10(r) - absorb(500, env.wx) * r / 1000 - wxLoss(r, env.wx, Math.cos((bearing(o, node) - windTo(wxOf(env))) * Math.PI / 180), T.height);
       let L = total - 29 - (f < 500 ? 0 : 4 * Math.log2(f / 500));        // spread over ~3 kHz
       if (T.ring && node._focus && angDiff(bearing(node, o), bearing(node, node._focus)) > 30) L -= 8; // array points away from it
       roar = dbAdd(roar, L);
     }
-    return { self, amb, wind, roar };
+    return { self, amb, wind, roar, rain };
   }
 
   // Tone gains at a node for a source in a given direction: dish (+9 dB in its beam), ring (+6 dB), long listening (+3.9 dB).
@@ -66,7 +105,9 @@
   }
   // All tonal components one object puts into one node: rotor ladder, bird chirp, turbine whine.
   function objectTones(o, env, node) {
-    const s = o.spec.snd, r = dist3(o, node), loss = f => 20 * Math.log10(r) + absorb(f) * r / 1000 + excess(r, env.tog.height), G = gains(env, node, o), out = [];
+    const s = o.spec.snd, r = dist3(o, node), wx = env.wx, c = wx ? Math.cos((bearing(o, node) - windTo(wx)) * Math.PI / 180) : 0;
+    const wl = wxLoss(r, wx, c, env.tog.height), loss = f => 20 * Math.log10(r) + absorb(f, wx) * r / 1000 + excess(r, env.tog.height) + wl;
+    const G = gains(env, node, o) + (o.loud || 0), out = [];
     if (s.ladder) for (let h = 1; h <= s.ladder.nh; h++) {
       const f = s.ladder.f0 * o.rpm * h; if (f > FMAX - 20) break;
       const spread = 10 * Math.log10(Math.max(1, 0.02 * f / BIN_HZ));     // rotor speed wobble smears high harmonics
@@ -83,15 +124,17 @@
     const parts = new Float32Array(NB); node._roarDb = node._roarDb || new Float32Array(NB);
     for (let i = 1; i < NB; i++) {
       const p = noiseParts(i * BIN_HZ, env, node);
-      const P = Math.pow(10, p.self / 10) + Math.pow(10, p.amb / 10) + Math.pow(10, p.wind / 10) + Math.pow(10, p.roar / 10);
+      const P = Math.pow(10, p.self / 10) + Math.pow(10, p.amb / 10) + Math.pow(10, p.wind / 10) + Math.pow(10, p.roar / 10) + Math.pow(10, p.rain / 10);
       let x = 0; for (let k = 0; k < K; k++) x -= Math.log(Math.random() + 1e-12);
       parts[i] = P * x / K; node._roarDb[i] = p.roar;
     }
-    for (const o of env.objs) for (const t of objectTones(o, env, node).tones) {
-      const c = Math.round(t.f / BIN_HZ), P = Math.pow(10, t.L / 10) * (0.7 + 0.6 * Math.random());
+    const ts = turbSigma(env.wx);
+    // fades only: turbulence breaks up the sound path, it doesn't make the source louder on average than the model
+    for (const o of env.objs) { const flick = -Math.abs(gauss()) * ts; for (const t of objectTones(o, env, node).tones) {
+      const c = Math.round(t.f / BIN_HZ), P = Math.pow(10, (t.L + flick) / 10) * (0.7 + 0.6 * Math.random());
       if (c > 0 && c < NB) parts[c] += P;
       if (c > 1) parts[c - 1] += P * 0.16; if (c < NB - 1) parts[c + 1] += P * 0.16;
-    }
+    } }
     for (let i = 0; i < NB; i++) db[i] = 10 * Math.log10(parts[i] + 1e-20);
     db[0] = db[1];
     return { db };
@@ -145,12 +188,18 @@
     if (!o.radioOn || o.spec.eirp == null) return null;
     const dkm = Math.hypot(o.x - tw.x, o.y - tw.y, o.h - tw.h) / 1000, sp = o.spec;
     const clutter = (env.scen === 'city' ? 6 : 2) + (o.h < 40 ? 5 : 0);
-    const l24 = sp.band === '5.8' ? -200 : sp.eirp + 8 - fspl(dkm, 2440) - clutter;
-    const l58 = sp.eirp + (sp.band === '5.8' ? 0 : -6) + 8 - fspl(dkm, 5800) - clutter; // 5.8 GHz video downlink
+    const l24 = sp.band === '5.8' ? -200 : sp.eirp + 8 - fspl(dkm, 2440) - clutter - rainAtt(wxOf(env), 2.4, dkm);
+    const l58 = sp.eirp + (sp.band === '5.8' ? 0 : -6) + 8 - fspl(dkm, 5800) - clutter - rainAtt(wxOf(env), 5.8, dkm); // 5.8 GHz video downlink
     const rssi = Math.max(l24, l58) + gauss() * 2, band = l24 >= l58 ? '2.4' : '5.8', fl = rfFloor(env);
     const snr = rssi - fl - 6;
     if (snr < 0) return null;
     return { rssi, band, conf: clamp(0.2 + snr / 18, 0.2, 1), brg: bearing(tw, o) + gauss() * 22, obj: o };
+  }
+  // Rain attenuation (dB): ITU-R P.838-style specific attenuation is tiny at these frequencies (heavy ~25 mm/h rain:
+  // ~0.01 dB/km at 2.4 GHz, ~0.15 dB/km at 5.8 GHz) plus wet trees/roofs/antenna radome (~1 dB / ~2 dB). Dust: negligible.
+  function rainAtt(wx, ghz, dkm) {
+    if (!wx.rain) return 0; const hv = wx.rain === 2;
+    return (ghz > 5 ? (hv ? 0.15 : 0.03) : (hv ? 0.01 : 0.002)) * dkm + (ghz > 5 ? (hv ? 2 : 0.6) : (hv ? 1 : 0.3));
   }
   // invert free space loss assuming a "typical" 20 dBm drone: rough range from signal strength
   const rfRange = (rssi, env) => 1000 * Math.pow(10, (20 + 8 - (env.scen === 'city' ? 6 : 2) - rssi - 20 * Math.log10(2440) - 32.44) / 20);
@@ -158,14 +207,22 @@
   // ---------- Remote ID (public broadcast over Bluetooth/WiFi beacon; designed to be read openly) ----------
   function rid(o, env, tw) {
     if (!o.ridOn) return null;
-    const r = Math.hypot(o.x - tw.x, o.y - tw.y), range = env.scen === 'city' ? 700 : 1000;
+    const r = Math.hypot(o.x - tw.x, o.y - tw.y), range = ridRange(env);
     if (r > range || Math.random() > 0.9) return null;               // ~10% packets missed
     return { conf: 1, x: o.x + gauss() * 10, y: o.y + gauss() * 10, obj: o };
   }
 
+  // Remote ID range: 1 km (700 m in a busy city); rain loss at 2.4 GHz turns into a few % less range (20log rule)
+  const ridRange = env => (env.scen === 'city' ? 700 : 1000) * Math.pow(10, -rainAtt(wxOf(env), 2.4, 1) / 20);
+  // Thermal range factor from weather: contrast of a warm motor against the background + what the air does to LWIR.
+  //  cold night = best contrast; hot day = warm sky/ground background + heat shimmer; rain and dust/haze scatter and absorb a lot.
+  function thermFactor(wx) {
+    const tod = { coldnight: 1.3, mildnight: 1.15, mildday: 1, hotday: 0.65 }[wx.tod] || 1;
+    return tod * [1, 0.7, 0.4][wx.rain] * [1, 0.8, 0.45][wx.dust];
+  }
   // ---------- Thermal camera (pan-tilt, narrow view) + a simple shape/motion check (drone / bird / aircraft) ----------
   function thermal(o, env, cam) {
-    const r = Math.hypot(o.x - cam.x, o.y - cam.y, o.h - cam.h), range = o.spec.therm * (env.scen === 'night' ? 1.2 : env.scen === 'city' ? 0.85 : 1);
+    const r = Math.hypot(o.x - cam.x, o.y - cam.y, o.h - cam.h), range = o.spec.therm * thermFactor(wxOf(env)) * (env.scen === 'city' ? 0.85 : 1);
     if (angDiff(cam.az, bearing(cam, o)) > cam.fov / 2 || r > range) return null;
     return { conf: clamp(1.2 - r / range, 0.35, 1), brg: bearing(cam, o) + gauss() * 0.5, r, cls: o.spec.tcls, obj: o };
   }
@@ -178,10 +235,48 @@
     return ok ? { conf: 0.8, obj: o } : null;
   }
 
+  // Vibration false shakes per 0.5 s step: gusts above ~8 m/s rattle the roof; heavy rain drumming adds more.
+  const vibFalseRate = wx => Math.max(0, wx.wind - 8) * 0.006 + [0, 0.002, 0.012][wx.rain];
+  // Drone in bad weather: motors work harder (louder ladder) and the path wobbles; light drones suffer most.
+  function droneStrain(spec, wx) {
+    if (!spec.drone) return { loud: 0, wobble: 0 };
+    const light = spec.size < 1.05 ? 1.6 : 1, w = Math.max(0, wx.wind - 4) + (wx.rain === 2 ? 3 : wx.rain ? 1 : 0);
+    return { loud: Math.min(3, 0.25 * w * light), wobble: Math.min(120, 6 * w * light) };
+  }
+
+  // ---------- Weather impact readout: range vs a clear mild day (same scene + sensors) ----------
+  // Sound: distance where a small quad's first 3 rungs average > hit threshold above noise, averaged up/cross/downwind.
+  function soundRangeRef(env, c) {
+    const lad = OBJECTS.small.snd.ladder, T = env.tog, node = { h: T.height ? 8 : 1.5, dishAz: 0 }, hit = T.s3 ? 6 : HIT_DB, wx = wxOf(env);
+    const G = (T.dish ? 9 : 0) + (T.ring ? 6 : 0) + (T.longlisten ? 5 * Math.log10(6) : 0), e = Object.assign({}, env, { objs: [] });
+    const ok = r => { let s = 0; for (let h = 1; h <= 3; h++) { const f = lad.f0 * h, n = noiseParts(f, e, node);
+      const L = lad.sl - lad.slope * (h - 1) - 20 * Math.log10(r) - absorb(f, env.wx) * r / 1000 - excess(r, T.height) - wxLoss(r, env.wx, c, T.height) + G;
+      s += L - dbAdd(n.self, n.amb, n.wind, n.rain); } return s / 3 > hit + 7; };  // +7 dB margin: matches when the 3-rung comb + 2-of-3 rule fires in the sim
+    let a = 20, b = 8000; if (!ok(a)) return 0; for (let i = 0; i < 40; i++) { const m = (a + b) / 2; ok(m) ? a = m : b = m; } return a;
+  }
+  function rfRangeRef(env, ghz) {
+    const wx = wxOf(env), fl = rfFloor(env) + 6, cl = env.scen === 'city' ? 6 : 2;
+    const ok = d => 20 + 8 - fspl(d, ghz * 1000) - cl - rainAtt(wx, ghz, d) > fl;
+    let a = 0.05, b = 30; for (let i = 0; i < 40; i++) { const m = (a + b) / 2; ok(m) ? a = m : b = m; } return a * 1000;
+  }
+  function weatherImpact(env) {
+    const ref = Object.assign({}, env, { wx: WX_REF }), snd = e => (soundRangeRef(e, -1) + soundRangeRef(e, 0) + soundRangeRef(e, 1)) / 3;
+    const pct = (a, b) => b > 0 ? Math.round((a / b - 1) * 100) : 0, wx = wxOf(env);
+    const s = snd(env), s0 = snd(ref), up = soundRangeRef(env, -1), dn = soundRangeRef(env, 1);
+    return {
+      sound: { m: s, pct: pct(s, s0), up, dn },
+      rf24: { m: rfRangeRef(env, 2.4), pct: pct(rfRangeRef(env, 2.4), rfRangeRef(ref, 2.4)) },
+      rf58: { m: rfRangeRef(env, 5.8), pct: pct(rfRangeRef(env, 5.8), rfRangeRef(ref, 5.8)) },
+      rid: { m: ridRange(env), pct: pct(ridRange(env), ridRange(ref)) },
+      thermal: { m: OBJECTS.small.therm * thermFactor(wx), pct: pct(thermFactor(wx), thermFactor(WX_REF)) },
+      vib: { falsePerMin: vibFalseRate(wx) * 120 }
+    };
+  }
+
   // ---------- geometry ----------
   function bearing(a, b) { return (Math.atan2(b.x - a.x, -(b.y - a.y)) * 180 / Math.PI + 360) % 360; } // 0 = north (map up)
   function angDiff(a, b) { return Math.abs(((a - b) % 360 + 540) % 360 - 180); }
   const compass = b => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((b % 360) + 360) % 360 / 45) % 8];
 
-  g.SkyPhys = { BIN_HZ, FMAX, NB, HIT_DB, OBJECTS, synth, comb, rf, rfRange, rid, thermal, vibration, bearing, angDiff, compass, gauss, clamp, absorb, excess, noiseParts, objectTones, dbAdd };
+  g.SkyPhys = { TOD, WX_REF, weatherImpact, vibFalseRate, droneStrain, thermFactor, rainAtt, turbSigma, BIN_HZ, FMAX, NB, HIT_DB, OBJECTS, synth, comb, rf, rfRange, rid, thermal, vibration, bearing, angDiff, compass, gauss, clamp, absorb, excess, noiseParts, objectTones, dbAdd };
 })(typeof window !== 'undefined' ? window : globalThis);

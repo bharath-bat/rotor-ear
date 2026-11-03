@@ -17,7 +17,7 @@
 </header>
 <main>
   <section id="left">
-    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div>
+    <div id="mapwrap"><canvas id="map"></canvas><div id="clock">10:21:00</div><a id="attrib" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" hidden>© OpenStreetMap contributors</a>
       <div id="callout" hidden><div class="co-t"></div><div class="co-x"></div><button class="co-go pri">Continue ▶</button><div class="co-arrow"></div></div>
     </div>
     <div id="playbar">
@@ -40,6 +40,25 @@
           <select id="second"><option value="">nothing else</option></select></label>
         <label data-help="Which way the main object comes in.">Route <select id="route"><option value="0">NE → SW over the hub</option><option value="1">East → West, low over the building</option><option value="2">North → South, edge skim</option></select></label>
       </div>
+    </div>
+    <div class="card" id="wxcard">
+      <div class="row"><b data-help="Weather changes how far each sense reaches. Wind, rain and heat hurt sound; rain, dust and heat hurt the thermal camera; radio barely notices. All effects are rough estimates.">🌦 Weather</b><span class="muted">changes apply live</span></div>
+      <div id="presets"><button data-p="clear">☀️ Clear mild day</button><button data-p="coldnight">🌙 Clear cold night</button><button data-p="hot">🔥 Hot afternoon</button><button data-p="monsoon">🌧 Monsoon rain</button><button data-p="dusty">🌪 Dusty windy day</button></div>
+      <div class="grid2">
+        <label data-help="Wind makes low rumble on the mics (a fur windshield is assumed) and bends sound: it carries farther downwind and much less upwind. Strong wind makes light drones wobble and rattles the vibration sensor.">Wind <input id="wind" type="range" min="0" max="15" value="3"><span id="wv">3 m/s</span></label>
+        <label data-help="Where the wind blows FROM, like a weather report. The arrow on the map points where it blows TO.">Wind from <select id="wdir"><option value="0">N</option><option value="45">NE</option><option value="90">E</option><option value="135">SE</option><option value="180">S</option><option value="225">SW</option><option value="270" selected>W</option><option value="315">NW</option></select></label>
+        <label data-help="Dust and haze barely touch sound or radio, but scatter the heat the thermal camera sees, cutting its range a lot.">Dust / haze <select id="dust"><option value="0">None</option><option value="1">Light haze</option><option value="2">Heavy dust</option></select></label>
+        <label data-help="Raindrops hitting the mic and dish make a hiss that can drown the rotor ladder. Rain also blurs thermal a lot, and trims radio a little (more at 5.8 GHz).">Rain <select id="rain"><option value="0">None</option><option value="1">Drizzle</option><option value="2">Heavy rain</option></select></label>
+        <label data-help="Bangalore-style range, 15 to 38 °C. A calm cold night traps sound near the ground so it carries far; a hot sunny day bends sound upward and gives the thermal camera a warm, shimmering background." style="grid-column:span 2">Temperature &amp; time <select id="tod"><option value="coldnight">Cold night · 15 °C, calm, humid</option><option value="mildnight">Mild night · 21 °C</option><option value="mildday" selected>Mild day · 27 °C</option><option value="hotday">Hot day · 38 °C, dry, sunny</option></select></label>
+      </div>
+      <div id="impact"></div>
+    </div>
+    <div class="card" id="geocard">
+      <div class="row"><b data-help="Places the 3 × 3 km model on a real map. Tiles come from OpenStreetMap only when Street map is on. Search sends your text once to OpenStreetMap's Nominatim; Use my location stays in this page. Nothing is stored.">📍 Location &amp; map</b>
+        <div class="seg" id="mapSeg"><button data-v="grid" class="on">Plain grid</button><button data-v="street">Street map</button></div></div>
+      <form id="geoform"><input id="geoq" type="search" placeholder="Search a place, e.g. Koramangala" autocomplete="off"><button type="submit" id="geogo">Go</button><button type="button" id="geome">📍 Use my location</button></form>
+      <div class="muted" id="geostat">Indiranagar, Bangalore · 12.97190°N, 77.64120°E</div>
+      <details><summary class="muted">GPS of every sensor and object (tap)</summary><div id="gpslist"></div></details>
     </div>
     <div class="card" id="fusioncard">
       <div class="row"><b data-help="The fusion brain adds up every sensor's 'maybe'. Agreeing maybes from different senses add up fast; a single radio blip can't reach the alarm line on its own.">Fusion confidence</b><span id="pstate" class="state">Clear</span></div>
@@ -75,8 +94,7 @@
       <div class="grid2">
         <label data-help="Background noise. Quiet night lets sound travel far; a busy city day drowns it and fills the air with WiFi.">Scene <select id="scen"><option value="night">Quiet night</option><option value="city">City day</option><option value="suburb" selected>Suburb, daytime</option></select></label>
         <label data-help="Flying height of the main object. Low drones are harder for radio (buildings block) but can shake a roof.">Height <input id="height" type="range" min="10" max="150" value="60"><span id="hv">60 m</span></label>
-        <label data-help="Wind noise on the mics. A fur windshield is assumed.">Wind <input id="wind" type="range" min="0" max="12" value="3"><span id="wv">3 m/s</span></label>
-        <span></span>
+
         <label class="chk" data-help="Remote ID is a public 'here I am' broadcast many new drones send by law. Towers can read it openly within about 1 km.">  <input id="rid" type="checkbox"> Broadcasts Remote ID</label>
         <label class="chk" data-help="Off = the drone flies a pre-programmed route with its radio silent, so the radio towers can't hear it."><input id="radio" type="checkbox" checked> Radio link on</label>
       </div>

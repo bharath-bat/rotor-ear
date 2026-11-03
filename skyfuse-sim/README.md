@@ -4,6 +4,30 @@ Browser simulator of a **passive**, multi-sensor drone-detection fusion system o
 
 **Passive only:** every sensor in the model only receives. Nothing transmits at the drone, nothing is jammed or decoded. Ranges are rough model estimates, not measurements.
 
+## New: weather (wind, dust, rain, hot/cold days and nights)
+The **Weather** panel has wind speed (0–15 m/s) and direction, dust/haze (none, light, heavy), rain (none, drizzle, heavy) and temperature & time of day (cold night 15 °C, mild night 21 °C, mild day 27 °C, hot day 38 °C, a Bangalore-style range). It also has four presets: *Clear cold night, Hot afternoon, Monsoon rain, Dusty windy day*. The **Weather impact** readout shows each sensor's estimated range against a clear mild day (2 m/s wind, no dust or rain, 27 °C) in the same scene. Every number below is a **rough, commented estimate** (see `physics.js`, "weather" section) meant for teaching. None of it is a measurement.
+
+- **Sound** (the biggest effect)
+  - Wind noise at the mic: about 20·log10(v) dB, mostly below 200 Hz, with a fur windshield assumed. It rises faster above 8 m/s.
+  - Wind carries sound farther downwind (up to −5 dB of loss) and leaves an upwind shadow (up to +15 dB).
+  - Air absorption changes with humidity and temperature: dry, hot air absorbs more at high frequencies.
+  - On a hot day, sound bends upward (about +10 dB of extra loss at range, less on 8 m poles) and heat shimmer makes the signal fade.
+  - On a calm cold night, an inversion bends sound back down (about −8 dB). Wind or rain weakens this.
+  - Rain hiss adds about 12 dB of broadband noise in drizzle and 27 dB in heavy rain, and a little more with the dish.
+  - Dust has only a small effect.
+- **RF / Remote ID:** heavy rain costs about 0.15 dB/km at 5.8 GHz and almost nothing at 2.4 GHz, plus a few dB for wet foliage and surroundings. Dust is negligible.
+- **Thermal camera:** range ×1.3 on a cold night, ×1.15 on a mild night and ×0.65 on a hot day (warm background, low contrast). Rain gives ×0.7 or ×0.4 and dust ×0.8 or ×0.45.
+- **Vibration:** gusts above 8 m/s and drumming rain cause false shakes. They are logged as "probably wind/rain" and only add weak evidence.
+- **The drone:** in wind and rain, small craft wobble off their path and run their motors up to about 3 dB louder.
+
+Weather changes apply live. A preset restarts the flight and explains its effect in a callout. Tour card 7 also covers weather.
+
+## New: real map & GPS
+- **Plain grid / Street map** toggle. The street map uses OpenStreetMap raster tiles (`tile.openstreetmap.org`) with the "© OpenStreetMap contributors" credit. It uses plain JS Web-Mercator tile math, with no libraries, API keys or satellite imagery, and is meant for light demo use under the OSM tile policy. If the tiles can't load (offline, blocked), the map quietly falls back to the grid.
+- **Centre:** Indiranagar, Bangalore (12.9719 N, 77.6412 E) by default. You can search for a place (one Nominatim request, only when you press the search button) or tap **Use my location**, which uses the browser's geolocation only on that tap. Your location is not stored or sent anywhere.
+- **Coordinates:** every sensor and the drone have lat/lon, using a flat local approximation that is fine for 3 km, and the 3×3 km model stays to scale. Dragging a sensor updates its GPS. The event log and the evidence report (centre, sensors, track points, first detection by each sense) include lat/lon.
+- **No-fly hint:** a faint dashed ring marks about 5 km around HAL Airport (about 12.9499 N, 77.6682 E), labelled "approx, check Digital Sky". It is a hint, not an official zone map.
+
 ## New: pick what flies in, slow mode, guided tour
 
 - **What's flying in?** Pick a toy drone, small quad (DJI Mini class), large quad, fixed-wing, FPV racer, or a decoy: bird, passing jet or helicopter. You can also add a second object to the sky. Each one has its own sound signature, radio and Remote ID behaviour, thermal size, speed, height and map icon.
