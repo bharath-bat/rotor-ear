@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0B0D12">
+<meta name="description" content="Rotor Ear field-day kit: a beginner test plan, live score sheet, and detection-versus-range results. Everything stays on this phone. No audio leaves the device.">
+<title>Rotor Ear · Field day</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230B0D12'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23FF5A1F' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='none' stroke='%23F4F6FA' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23FF5A1F'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="field.css">
+</head>
+<body>
+<div id="exampleBanner" hidden role="status">
+  <strong>EXAMPLE data</strong> — not a real field day. Do not put these numbers in a brief.
+  <button type="button" class="banner-btn" id="btnClearExample">Clear EXAMPLE data</button>
+</div>
+
+<header class="top">
+  <div class="brand-block">
+    <p class="kicker">Rotor Ear</p>
+    <h1>Field day</h1>
+  </div>
+  <button type="button" id="btnTheme" class="icon-btn" aria-label="Switch to Sun theme">Sun</button>
+  <p class="tagline">A test plan and score sheet for real detection-vs-range and false-alarm numbers. Nothing is sent anywhere. No audio leaves this phone.</p>
+</header>
+
+<nav class="tabs" aria-label="Field day sections">
+  <button type="button" id="tab-plan" data-tab="plan" aria-current="page">Plan</button>
+  <button type="button" id="tab-log" data-tab="log">Log</button>
+  <button type="button" id="tab-results" data-tab="results">Results</button>
+</nav>
+
+<main>
+<!-- ===================== PLAN ===================== -->
+<section id="panel-plan" class="panel" data-panel="plan">
+  <article class="plan-doc">
+    <h2>What this day is for</h2>
+    <p>Rotor Ear’s demo is not field evidence. A reviewer will ask: at what range does it actually hear your drone, and how often does it cry wolf when nothing is flying? This page walks you through one careful outdoor test and turns your taps into those two numbers.</p>
+    <p>You will fly a toy drone (your NHR Fighter Jet is enough for a first day) past 3–4 phones, log each run, then leave the phones listening with the drone in the bag. At the end you get detection probability versus distance, a max reliable range (the farthest mark with at least 80% detections), false alarms per hour, and a one-page sheet you can print for an FSID or similar brief.</p>
+    <p>This kit does not listen and does not talk to Rotor Ear. Open Rotor Ear on the phones that listen. Use this page on one phone (or a spare) as the notebook.</p>
+
+    <h2>1. Legal and safety — read this first</h2>
+    <div class="callout warn" role="note">
+      <p><strong>This is not legal advice.</strong> You must check the current rules yourself before you fly.</p>
+      <ul>
+        <li>In India, check the official <a href="https://digitalsky.dgca.gov.in/" target="_blank" rel="noopener">Digital Sky</a> map for your exact spot before every flight. Zones are typically <strong>green</strong> (allowed with conditions), <strong>yellow</strong> (permission needed) and <strong>red</strong> (no flying).</li>
+        <li>Bengaluru has a lot of restricted airspace around Kempegowda International Airport, HAL airport and other sites. A park that looks open can still be yellow or red. If it is not clearly permitted, do not fly.</li>
+        <li>Even a small toy such as the NHR Fighter Jet can count as a drone under DGCA rules. Stay in visual line of sight, fly low, in daylight and good weather, away from people, buildings, vehicles, animals and power lines, and only with the landowner’s permission.</li>
+        <li>If you are unsure, do not fly. This plan is only for a legally flown toy (or another aircraft you are allowed to operate).</li>
+        <li>Rotor Ear is <strong>listen-only</strong>. Never jam, spoof, hijack or decode anyone else’s drone, and never fly toward aircraft, airports or people.</li>
+      </ul>
+    </div>
+
+    <h2>2. What to bring</h2>
+    <ul class="checks" data-check-group="kit">
+      <li><label><input type="checkbox" data-check="phones"> <span>3–4 smartphones, fully charged, plus power banks. One is the <b>screen</b> (map and alerts). The others are <b>ears</b> (they listen). A spare can run this score sheet.</span></label></li>
+      <li><label><input type="checkbox" data-check="apps"> <span>Rotor Ear open on the listening phones. Prefer <b>hotspot mode</b> so the phones talk over your Wi-Fi only, with no public relay. Open this Field day page on the logger phone. Use the <b>Sun</b> theme outdoors.</span></label></li>
+      <li><label><input type="checkbox" data-check="tape"> <span>A measuring tape (30–50 m is ideal). If you only have a short tape, measure your walking pace once and use paced metres after that.</span></label></li>
+      <li><label><input type="checkbox" data-check="marks"> <span>Markers for the range ladder: cones, chalk, tape or stones, at 2, 5, 10, 20, 30 and 50 m from the phone cluster.</span></label></li>
+      <li><label><input type="checkbox" data-check="drone"> <span>The toy drone, fully charged, plus every spare battery you have. A first day can take many short flights.</span></label></li>
+      <li><label><input type="checkbox" data-check="backup"> <span>Water, a hat, and a paper notebook as a backup if a phone dies. Optional later: a second, louder drone type (DJI-class or FPV) and a 100 m mark.</span></label></li>
+    </ul>
+
+    <h2>3. Pick a site</h2>
+    <ul>
+      <li>An open, quiet patch with at least 60 m of clear ground in one direction, away from traffic, AC units, generators, construction and loudspeakers.</li>
+      <li>Light wind is best. Note the wind in plain words: leaves still, leaves rustle, or branches move. Skip the day if it is rainy or the drone cannot hold a hover.</li>
+      <li>Write the place name (and a landmark) in the Log tab before you start. Check Digital Sky for that exact spot, not just the neighbourhood.</li>
+    </ul>
+
+    <h2>4. Lay out the phones</h2>
+    <figure class="layout-fig">
+      <svg viewBox="0 0 360 200" role="img" aria-labelledby="layoutTitle layoutDesc">
+        <title id="layoutTitle">Phone layout and range ladder</title>
+        <desc id="layoutDesc">Four phones in a 5 to 8 metre square. A tape line runs out from the cluster with marks at 2, 5, 10, 20, 30 and 50 metres, where the drone will hover or fly past.</desc>
+        <rect x="8" y="16" width="100" height="100" fill="none" stroke="currentColor" stroke-dasharray="4 4" opacity=".5"/>
+        <circle cx="28" cy="36" r="9" fill="var(--ink)"/><text x="28" y="40" text-anchor="middle" font-size="10" fill="var(--surface)">A</text>
+        <circle cx="88" cy="36" r="9" fill="var(--ink)"/><text x="88" y="40" text-anchor="middle" font-size="10" fill="var(--surface)">B</text>
+        <circle cx="28" cy="96" r="9" fill="var(--ink)"/><text x="28" y="100" text-anchor="middle" font-size="10" fill="var(--surface)">C</text>
+        <circle cx="88" cy="96" r="9" fill="var(--ink)"/><text x="88" y="100" text-anchor="middle" font-size="10" fill="var(--surface)">D</text>
+        <text x="58" y="128" text-anchor="middle" font-size="11" opacity=".8">5–8 m square</text>
+        <line x1="118" y1="66" x2="348" y2="66" stroke="currentColor" stroke-width="2"/>
+        <g font-size="10" text-anchor="middle">
+          <circle cx="148" cy="66" r="3"/><text x="148" y="84">2</text>
+          <circle cx="178" cy="66" r="3"/><text x="178" y="84">5</text>
+          <circle cx="214" cy="66" r="3"/><text x="214" y="84">10</text>
+          <circle cx="258" cy="66" r="3"/><text x="258" y="84">20</text>
+          <circle cx="298" cy="66" r="3"/><text x="298" y="84">30</text>
+          <circle cx="338" cy="66" r="3"/><text x="338" y="84">50 m</text>
+        </g>
+        <text x="240" y="108" text-anchor="middle" font-size="11" opacity=".8">hover or fly-past at each mark</text>
+        <path d="M320 44h16l-8-10 8 10-8 10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <text x="300" y="28" font-size="11" opacity=".8">drone</text>
+      </svg>
+      <figcaption>Four phones in a short square or triangle. The range marks are measured from the centre of that cluster, not from one corner phone.</figcaption>
+    </figure>
+    <ul>
+      <li>Use 3 or 4 phones, a few metres apart — a <strong>5–8 m</strong> triangle or square works well. Measure every side with the tape and write the layout in the Log tab (for example “5 m square, clap-calibrated”).</li>
+      <li>Put each phone at about the same height (~1 m on a stool, bag or low wall), microphone unobstructed, not in a pocket, screen awake. In Rotor Ear, create a room, join the ears, run a <strong>clap calibration</strong>, then tap Listen.</li>
+      <li>Stand so you are not between the drone and the microphones during a run.</li>
+    </ul>
+
+    <h2>5. Mark the range ladder</h2>
+    <p>From the centre of the phone cluster, mark <strong>2, 5, 10, 20, 30 and 50 m</strong>. A small toy is often quiet; 50 m may already be a stretch, and that is a useful result if it is. If you later test a louder drone, you can add 100 m as a custom distance in the log.</p>
+
+    <h2>6. How to fly each run</h2>
+    <ol>
+      <li><strong>Wait for a clean start.</strong> If Rotor Ear still says DRONE from the last flight, wait until it shows Drone lost and you have gone Back to watching. A leftover track will spoil the time-to-detect and can confuse a miss.</li>
+      <li>On this page, set the distance and the motion, then tap <strong>Start this run</strong> as the drone begins.</li>
+      <li><strong>Hover:</strong> hold a steady hover over the mark, about 2 m up if that is safe and allowed, for 15–20 seconds — long enough to beat Rotor Ear’s short confirm window. <strong>Fly-past:</strong> fly (or walk the drone) in a straight line whose closest point is the mark, at a similar height, and keep going past the cluster.</li>
+      <li>Watch the <em>screen</em> phone, not the ears. If it shows <strong>DRONE</strong>, tap <strong>Detected</strong> — the time-to-detect is filled in for you. Then note the class it showed (for example Quadcopter) and save. If it never confirms a drone, tap <strong>Missed</strong> and save.</li>
+      <li>If the run is spoiled (a truck, a phone call, a crash, a gust), tick <strong>Void</strong> and save. Void runs are kept in the log but do not count in the statistics.</li>
+    </ol>
+    <p>Keep height and batteries consistent. Swap batteries before the drone gets weak — a dying toy can be quieter and will bias long-range numbers. Do not talk over the microphones during a run.</p>
+
+    <h2>7. How many runs</h2>
+    <p>The target is <strong>5 hovers and 5 fly-pasts at each distance</strong> (60 flights). That is a full session plus battery swaps. Five runs at a distance gives a usable interval; ten is tighter. If batteries are short, a useful minimum is 5 total flights (any mix) at each mark — the results will say so. Log misses. If 0 out of 5 are heard at 50 m, that is the answer, not a reason to skip the row.</p>
+    <p>Start close so you know the toy is being heard, then step out. You can do all hovers first if that is easier on the drone.</p>
+
+    <h2>8. No-drone time (false alarms)</h2>
+    <p>After the ladder — or in a pause while batteries charge — put the drone away. Leave the phones listening in the same place. On the Log tab, start a <strong>no-drone session</strong> and let it run for at least <strong>30 minutes</strong>; <strong>60 minutes or more</strong> is better. If the screen says DRONE, tap <strong>Log a false alarm</strong> and note what class it showed. A car, a bird or a fan does not count unless the screen actually said DRONE.</p>
+    <p>If you can, repeat in a second setting: near a road, or in a breeze. Tag each session Quiet, Road or Wind. More no-drone hours make the false-alarm number more believable.</p>
+
+    <h2>9. After the day</h2>
+    <ul>
+      <li>Open Results. Check that every real row is yours, not EXAMPLE data.</li>
+      <li>Export JSON (the full record) and CSV (a spreadsheet). Keep a copy off the phone. The data lives in this phone’s local storage until you clear it; it is not uploaded.</li>
+      <li>Print or save a PDF of the one-page results sheet for a brief. The sheet includes an honest caveat: one site, one drone type, a prototype — not a fielded-system rating.</li>
+    </ul>
+
+    <h2>What these numbers can and cannot say</h2>
+    <p>They can say how this build of Rotor Ear, on these phones, heard this toy, at this place, in this weather. They cannot rate Rotor Ear against a military drone, a different city, wind and rain it has not seen, or a fielded C-UAS product. Say that plainly in any brief.</p>
+
+    <p class="plan-cta">When the kit is packed and the site is legal to fly, go to the <button type="button" class="text-link" data-tab="log">Log tab</button> and fill in the session header first. To see what a finished sheet looks like, use <button type="button" class="text-link" id="btnLoadExamplePlan">Load EXAMPLE data</button> — it is marked EXAMPLE everywhere and is not for a brief.</p>
+  </article>
+</section>
+
+<!-- ===================== LOG ===================== -->
+<section id="panel-log" class="panel" data-panel="log" hidden>
+  <div class="log-grid">
+    <div class="col">
+      <h2>Session</h2>
+      <p class="hint">Fill this in once at the start. New runs pick up the drone and weather unless you change them on the run.</p>
+      <form id="metaForm" class="card form" autocomplete="off">
+        <label>Date <input id="metaDate" type="date" required></label>
+        <label>Site <input id="metaSite" type="text" maxlength="120" placeholder="Park name, landmark, city"></label>
+        <label>Phones
+          <select id="metaPhones">
+            <option value="1">1 (solo, no direction)</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4" selected>4</option>
+            <option value="5">5+</option>
+          </select>
+        </label>
+        <label>Layout <input id="metaLayout" type="text" maxlength="160" placeholder="e.g. 5 m square, tape-measured, clap-calibrated"></label>
+        <label>Default drone <input id="metaDrone" type="text" maxlength="80" placeholder="NHR Fighter Jet (toy)" value=""></label>
+        <label>Weather / wind <input id="metaWeather" type="text" maxlength="160" placeholder="e.g. Clear, leaves rustle"></label>
+        <label class="full">Notes <input id="metaNotes" type="text" maxlength="200" placeholder="Optional: permission, Digital Sky zone, height you will fly"></label>
+      </form>
+
+      <h2>Log a run</h2>
+      <form id="runForm" class="card form" autocomplete="off">
+        <input type="hidden" id="runId">
+        <div class="field">
+          <span class="lbl">Distance</span>
+          <div class="chips" id="distChips" role="group" aria-label="Distance">
+            <button type="button" data-dist="2">2 m</button>
+            <button type="button" data-dist="5">5 m</button>
+            <button type="button" data-dist="10">10 m</button>
+            <button type="button" data-dist="20">20 m</button>
+            <button type="button" data-dist="30">30 m</button>
+            <button type="button" data-dist="50">50 m</button>
+            <button type="button" data-dist="other">Other</button>
+          </div>
+          <label id="otherDistWrap" hidden>Other distance (m) <input id="distOther" type="number" min="0.5" max="2000" step="0.5" inputmode="decimal"></label>
+        </div>
+        <div class="field">
+          <span class="lbl">Motion</span>
+          <div class="chips" id="motionChips" role="group" aria-label="Motion">
+            <button type="button" data-motion="hover">Hover</button>
+            <button type="button" data-motion="flypast">Fly-past</button>
+          </div>
+        </div>
+        <label>Drone <input id="runDrone" type="text" maxlength="80" placeholder="NHR Fighter Jet (toy)"></label>
+        <label>Weather / wind notes <input id="runWeather" type="text" maxlength="160" placeholder="Leave blank to use the session weather"></label>
+        <div class="run-clock card-inset">
+          <div class="clock-row">
+            <span id="runClock" class="clock">0.0 s</span>
+            <button type="button" id="btnStartRun" class="btn primary">Start this run</button>
+          </div>
+          <p class="hint">Tap Start when the hover begins or the fly-past starts, then Detected or Missed.</p>
+          <div class="btn-row">
+            <button type="button" id="btnDetected" class="btn yes">Detected</button>
+            <button type="button" id="btnMissed" class="btn no">Missed</button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="lbl">Outcome</span>
+          <p id="outcomeLabel" class="outcome-label">Not set yet</p>
+        </div>
+        <label id="ttdWrap">Time to detect (s) <input id="runTtd" type="number" min="0" max="300" step="0.1" inputmode="decimal" placeholder="Seconds from start to DRONE"></label>
+        <label>Class shown
+          <select id="runClass">
+            <option value="">Not noted</option>
+            <option>Quadcopter</option>
+            <option>Micro drone</option>
+            <option>Fixed-wing</option>
+            <option>Not a drone</option>
+            <option>Other</option>
+          </select>
+        </label>
+        <label>Phones agreeing <input id="runAgree" type="text" maxlength="40" placeholder="e.g. 3 of 4"></label>
+        <label>Notes <input id="runNotes" type="text" maxlength="200" placeholder="Optional"></label>
+        <label class="check"><input type="checkbox" id="runVoid"> Void / spoiled — do not count in the results</label>
+        <div class="btn-row">
+          <button type="submit" id="btnSaveRun" class="btn primary">Save run</button>
+          <button type="button" id="btnResetRun" class="btn">Clear form</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="col">
+      <h2>Progress</h2>
+      <p class="hint">Target is 5 hovers and 5 fly-pasts at each mark. Custom distances appear as extra rows.</p>
+      <div id="progress" class="card table-wrap"></div>
+
+      <h2>No-drone session</h2>
+      <div class="card quiet-card">
+        <p class="hint">Drone in the bag. Phones still listening. Log a false alarm only when the screen says DRONE.</p>
+        <label>Setting
+          <select id="quietSetting">
+            <option value="quiet">Quiet</option>
+            <option value="road">Road / traffic</option>
+            <option value="wind">Wind</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label>Session notes <input id="quietNotes" type="text" maxlength="160" placeholder="Optional"></label>
+        <p id="quietClock" class="clock big">00:00</p>
+        <p id="quietStatus" class="hint">No session running.</p>
+        <div class="btn-row">
+          <button type="button" id="btnStartQuiet" class="btn primary">Start no-drone</button>
+          <button type="button" id="btnStopQuiet" class="btn" disabled>Stop</button>
+        </div>
+        <button type="button" id="btnLogFa" class="btn warn-btn" disabled>Log a false alarm</button>
+        <form id="faForm" class="form fa-form" hidden autocomplete="off">
+          <p class="lbl">False alarm at <span id="faWhen"></span></p>
+          <label>Class shown
+            <select id="faClass">
+              <option value="">Not noted</option>
+              <option>Quadcopter</option>
+              <option>Micro drone</option>
+              <option>Fixed-wing</option>
+              <option>Not a drone</option>
+              <option>Other</option>
+            </select>
+          </label>
+          <label>Notes <input id="faNotes" type="text" maxlength="200" placeholder="What was actually happening?"></label>
+          <div class="btn-row">
+            <button type="submit" class="btn primary">Save false alarm</button>
+            <button type="button" id="btnCancelFa" class="btn">Cancel</button>
+          </div>
+        </form>
+      </div>
+
+      <h2>Runs <small id="runCount"></small></h2>
+      <div id="runsList" class="list"></div>
+
+      <h2>No-drone log <small id="quietCount"></small></h2>
+      <div id="quietList" class="list"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section id="panel-results" class="panel" data-panel="results" hidden>
+  <div id="resultsEmpty" class="card empty" hidden>
+    <p>No field data yet. Log runs and a no-drone session, or load EXAMPLE data to see how a finished sheet looks.</p>
+    <button type="button" id="btnLoadExampleEmpty" class="btn primary">Load EXAMPLE data</button>
+  </div>
+
+  <div id="resultsBody">
+    <p id="exampleResultsMark" class="example-mark" hidden>EXAMPLE data — not a real field day. Do not use these numbers in a brief.</p>
+
+    <div class="headline" id="headlines"></div>
+
+    <div class="results-grid">
+      <div>
+        <h2>Detection vs range</h2>
+        <p class="hint">Pd is detections ÷ counted runs at that distance (hover and fly-past together). Bars are Wilson 95% intervals. The dashed line is the 80% reliable-range mark.</p>
+        <div id="chart" class="card chart-card"></div>
+        <div id="pdTable" class="card table-wrap"></div>
+      </div>
+      <div>
+        <h2>Hover vs fly-past</h2>
+        <div id="motionTable" class="card table-wrap"></div>
+        <h2>Time to detect</h2>
+        <p class="hint">Seconds from run start to a DRONE on the screen, on detected runs only.</p>
+        <div id="ttdTable" class="card table-wrap"></div>
+        <h2>False alarms</h2>
+        <div id="faBlock" class="card"></div>
+      </div>
+    </div>
+
+    <h2>Summary for a brief</h2>
+    <div id="summary" class="card summary"></div>
+
+    <div class="actions-bar">
+      <button type="button" id="btnLoadExample" class="btn example-btn">Load EXAMPLE data</button>
+      <button type="button" id="btnExportJson" class="btn">Export JSON</button>
+      <button type="button" id="btnExportCsv" class="btn">Export CSV</button>
+      <button type="button" id="btnCopyJson" class="btn">Copy JSON</button>
+      <button type="button" id="btnPrint" class="btn primary">Print one-page sheet</button>
+      <label class="btn file-btn">Import JSON<input type="file" id="importFile" accept="application/json,.json"></label>
+      <button type="button" id="btnClearAll" class="btn danger">Clear all data…</button>
+    </div>
+    <p class="hint">JSON is the full record; CSV opens in a spreadsheet. Everything stays on this phone until you export or clear it. Nothing is sent anywhere.</p>
+  </div>
+</section>
+</main>
+
+<!-- Printable one-page sheet (on-screen hidden; used for print) -->
+<section id="printSheet" aria-label="Printable results sheet">
+  <p id="printExample" class="example-mark" hidden>EXAMPLE data — not a real field day. Do not use these numbers in a brief.</p>
+  <header class="print-head">
+    <p class="kicker">Rotor Ear</p>
+    <h1>Field-day results</h1>
+  </header>
+  <p id="printMeta" class="print-meta"></p>
+  <div class="print-cols">
+    <div>
+      <h2>Detection vs range</h2>
+      <div id="printChart"></div>
+      <div id="printPd"></div>
+    </div>
+    <div>
+      <h2>Headline numbers</h2>
+      <div id="printHead"></div>
+      <h2>False alarms</h2>
+      <div id="printFa"></div>
+    </div>
+  </div>
+  <h2>Summary</h2>
+  <div id="printSummary" class="summary"></div>
+  <footer class="print-foot">
+    <p>Prototype test of a listen-only phone detector. Figures are for the drone, site, phones and weather logged above — not a fielded-system rating, and not a claim about military aircraft. No audio left the phones; this sheet is numbers only.</p>
+    <p id="printStamp"></p>
+  </footer>
+</section>
+
+<script src="field.js"></script>
+</body>
+</html>
