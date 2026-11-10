@@ -4,14 +4,37 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0B0D12">
+<meta name="description" content="Passive drone-sound detector. Phones listen for rotor hum and share only numbers, never audio.">
+<meta property="og:title" content="Rotor Ear">
+<meta property="og:description" content="Passive drone-sound detector. Phones listen for rotor hum and share only numbers, never audio.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bharath-bat.github.io/rotor-ear/">
+<meta property="og:image" content="https://bharath-bat.github.io/rotor-ear/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rotor Ear">
+<meta name="twitter:description" content="Passive drone-sound detector. Phones listen for rotor hum and share only numbers, never audio.">
+<meta name="twitter:image" content="https://bharath-bat.github.io/rotor-ear/og.png">
 <title>Rotor Ear</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="watch.css">
 </head>
 <body>
+<aside id="desk">
+  <div class="desk-mark" aria-hidden="true"><img src="favicon.svg" alt=""></div>
+  <h1>Rotor Ear</h1>
+  <p>Passive drone-sound detector. Phones listen for rotor hum and share only numbers, never audio.</p>
+  <p><a href="#docs" data-go="docs">How it works /<br>how the phones talk</a></p>
+  <p class="desk-note">Built for a phone. On a wide screen it sits in a phone frame — try the 60-second demo.</p>
+  <p><a href="#demo" data-go="demo">Try the 60-second demo</a></p>
+</aside>
+<div id="stage">
 <!-- One app, one link. Modes: #screen (watch post), #ear (listening phone), #demo (simulated). ?room=… joins as an ear. -->
 <section id="home" class="mode" hidden>
   <h1 class="brand">Rotor Ear</h1>
   <p class="lead">Listens for drone rotors. Passive: it never transmits. Phones share only numbers, never audio.</p>
+  <p class="how"><a href="#docs" data-go="docs">How it works / how the phones talk</a></p>
   <button class="choice" data-go="screen"><i aria-hidden="true">▣</i><span><b>Be the screen</b><small>Status, map and alerts. Other phones join this one.</small></span></button>
   <button class="choice" data-go="ear"><i aria-hidden="true">◉</i><span><b>Be an ear</b><small>This phone listens and sends numbers to a screen.</small></span></button>
   <button class="choice demo" data-go="demo"><i aria-hidden="true">▷</i><span><b>Watch a demo</b><small>60 s on 4 simulated phones, marked DEMO throughout.</small></span></button>
@@ -22,6 +45,28 @@
   </div>
   <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
   <p class="note">Best with 3–4 phones a few metres apart. Works alone too, without direction.</p>
+</section>
+
+
+<!-- in-app docs: how it works / how the phones talk -->
+<section id="docs" class="mode" hidden>
+  <div class="mhead"><button class="modes" data-go="home">‹ Modes</button><span>How it works</span></div>
+  <h1 class="brand">How it works</h1>
+  <p class="lead">Rotor Ear is a listen-only detector. It uses a phone’s microphone to look for a steady rotor hum and its overtones. It never transmits, and phones never send audio to each other or anywhere else.</p>
+
+  <h2>How the phones talk</h2>
+  <p>One phone is the <b>screen</b> (the map and alerts). The others are <b>ears</b> (they listen). About eight times a second an ear sends only numbers: a rotor score, pitch, loudness, and the times of envelope peaks. Never a recording.</p>
+  <p>When every ear can reach the screen, it talks to the screen directly. If an ear loses that link, it keeps reporting <b>through a neighbour ear</b> that still has one — as many hops as it takes, up to six. What it sends through others is <b>sealed</b> (encrypted and authenticated) for the screen, so the phones in between carry it but cannot read or change it.</p>
+  <p>If no neighbour can reach the screen either, the ear keeps listening, queues the numbers, and catches up when a path comes back.</p>
+  <p>With no internet, use <b>hotspot mode</b>: one phone turns on a hotspot, the others join it, then they pair by scanning codes. After that they talk only over that Wi-Fi — no relay server.</p>
+  <p>In the 60-second demo, four simulated phones run this same code. <b>Cut a link</b> on the map breaks a path; you should see the route move (for example “Ear C via B, 2 hops · sealed”) and then heal.</p>
+
+  <h2>What you will see</h2>
+  <p>A harmonic hum is held for a moment (<b>Checking</b>) before it can become a <b>DRONE</b>. Fans, mains hum and similar sounds are labelled <b>Not a drone</b> and ignored. With several phones, the screen estimates a position from loudness and arrival times, and a rough height when the layout allows it. Tight swarms and one phone alone cannot give a precise direction.</p>
+
+  <h2>Honest limits</h2>
+  <p>Timing between phones is only as good as each microphone’s unknown latency — often metres, not centimetres, until you calibrate with a clap. Fingerprints and “same drone again?” tags were tuned on synthetic sound; drones of one model can sound alike. Height is a fit, not a measurement, and is often “unknown”. This is a prototype you can try on real phones, not a fielded defence system.</p>
+  <p class="note"><a href="README.md">Full notes and test list (README)</a></p>
 </section>
 
 <!-- ear: a listening phone in a room -->
@@ -146,8 +191,10 @@
     <div id="mapTag">MAP · this phone only until others join</div>
     <div id="mapInfo"></div>
     <div id="handoff" hidden></div>
+    <div id="mapTools">
     <button id="tripBtn" aria-label="Tripwire lines">Tripwire</button>
     <button id="cutBtn" hidden aria-label="Cut a link between phones (demo)">✂ Cut a link</button>
+    </div>
     <div id="tripDraw" hidden><span id="tripDrawT">Tap one end of the tripwire on the map</span><button id="tripCancel">Cancel</button></div>
     <div id="side" hidden><canvas></canvas><span id="sideT"></span></div>
     <button id="addPhones" hidden><b>+ Add phones for a position</b><small>opens the Phones sheet</small></button>
@@ -316,12 +363,7 @@
     <div class="grab"></div>
     <div class="shead"><h2>More</h2></div>
     <div class="k">Theme</div>
-    <div class="hotspot" id="homeHot">
-    <div class="k">No internet? Use hotspot mode</div>
-    <p class="note">One phone turns on hotspot, others join it, then scan codes. Then phones talk over that Wi-Fi only: no relay, no internet.</p>
-    <div class="trow"><button class="btn" data-go="screen&amp;net=hotspot">Screen · hotspot</button><button class="btn" data-go="ear&amp;net=hotspot">Ear · hotspot</button></div>
-  </div>
-  <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
+    <div class="seg"><button data-theme="dark">Night</button><button data-theme="sun">Sun (outdoors)</button></div>
     <div class="k">Sound</div>
     <div class="tbtns"><button class="btn" id="mMute">Mute 5 min</button><button class="btn" id="mTest">Test alert</button></div>
     <div class="k">Demo</div>
@@ -331,12 +373,16 @@
     <div class="tbtns"><button class="btn" id="mTags">Drone tags</button><button class="btn" id="mTrip">Tripwire lines</button></div>
     <div class="k">Mode</div>
     <button class="btn wide" data-go="home">Switch mode · screen / ear / demo</button>
+    <div class="k">Hotspot</div>
+    <p class="note">No internet? One phone turns on hotspot, others join it, then scan codes. Then phones talk over that Wi-Fi only: no relay, no internet.</p>
+    <div class="trow"><button class="btn" data-go="screen&amp;net=hotspot">Screen · hotspot</button><button class="btn" data-go="ear&amp;net=hotspot">Ear · hotspot</button></div>
     <div class="k">This device</div>
     <div id="devNotes" class="note">Notes appear once you start listening.</div>
     <button class="done" data-close>Done</button>
   </section>
 </main>
 <button id="tapStart" hidden>▷ Tap to start</button>
+</div><!-- #stage -->
 <script src="app.js"></script>
 <script src="detector.js"></script>
 <script src="mesh/peerjs.min.js"></script>

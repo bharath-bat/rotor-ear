@@ -12,6 +12,8 @@ The link opens a start screen with three choices. Switching modes doesn't reload
 - **Be an ear** (`#ear`): this phone listens and sends numbers to a screen. Its join link is `?room=CODE`, which lands here. Without a code it asks for one.
 - **Watch a demo** (`#demo`): the scripted 60 s demo on the screen. `#demo&room=CODE` instead runs simulated phones that report to that room's screen over the relay (the old simulator).
 
+A **How it works / how the phones talk** link on the start screen opens `#docs` (neighbour relay, sealed packets, hotspot, and honest limits). The full notes stay in this README.
+
 The start screen also has **No internet? Use hotspot mode** (`#screen&net=hotspot`, `#ear&net=hotspot`). It's an extra option: the relay mode above stays the default. See [Hotspot mode](#hotspot-mode-no-internet).
 
 Old links and QR codes still work:
